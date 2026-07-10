@@ -29,6 +29,11 @@ default_password = "changeme"
 # dkim_selector = "mail"
 # dkim_key_file = "dkim.pem"
 
+# Webmail + admin UI (HTTP/1.1, pure std). Empty string disables.
+web_listen = "0.0.0.0:8080"
+# Login name that may access /admin. Leave unset or empty to disable admin.
+# admin_user = "postmaster"
+
 [users]
 # local-part or full address = "password"
 # Passwords are stored in plain text for simplicity in this zero-dep version.

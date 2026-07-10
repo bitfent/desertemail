@@ -40,7 +40,7 @@ impl Maildir {
                 .open(&tmp_path)?;
             let received = format!(
                 "Received: from desertemail by localhost; {}\r\n",
-                chrono_like()
+                util::rfc2822_date(util::now_secs())
             );
             f.write_all(received.as_bytes())?;
             let _ = from;
@@ -144,16 +144,6 @@ fn sanitize(s: &str) -> String {
 
 fn hostname_safe() -> String {
     format!("de{}", std::process::id() % 10000)
-}
-
-fn chrono_like() -> String {
-    let secs = util::now_secs();
-    let rem = secs % 86400;
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let s = rem % 60;
-    let year = 1970 + (secs / 31536000);
-    format!("1 Jan {} {:02}:{:02}:{:02} +0000", year, h, m, s)
 }
 
 fn hash_name(name: &str) -> u32 {

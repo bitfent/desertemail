@@ -13,6 +13,7 @@ mod queue;
 mod smtp;
 mod storage;
 mod util;
+mod web;
 
 use std::env;
 use std::net::TcpListener;
@@ -121,6 +122,11 @@ fn main() {
 
     // Outbound MTA queue worker (MX / smarthost delivery + retries)
     queue::start_worker(Arc::clone(&cfg));
+
+    // Webmail + admin UI (optional; disabled when web_listen is empty)
+    if !cfg.web_listen.is_empty() {
+        web::start(Arc::clone(&cfg));
+    }
 
     let smtp_listener = match TcpListener::bind(&cfg.smtp_listen) {
         Ok(l) => l,

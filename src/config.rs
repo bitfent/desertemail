@@ -26,6 +26,10 @@ pub struct Config {
     pub dkim_key_file: Option<String>,
     /// Loaded at startup; None if missing/unparseable.
     pub dkim_key: Option<RsaKey>,
+    /// HTTP webmail/admin listen address. Empty string disables the web UI.
+    pub web_listen: String,
+    /// Login name allowed to access /admin. None or empty disables admin page.
+    pub admin_user: Option<String>,
 }
 
 impl Default for Config {
@@ -45,6 +49,8 @@ impl Default for Config {
             dkim_selector: "mail".into(),
             dkim_key_file: None,
             dkim_key: None,
+            web_listen: "0.0.0.0:8080".into(),
+            admin_user: None,
         }
     }
 }
@@ -73,13 +79,18 @@ impl Config {
                 Some(i) => i,
                 None => return Err(format!("line {}: expected key = value", lineno + 1)),
             };
-            let key = line[..eq].trim().to_lowercase();
+            let mut key = line[..eq].trim().to_lowercase();
             let mut val = line[eq + 1..].trim().to_string();
 
             if let Some(hash) = val.find('#') {
                 val = val[..hash].trim().to_string();
             }
 
+            if (key.starts_with('"') && key.ends_with('"'))
+                || (key.starts_with('\'') && key.ends_with('\''))
+            {
+                key = key[1..key.len() - 1].to_string();
+            }
             if (val.starts_with('"') && val.ends_with('"'))
                 || (val.starts_with('\'') && val.ends_with('\''))
             {
@@ -101,6 +112,14 @@ impl Config {
                 ("", "default_password") => cfg.default_password = val,
                 ("", "dkim_selector") => cfg.dkim_selector = val,
                 ("", "dkim_key_file") => cfg.dkim_key_file = Some(val),
+                ("", "web_listen") => cfg.web_listen = val,
+                ("", "admin_user") => {
+                    if val.is_empty() {
+                        cfg.admin_user = None;
+                    } else {
+                        cfg.admin_user = Some(val.to_lowercase());
+                    }
+                }
                 ("users", k) => {
                     cfg.users.insert(k.to_string(), val);
                 }

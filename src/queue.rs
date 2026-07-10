@@ -86,6 +86,48 @@ pub fn enqueue(
     Ok(id)
 }
 
+/// List all messages currently in the outbound queue (metadata + raw body).
+pub fn list_queue(data_dir: &str) -> io::Result<Vec<QueueMessage>> {
+    let dir = queue_dir(data_dir);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries: Vec<PathBuf> = fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "msg").unwrap_or(false))
+        .collect();
+    entries.sort();
+    let mut out = Vec::new();
+    for path in entries {
+        match load_message(&path) {
+            Ok(msg) => out.push(msg),
+            Err(e) => util::log!("queue: list skip {}: {}", path.display(), e),
+        }
+    }
+    Ok(out)
+}
+
+/// Remove a queue file by id. Returns true if a file was deleted.
+pub fn delete_queued(data_dir: &str, id: &str) -> io::Result<bool> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.contains('\0')
+    {
+        return Ok(false);
+    }
+    let path = queue_dir(data_dir).join(format!("{}.msg", id));
+    if path.is_file() {
+        fs::remove_file(&path)?;
+        util::log!("queue: deleted {} by admin", id);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Start background worker that scans the queue every 30s.
 pub fn start_worker(cfg: Arc<Config>) {
     thread::spawn(move || {
