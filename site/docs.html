@@ -5,6 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DesertEmail Docs — install, config, security</title>
 <meta name="description" content="What DesertEmail installs, how to configure it, DNS setup, security notes, and FAQ.">
+<!-- Open Graph / social preview. __OG_BASE__ is stamped with the site origin by site-build.sh. -->
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="DesertEmail">
+<meta property="og:title" content="DesertEmail Docs — how it works & what you install">
+<meta property="og:description" content="Exactly what the installer puts on your machine, the full config reference, TLS setup, DNS, and honest security notes for the pure-Rust mail server.">
+<meta property="og:url" content="__OG_BASE__/docs.html">
+<meta property="og:image" content="__OG_BASE__/og.png">
+<meta property="og:image:secure_url" content="__OG_BASE__/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="DesertEmail — pixel-art cactus with the tagline: your own email server, one command, runs on a $5 Pi.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="DesertEmail Docs — how it works & what you install">
+<meta name="twitter:description" content="What the installer puts on your machine, config reference, TLS setup, and honest security notes.">
+<meta name="twitter:image" content="__OG_BASE__/og.png">
+<meta name="twitter:image:alt" content="DesertEmail — pixel-art cactus and value proposition.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2012%2016'%20shape-rendering='crispEdges'%3E%3Crect%20x='6'%20y='0'%20width='1'%20height='1'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='3'%20height='15'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='1'%20height='15'%20fill='%23FFB03A'/%3E%3Crect%20x='7'%20y='1'%20width='1'%20height='15'%20fill='%23B35E00'/%3E%3Crect%20x='1'%20y='4'%20width='2'%20height='5'%20fill='%23E8850C'/%3E%3Crect%20x='1'%20y='4'%20width='1'%20height='5'%20fill='%23FFB03A'/%3E%3Crect%20x='3'%20y='7'%20width='2'%20height='2'%20fill='%23E8850C'/%3E%3Crect%20x='3'%20y='8'%20width='2'%20height='1'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='2'%20height='6'%20fill='%23E8850C'/%3E%3Crect%20x='10'%20y='5'%20width='1'%20height='6'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='1'%20height='1'%20fill='%23FFB03A'/%3E%3Crect%20x='8'%20y='9'%20width='1'%20height='2'%20fill='%23E8850C'/%3E%3C/svg%3E">
 <style>
   :root {

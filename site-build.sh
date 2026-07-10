@@ -144,6 +144,18 @@ else
   printf '%s\n' "site-build: no bin-dist/; skipping site/bin/"
 fi
 
+# Stamp the absolute site origin into the Open Graph / Twitter meta tags.
+# Social crawlers (WhatsApp especially) require ABSOLUTE og:image URLs, so the
+# committed HTML keeps a __OG_BASE__ placeholder that we replace at build time.
+# In place is fine: Render builds a throwaway checkout; local runs restore via git.
+for _html in "${SITE_DIR}/index.html" "${SITE_DIR}/docs.html"; do
+  if [ -f "${_html}" ] && grep -q '__OG_BASE__' "${_html}"; then
+    _tmp="${_html}.tmp.$$"
+    sed "s|__OG_BASE__|${BASE_URL}|g" "${_html}" > "${_tmp}" && mv "${_tmp}" "${_html}"
+    printf '%s\n' "stamped OG base ${BASE_URL} -> $(basename "${_html}")"
+  fi
+done
+
 # Remove legacy single installer if still present from older layout
 if [ -f "${SITE_DIR}/install.sh" ]; then
   rm -f "${SITE_DIR}/install.sh"

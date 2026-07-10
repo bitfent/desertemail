@@ -52,6 +52,9 @@ cleanup() {
   if [ -f "${REPO}/site-build.sh" ]; then
     SITE_BASE_URL=http://127.0.0.1:4173 sh "${REPO}/site-build.sh" >/dev/null 2>&1 || true
   fi
+  # site-build stamps the OG base URL into the tracked HTML; restore the
+  # committed placeholder so the test never leaves the working tree dirty.
+  git -C "${REPO}" checkout -- site/index.html site/docs.html 2>/dev/null || true
   return "${_ec}"
 }
 trap cleanup EXIT INT HUP TERM
