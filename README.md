@@ -184,20 +184,47 @@ cargo build --release
 
 The release profile is size-optimized (`opt-level = "z"`, LTO, strip). With rustls+ring the binary is roughly **~1.2 MB**.
 
+## Hardening roadmap (MVP → production self-hostable)
+
+DesertEmail is an educational / personal-use MVP today. The gap to a hardened,
+internet-facing mail server is tracked below, in priority order. **We intend to
+work through these as soon as possible.** Until Tier 1 is done, run it only on a
+LAN, over a VPN/Tailscale, or behind a TLS-terminating proxy — not on the open
+internet with real credentials.
+
+**Guiding principle:** keep the core hand-rolled and small, but shell out to
+battle-tested tools where rolling our own is a bad trade (spam filtering, TLS
+cert issuance). Treat a security audit + fuzzing of the hand-rolled parsers as a
+hard gate before pointing MX at it.
+
+### Tier 1 — Security must-haves (block public exposure on these)
+- [ ] **Password hashing** — stop storing plaintext passwords in `config.toml`; use argon2id (verify against a hash).
+- [ ] **Fix the auth model** — `catch_all = true` + `default_password` currently lets *any* username authenticate with the default password. Require real per-user credentials; make insecure defaults (`default_password`, `catch_all = true`) opt-in.
+- [ ] **Rate limiting / brute-force lockout** on SMTP AUTH, IMAP LOGIN, and webmail login.
+- [ ] **Connection limits** — cap concurrent connections (global + per-IP) and enforce idle timeouts; thread-per-connection is unbounded today (DoS/slowloris risk).
+- [ ] **Parser hardening** — sweep hand-rolled parsers for `unwrap`/indexing/overflow (a panic in a handler is a remote DoS), then `cargo-fuzz` SMTP/IMAP/DNS/MIME/config.
+- [ ] **Relay/loop/abuse audit** — prove port 25 only accepts local domains (not an open relay), add a max-Received-hops loop guard, throttle outbound so a compromised account can't become a spam cannon.
+
+### Tier 2 — Inbound trust & deliverability (needed for real-world mail)
+- [ ] **Inbound SPF check, DKIM verify, DMARC evaluation** (we sign outbound DKIM but accept anything inbound today).
+- [ ] **Greylisting + blocklist (RBL) lookups**; spam scoring (consider integrating rspamd rather than hand-rolling).
+- [ ] **Deliverability ops** — rDNS/PTR, MTA-STS, TLS-RPT, IP warm-up (SPF/DKIM publishing already supported).
+
+### Tier 3 — Protocol completeness & reliability
+- [ ] **IMAP gaps** — `SEARCH` (currently errors), `IDLE` (push; mobile clients need it), `APPEND`, robust flag/UID persistence.
+- [ ] **ACME / Let's Encrypt** auto-issue + renewal (certs are BYO today).
+- [ ] **Graceful shutdown** (drain connections + flush queue on SIGTERM), **per-user quotas**, **structured logs** (fail2ban-friendly).
+
+### Tier 4 — Assurance & ops
+- [ ] Security audit sign-off + load testing.
+- [ ] Backup/restore docs, monitoring, alerting.
+- [ ] User management without editing config + restart (add/remove users; optional web admin CRUD).
+
 ## Extending / Contributing
 
-This is intentionally minimal so you can:
-
-1. Read the SMTP/IMAP/DKIM RFCs alongside the code.
-2. Add ACME / Let's Encrypt auto-renewal (certs are BYO today).
-3. Make full asynchronous with tokio (if you accept the dep).
-4. Add proper password hashing (argon2id pure Rust exists).
-
-PRs welcome! Especially:
-
-- Better IMAP (SEARCH, IDLE, APPEND for drafts)
-- Config hot-reload
-- Metrics / Prometheus exporter (text)
+This is intentionally minimal so you can read the SMTP/IMAP/DKIM RFCs alongside
+the code and extend it. See the hardening roadmap above for the highest-value
+work; PRs welcome, Tier 1 especially.
 
 ## License
 
