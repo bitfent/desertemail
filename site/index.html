@@ -382,7 +382,7 @@
     </svg>
     <div>
       <h1>DesertEmail</h1>
-      <p class="tagline">A from-scratch pure-Rust email server for tiny machines — zero dependencies, one binary.</p>
+      <p class="tagline">A from-scratch pure-Rust email server for tiny machines — TLS via rustls, one binary.</p>
     </div>
   </header>
 
@@ -405,8 +405,8 @@
     <p class="note" id="android-note">Install Termux from F-Droid, run <code>pkg install curl openssl</code>, no root needed on high ports.</p>
     <p class="note" id="install-hint">Downloads a prebuilt static binary from this site — no local compile, no toolchain.</p>
     <div class="stats">
-      <span class="stat">~488 KB binary</span>
-      <span class="stat">0 crates</span>
+      <span class="stat">~1.2 MB binary</span>
+      <span class="stat">1 DEP: RUSTLS</span>
       <span class="stat">runs in 128 MB RAM</span>
     </div>
   </section>
@@ -428,7 +428,7 @@
         </tbody>
       </table>
     </div>
-    <p class="note">Everything on board: SMTP (receive + submit) · IMAP · webmail + admin UI · DKIM signing · outbound MTA with retry queue.</p>
+    <p class="note">Everything on board: SMTP (receive + submit) · IMAP · webmail + admin UI · DKIM signing · outbound MTA with retry queue · TLS/STARTTLS.</p>
   </section>
 
   <section class="pix-panel" aria-labelledby="inst-h">

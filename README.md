@@ -1,6 +1,6 @@
 # DesertEmail 🏜️📧
 
-**A truly minimal, from-scratch open-source email server written in pure Rust with ZERO external dependencies.**
+**A pure-Rust, from-scratch open-source email server. The only dependency is rustls for TLS — because you should never roll your own crypto.**
 
 Designed to run on the tiniest computers: Raspberry Pi Zero, old netbooks, VPS with 128MB RAM, anything with a public IP (or port-forward + DynDNS).
 
@@ -8,15 +8,15 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 
 ## Why DesertEmail?
 
-- **From scratch**: SMTP (receive + submit) and IMAP protocols implemented by hand. No lettre, no mail-parser crates, no heavy frameworks.
-- **Zero deps**: Only the Rust standard library. Binary is tiny (~300-500KB stripped). Compiles everywhere.
+- **From scratch**: SMTP (receive + submit), IMAP, webmail, DKIM, DNS, and HTTP are hand-rolled pure `std`. No lettre, no mail-parser crates, no async runtime (no tokio).
+- **TLS via rustls only**: The deliberate exception. Server STARTTLS + implicit SMTPS/IMAPS/HTTPS, and outbound opportunistic STARTTLS with webpki-roots validation. Binary is ~1.2MB stripped with rustls+ring.
 - **Low resource**: Perfect for always-on home servers. Uses threads (not async) for simplicity and tiny footprint.
 - **Open source**: MIT/Apache-2.0. Fork, improve, self-host forever.
 - **DNS ready**: Full instructions for MX/A/SPF. Or use the built-in **auto-routing** mode that accepts any address under your domain and maps to local mailboxes (or a catch-all).
 - **Maildir storage**: Standard, simple, filesystem-based. Easy to backup, rsync, or even mount remotely.
-- **Secure-ish by design**: Passwords (plain for simplicity; hash later), AUTH PLAIN, basic command validation. Add TLS via stunnel/socat or future rustls.
+- **Secure-ish by design**: Passwords (plain for simplicity; hash later), AUTH PLAIN, basic command validation. Built-in TLS when you supply a cert+key; optional `require_tls_for_auth` rejects AUTH on plaintext (538).
 
-> ⚠️ **This is an educational / personal-use MVP.** Not production-hardened yet (no TLS by default, plaintext passwords, limited IMAP commands, no spam filter, no rate limiting). Great starting point to learn email protocols and extend!
+> ⚠️ **This is an educational / personal-use MVP.** Not production-hardened yet (TLS is optional and off until you configure cert/key; plaintext passwords in config; limited IMAP commands; no spam filter; no rate limiting; no ACME auto-cert). Great starting point to learn email protocols and extend!
 
 ## Features (v0.2)
 
@@ -28,11 +28,11 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - [x] Multi-domain / multi-user
 - [x] Catch-all / auto-routing for any@yourdomain
 - [x] Logging to stdout
-- [x] **Full outbound MTA**: pure-std DNS client (MX/A over UDP), persistent disk queue, exponential backoff (1m→5m→15m→1h→4h), bounces after 24h, optional smarthost relay
+- [x] **Full outbound MTA**: pure-std DNS client (MX/A over UDP), persistent disk queue, exponential backoff (1m→5m→15m→1h→4h), bounces after 24h, optional smarthost relay, opportunistic STARTTLS to remote MX
 - [x] **DKIM signing**: from-scratch SHA-256 + bignum RSA (PKCS#1 v1.5), relaxed/relaxed canonicalization, `--dkim-dns` prints the TXT record to publish (verified against dkimpy)
-- [x] **Webmail + admin UI**: pure-std HTTP server with session login — inbox, read, compose, sent; admin page shows domains/users and lets you inspect/delete the outbound queue
-- [ ] STARTTLS / TLS (use external wrapper for now — stunnel/Caddy/socat)
-- [ ] Let's Encrypt auto (needs TLS first)
+- [x] **Webmail + admin UI**: pure-std HTTP server with session login — inbox, read, compose, sent; admin page shows domains/users and lets you inspect/delete the outbound queue; optional HTTPS (`web_tls_listen`) sets Secure cookies
+- [x] **STARTTLS / TLS** via rustls: STARTTLS on 25/587 (RFC 3207) and 143 (RFC 2595); implicit SMTPS (465), IMAPS (993), HTTPS webmail; supply `tls_cert_file` + `tls_key_file`
+- [ ] Let's Encrypt auto (bring your own cert via certbot/acme.sh, or terminate TLS on a reverse proxy)
 
 ## Quick Start (Raspberry Pi / any Linux)
 
@@ -45,17 +45,25 @@ git clone https://github.com/yourusername/desertemail
 cd desertemail
 cargo build --release
 
-# Binary is target/release/desertemail  (~ few hundred KB)
+# Binary is target/release/desertemail  (~1.2 MB with rustls)
 
 # 3. Create config
 cp config.example.toml config.toml
 # Edit: set your domain, users, data_dir, ports...
 
-# 4. Run (as root if binding low ports, or use setcap / authbind)
+# 4. (Recommended for anything not pure LAN) enable TLS
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -subj "/CN=mail.example.com" -keyout tls.key -out tls.crt
+# Then in config.toml set tls_cert_file / tls_key_file and optional
+# smtps_listen / imaps_listen / web_tls_listen (see config.example.toml).
+
+# 5. Run (as root if binding low ports, or use setcap / authbind)
 sudo ./target/release/desertemail --config config.toml
 
 # Or without root: change ports to 2525/2587/2143 and use a reverse proxy / port forward.
 ```
+
+Without `tls_cert_file` + `tls_key_file`, the server runs plaintext (fine for localhost/LAN/VPN). With both set, STARTTLS is advertised on the plaintext SMTP/IMAP ports and optional implicit-TLS listeners bind when non-empty.
 
 ### Systemd service example
 
@@ -89,6 +97,14 @@ web_listen = "0.0.0.0:8080"
 # dkim_selector = "mail"
 # dkim_key_file = "/etc/desertemail/dkim.pem"
 
+# --- TLS (optional; both cert + key required to enable) ---
+# tls_cert_file = "/etc/desertemail/tls.crt"
+# tls_key_file = "/etc/desertemail/tls.key"
+# smtps_listen = "0.0.0.0:465"      # implicit SMTPS
+# imaps_listen = "0.0.0.0:993"      # implicit IMAPS
+# web_tls_listen = "0.0.0.0:8443"   # HTTPS webmail
+# require_tls_for_auth = false      # true => reject AUTH on plaintext (538)
+
 # Users: local-part or full email -> password (plain for now)
 # Auto-routing: if catch_all = true, any unknown local@domain creates/uses a mailbox
 [users]
@@ -113,7 +129,7 @@ The parser is hand-written and very simple (key = "value", sections).
    ./desertemail --dkim-dns example.com
    # publishes instructions: TXT at mail._domainkey.example.com
    ```
-5. Open ports 25, 587, 143 (and 993/465 for TLS later) in your firewall / router port-forward.
+5. Open ports 25, 587, 143, and (with TLS configured) 465 / 993 / 8443 as needed in your firewall / router port-forward.
 
 Test with: `swaks --to you@example.com --server your-ip` or real email from Gmail etc.
 
@@ -134,21 +150,22 @@ You can also run multiple instances or use subdomains for isolation.
 
 ```
 src/
-├── main.rs          # CLI, config load, start listeners (SMTP/IMAP/submission/web)
+├── main.rs          # CLI, config load, start listeners (SMTP/IMAP/submission/web + TLS)
 ├── config.rs        # Hand-rolled simple config parser (no serde/toml crate!)
 ├── storage.rs       # Maildir create/write/list/read (pure std::fs)
-├── smtp.rs          # Full SMTP state machine (inbound + auth submission)
-├── imap.rs          # Basic IMAP state machine + command handlers
+├── smtp.rs          # Full SMTP state machine (inbound + auth submission + STARTTLS)
+├── imap.rs          # Basic IMAP state machine + STARTTLS (RFC 2595)
 ├── auth.rs          # Simple password check + AUTH PLAIN decoder (hand-rolled base64)
 ├── dns.rs           # DNS client over UDP: MX/A/AAAA, name compression (pure std)
-├── queue.rs         # Outbound queue: disk persistence, retries/backoff, ESMTP client
+├── queue.rs         # Outbound queue: disk persistence, retries/backoff, opportunistic STARTTLS
 ├── crypto.rs        # SHA-256, bignum RSA (PKCS#1 v1.5), PEM/DER key parsing
 ├── dkim.rs          # DKIM signing: relaxed/relaxed canonicalization (RFC 6376)
-├── web.rs           # Webmail + admin: HTTP/1.1 server, sessions, HTML rendering
+├── web.rs           # Webmail + admin: HTTP/1.1 (+ optional HTTPS), sessions, HTML
+├── tls.rs           # rustls: server Conn, client ClientConn, PEM load, webpki-roots
 └── util.rs          # Line reader, base64, RFC 2822 dates, logging
 ```
 
-All protocol handling is pure string matching + state machines. No PEG, no external parsers.
+Mail, IMAP, webmail, DKIM, DNS, and HTTP protocol handling is pure string matching + state machines (no PEG, no external parsers). **Only TLS** uses crates: `rustls` (ring), `rustls-pemfile`, `webpki-roots`.
 
 Storage is classic Maildir (cur/new/tmp) so any mail client or even `mutt`, `mbsync`, or file browser works.
 
@@ -165,14 +182,14 @@ cargo build --release
 # cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
-The release profile is size-optimized (`opt-level = "z"`, LTO, strip).
+The release profile is size-optimized (`opt-level = "z"`, LTO, strip). With rustls+ring the binary is roughly **~1.2 MB**.
 
 ## Extending / Contributing
 
 This is intentionally minimal so you can:
 
 1. Read the SMTP/IMAP/DKIM RFCs alongside the code.
-2. Add STARTTLS (rustls is easy once deps allowed).
+2. Add ACME / Let's Encrypt auto-renewal (certs are BYO today).
 3. Make full asynchronous with tokio (if you accept the dep).
 4. Add proper password hashing (argon2id pure Rust exists).
 

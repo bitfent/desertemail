@@ -5,6 +5,12 @@ maintainer) commits prebuilt binaries into `bin-dist/`; Render runs
 `site-build.sh` and serves them under `/bin/` next to the per-platform
 installers.
 
+**TLS note:** release binaries now include rustls-based TLS (STARTTLS + optional
+implicit SMTPS/IMAPS/HTTPS). Operators supply `tls_cert_file` / `tls_key_file`
+in `config.toml` (self-signed, certbot/acme.sh, etc.). There is no ACME in the
+binary and **no behavior change** to the install/site pipeline — installers and
+`site-build.sh` are unchanged.
+
 ## (a) Build binaries into `bin-dist/`
 
 ### Via GitHub Actions (recommended)

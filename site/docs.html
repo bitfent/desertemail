@@ -490,8 +490,8 @@
 
       <section class="pix-panel" aria-labelledby="what-is">
         <div class="heading-wrap"><h2 id="what-is">What is DesertEmail</h2><a class="anchor" href="#what-is" aria-label="Link to this section">#</a></div>
-        <p>DesertEmail is a <strong>one-binary, pure-Rust email server</strong> written from scratch with the standard library only — <strong>zero crates</strong>. A release build lands around <strong>~300–500&nbsp;KB</strong> stripped (the site advertises ~488&nbsp;KB for current prebuilts).</p>
-        <p>It implements SMTP (inbound + authenticated submission), IMAP, webmail/admin over HTTP, DKIM signing, and an outbound MTA with MX lookup and a disk retry queue — all with plain <strong>threads, not async</strong>.</p>
+        <p>DesertEmail is a <strong>one-binary, pure-Rust email server</strong> written from scratch: mail, IMAP, webmail, DKIM, DNS, and HTTP are hand-rolled pure <code>std</code>. The <strong>only dependency is rustls</strong> (plus <code>rustls-pemfile</code> and <code>webpki-roots</code>) for TLS — deliberately, because you should never roll your own crypto. A release build lands around <strong>~1.2&nbsp;MB</strong> stripped with rustls+ring.</p>
+        <p>It implements SMTP (inbound + authenticated submission), IMAP, webmail/admin over HTTP(S), DKIM signing, STARTTLS / implicit TLS, and an outbound MTA with MX lookup, opportunistic STARTTLS, and a disk retry queue — all with plain <strong>threads, not async</strong>.</p>
         <p>Who it is for:</p>
         <ul>
           <li>Self-hosters who want a readable, rsync-friendly Maildir stack</li>
@@ -539,20 +539,22 @@ export PATH="$HOME/.desertemail/bin:$PATH"
 
       <section class="pix-panel" aria-labelledby="architecture">
         <div class="heading-wrap"><h2 id="architecture">Architecture</h2><a class="anchor" href="#architecture" aria-label="Link to this section">#</a></div>
-        <p>One process starts five cooperating pieces (threads, shared config):</p>
+        <p>One process starts cooperating listeners (threads, shared config). Plaintext ports always bind; TLS extras bind only when <code>tls_cert_file</code> + <code>tls_key_file</code> load successfully and the listen address is non-empty:</p>
         <ol>
-          <li><strong>SMTP inbound</strong> — default high port <code>0.0.0.0:2525</code> (real-world: 25)</li>
-          <li><strong>SMTP submission</strong> — authenticated clients, default <code>0.0.0.0:2587</code> (real: 587)</li>
-          <li><strong>IMAP</strong> — default <code>0.0.0.0:2143</code> (real: 143)</li>
+          <li><strong>SMTP inbound</strong> — default high port <code>0.0.0.0:2525</code> (real-world: 25); STARTTLS (RFC 3207) advertised when TLS is configured</li>
+          <li><strong>SMTP submission</strong> — authenticated clients, default <code>0.0.0.0:2587</code> (real: 587); STARTTLS when TLS is configured</li>
+          <li><strong>IMAP</strong> — default <code>0.0.0.0:2143</code> (real: 143); STARTTLS (RFC 2595) when TLS is configured</li>
           <li><strong>Webmail + admin</strong> — HTTP/1.1 on <code>0.0.0.0:8080</code> (empty <code>web_listen</code> disables it)</li>
-          <li><strong>Outbound queue worker</strong> — disk queue under <code>data_dir/queue</code>, MX/A lookup over UDP (or optional smarthost), exponential backoff <strong>1m → 5m → 15m → 1h → 4h</strong>, bounce after <strong>24h</strong>, optional DKIM signing</li>
+          <li><strong>Optional implicit TLS</strong> — SMTPS (<code>smtps_listen</code>, e.g. 465), IMAPS (<code>imaps_listen</code>, e.g. 993), HTTPS webmail (<code>web_tls_listen</code>, e.g. 8443; Secure session cookies)</li>
+          <li><strong>Outbound queue worker</strong> — disk queue under <code>data_dir/queue</code>, MX/A lookup over UDP (or optional smarthost), <strong>opportunistic STARTTLS</strong> to remote MX with webpki-roots validation (falls back to plaintext on failure so delivery is never blocked), exponential backoff <strong>1m → 5m → 15m → 1h → 4h</strong>, bounce after <strong>24h</strong>, optional DKIM signing</li>
         </ol>
         <pre><code> Internet / peers          Clients (MUA / browser)
         |                           |
         v                           v
    [ SMTP :25 ]            [ submission :587 ]
-        |                    [ IMAP :143 ]
-        |                    [ web  :8080 ]
+   (+ STARTTLS)            [ IMAP :143 ] (+ STARTTLS)
+        |                  [ SMTPS :465 / IMAPS :993 ]
+        |                  [ web :8080 / HTTPS :8443 ]
         v                           |
    +-----------+                    |
    |  Maildir  | &lt;------------------+
@@ -561,9 +563,9 @@ export PATH="$HOME/.desertemail/bin:$PATH"
         |
         v
    [ queue worker ] --MX/smarthost--&gt; remote MTAs
-        |
+        |              (opportunistic STARTTLS)
      DKIM sign (optional)</code></pre>
-        <p class="note">Storage is classic Maildir (<code>cur/</code> <code>new/</code> <code>tmp/</code>) per mailbox under <code>data_dir</code>. Easy to back up or rsync.</p>
+        <p class="note">Storage is classic Maildir (<code>cur/</code> <code>new/</code> <code>tmp/</code>) per mailbox under <code>data_dir</code>. Easy to back up or rsync. STARTTLS upgrade resets protocol state and discards prior AUTH (RFC 3207 / RFC 2595).</p>
       </section>
 
       <section class="pix-panel" aria-labelledby="config">
@@ -588,6 +590,12 @@ export PATH="$HOME/.desertemail/bin:$PATH"
               <tr><td><code>default_password</code></td><td>string</td><td><code>"changeme"</code></td><td>Password for catch-all / auto-created mailboxes</td></tr>
               <tr><td><code>dkim_selector</code></td><td>string</td><td><code>"mail"</code></td><td>DKIM selector; DNS name is <code>&lt;selector&gt;._domainkey.&lt;domain&gt;</code></td></tr>
               <tr><td><code>dkim_key_file</code></td><td>optional string</td><td>none</td><td>Path to PEM RSA private key for signing</td></tr>
+              <tr><td><code>tls_cert_file</code></td><td>optional string</td><td>none</td><td>PEM certificate chain; both this and <code>tls_key_file</code> required to enable TLS</td></tr>
+              <tr><td><code>tls_key_file</code></td><td>optional string</td><td>none</td><td>PEM private key (PKCS#8 or RSA)</td></tr>
+              <tr><td><code>smtps_listen</code></td><td>string</td><td><code>""</code> (disabled)</td><td>Implicit SMTPS bind (e.g. <code>"0.0.0.0:465"</code>); only bound when TLS cert/key loaded and non-empty</td></tr>
+              <tr><td><code>imaps_listen</code></td><td>string</td><td><code>""</code> (disabled)</td><td>Implicit IMAPS bind (e.g. <code>"0.0.0.0:993"</code>); only bound when TLS loaded and non-empty</td></tr>
+              <tr><td><code>web_tls_listen</code></td><td>string</td><td><code>""</code> (disabled)</td><td>HTTPS webmail bind (e.g. <code>"0.0.0.0:8443"</code>); Secure session cookies when used</td></tr>
+              <tr><td><code>require_tls_for_auth</code></td><td>bool</td><td><code>false</code></td><td>If true, reject SMTP AUTH on plaintext with <code>538</code></td></tr>
               <tr><td><code>[users]</code></td><td>map</td><td>empty</td><td><code>"local"</code> or <code>"user@domain"</code> = plaintext password</td></tr>
             </tbody>
           </table>
@@ -598,7 +606,7 @@ domains = ["example.com", "mail.example.com"]
 
 data_dir = "/home/you/.desertemail/data"
 
-# High ports = no root. Real mail uses 25/587/143 (+ TLS wrapper).
+# High ports = no root. Real mail uses 25/587/143 (+ STARTTLS when TLS configured).
 smtp_listen = "0.0.0.0:2525"
 submission_listen = "0.0.0.0:2587"
 imap_listen = "0.0.0.0:2143"
@@ -618,6 +626,16 @@ default_password = "changeme"   # change this!
 # desertemail --dkim-dns example.com
 # dkim_selector = "mail"
 # dkim_key_file = "dkim.pem"
+
+# --- TLS (optional; both cert + key required to enable) ---
+# openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+#   -subj "/CN=mail.example.com" -keyout tls.key -out tls.crt
+# tls_cert_file = "tls.crt"
+# tls_key_file = "tls.key"
+# smtps_listen = "0.0.0.0:465"      # implicit SMTPS
+# imaps_listen = "0.0.0.0:993"      # implicit IMAPS
+# web_tls_listen = "0.0.0.0:8443"   # HTTPS webmail
+# require_tls_for_auth = false      # true => AUTH only over TLS (538 on plain)
 
 [users]
 "alice" = "alicepass"
@@ -639,6 +657,59 @@ default_password = "changeme"   # change this!
         </ol>
         <p><strong>rDNS / PTR:</strong> many receivers check that your sending IP’s reverse DNS matches a sensible hostname. On a VPS, set PTR to your mail hostname when the provider allows it. Home ISPs rarely give you useful PTR.</p>
         <p class="warn"><strong>Port 25:</strong> residential ISPs often block outbound 25. Receiving may still work with port-forward; for sending use a <strong>smarthost</strong> in config or host on a VPS with open egress on 25.</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="tls">
+        <div class="heading-wrap"><h2 id="tls">TLS / encryption setup</h2><a class="anchor" href="#tls" aria-label="Link to this section">#</a></div>
+        <p>TLS is built in via <strong>rustls</strong> (ring crypto provider). There is no async runtime and no other crates for mail protocol code — only TLS uses a library. You supply a certificate and private key; DesertEmail does <strong>not</strong> talk to ACME / Let’s Encrypt for you.</p>
+
+        <div class="heading-wrap"><h3 id="tls-selfsigned">Quick self-signed cert (testing)</h3><a class="anchor" href="#tls-selfsigned" aria-label="Link to this section">#</a></div>
+        <pre><code>openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -subj "/CN=mail.example.com" -keyout tls.key -out tls.crt</code></pre>
+        <p>Then set in <code>config.toml</code>:</p>
+        <pre><code>tls_cert_file = "tls.crt"
+tls_key_file = "tls.key"</code></pre>
+        <p class="note">Both paths must be set and load successfully. If either is missing or invalid, the server logs a warning and runs <strong>plaintext only</strong> (fine for LAN/localhost/behind VPN).</p>
+
+        <div class="heading-wrap"><h3 id="tls-ports">Which ports do what</h3><a class="anchor" href="#tls-ports" aria-label="Link to this section">#</a></div>
+        <div class="table-scroll">
+          <table class="hw-table">
+            <thead><tr><th>Listener</th><th>Typical port</th><th>Mode</th></tr></thead>
+            <tbody>
+              <tr><td><code>smtp_listen</code></td><td>25 (or 2525)</td><td>Plaintext; advertises <strong>STARTTLS</strong> (RFC 3207) when TLS configured</td></tr>
+              <tr><td><code>submission_listen</code></td><td>587 (or 2587)</td><td>Same — STARTTLS upgrade; AUTH required for submission</td></tr>
+              <tr><td><code>imap_listen</code></td><td>143 (or 2143)</td><td>Plaintext; advertises <strong>STARTTLS</strong> (RFC 2595) when TLS configured</td></tr>
+              <tr><td><code>smtps_listen</code></td><td>465</td><td><strong>Implicit TLS</strong> before banner (submission semantics); only if non-empty + TLS loaded</td></tr>
+              <tr><td><code>imaps_listen</code></td><td>993</td><td><strong>Implicit TLS</strong> before IMAP greeting</td></tr>
+              <tr><td><code>web_listen</code></td><td>8080</td><td>HTTP webmail (no TLS on this socket)</td></tr>
+              <tr><td><code>web_tls_listen</code></td><td>8443</td><td><strong>HTTPS</strong> webmail; session cookie gets the <code>Secure</code> flag</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>After STARTTLS, the server resets protocol state and discards any prior AUTH (you must re-authenticate under TLS).</p>
+
+        <div class="heading-wrap"><h3 id="tls-letsencrypt">Real certificates (Let’s Encrypt via external tools)</h3><a class="anchor" href="#tls-letsencrypt" aria-label="Link to this section">#</a></div>
+        <p>Obtain a cert with certbot, acme.sh, or your host’s panel, then point DesertEmail at the PEM files:</p>
+        <pre><code># Example paths after certbot (adjust for your domain / layout)
+tls_cert_file = "/etc/letsencrypt/live/mail.example.com/fullchain.pem"
+tls_key_file  = "/etc/letsencrypt/live/mail.example.com/privkey.pem"
+
+smtps_listen = "0.0.0.0:465"
+imaps_listen = "0.0.0.0:993"
+web_tls_listen = "0.0.0.0:8443"</code></pre>
+        <p class="note">You own renewal (certbot timer, acme.sh cron, etc.). Restart or re-run DesertEmail after the files on disk change — there is no built-in reload/ACME client.</p>
+
+        <div class="heading-wrap"><h3 id="tls-require-auth">Force encrypted logins</h3><a class="anchor" href="#tls-require-auth" aria-label="Link to this section">#</a></div>
+        <pre><code>require_tls_for_auth = true</code></pre>
+        <p>When true, SMTP <code>AUTH</code> on a plaintext connection is rejected with <code>538 Encryption required for requested authentication mechanism</code>. Default is <code>false</code> so local demos still work without certs.</p>
+
+        <div class="heading-wrap"><h3 id="tls-not-covered">What still isn’t covered</h3><a class="anchor" href="#tls-not-covered" aria-label="Link to this section">#</a></div>
+        <ul>
+          <li><strong>No automatic certificate issuance or renewal</strong> (no ACME / Let’s Encrypt inside the binary)</li>
+          <li><strong>Outbound TLS is opportunistic</strong> — remote STARTTLS with full cert validation; on failure the queue reconnects plaintext so delivery is not blocked</li>
+          <li>Passwords remain plaintext in <code>config.toml</code>; TLS only protects the wire</li>
+          <li>You may still put a reverse proxy in front for HTTP(S) if you prefer terminating TLS elsewhere</li>
+        </ul>
       </section>
 
       <section class="pix-panel" aria-labelledby="installers">
@@ -699,14 +770,15 @@ default_password = "changeme"   # change this!
 
       <section class="pix-panel" aria-labelledby="security">
         <div class="heading-wrap"><h2 id="security">Security notes &amp; current limitations</h2><a class="anchor" href="#security" aria-label="Link to this section">#</a></div>
-        <p>DesertEmail is an <strong>educational / personal-use</strong> MVP — not a hardened production MTA. Be explicit about what it does <em>not</em> do yet.</p>
+        <p>DesertEmail is an <strong>educational / personal-use</strong> MVP — not a hardened production MTA. Be explicit about what it does and does <em>not</em> do.</p>
         <ul>
-          <li><strong>No built-in TLS / STARTTLS.</strong> Put stunnel, Caddy, or socat in front (or only expose high ports on localhost). Example stunnel idea: wrap local <code>2525</code>/<code>2587</code>/<code>2143</code> to public 465/587/993-style endpoints; or terminate TLS on a reverse proxy for webmail on 8080.</li>
-          <li><strong>Passwords are plaintext in <code>config.toml</code>.</strong> Keep the file <code>chmod 600</code> and treat the prefix as secret. Hashing is planned, not present.</li>
+          <li><strong>TLS is built in</strong> (rustls): STARTTLS on SMTP (RFC 3207) and IMAP (RFC 2595), optional implicit SMTPS/IMAPS, HTTPS webmail, and opportunistic outbound STARTTLS with webpki-roots validation. Supply <code>tls_cert_file</code> + <code>tls_key_file</code> to enable. Without them the server runs plaintext — fine for LAN/localhost/VPN; for any internet-facing deploy, configure TLS and consider <code>require_tls_for_auth = true</code>.</li>
+          <li><strong>No automatic cert renewal.</strong> Bring your own certificate (self-signed for testing, Let’s Encrypt via certbot/acme.sh externally, or a TLS-terminating reverse proxy). See <a href="#tls">TLS / encryption setup</a>.</li>
+          <li><strong>Passwords are plaintext in <code>config.toml</code>.</strong> Keep the file <code>chmod 600</code> and treat the prefix as secret. Hashing is planned, not present. TLS protects the wire, not the file on disk.</li>
           <li><strong>Catch-all + <code>default_password</code>:</strong> with <code>catch_all = true</code>, any local-part authenticates with the default password. That is convenient for demos and dangerous if left as <code>changeme</code> on the internet.</li>
-          <li><strong>Webmail sessions:</strong> cookie is <code>HttpOnly</code>, <code>SameSite=Lax</code>; tokens are derived from OS CSPRNG material (not just timestamp/PID).</li>
+          <li><strong>Webmail sessions:</strong> cookie is <code>HttpOnly</code>, <code>SameSite=Lax</code>; on HTTPS (<code>web_tls_listen</code>) the cookie also gets <code>Secure</code>. Tokens are derived from OS CSPRNG material (not just timestamp/PID).</li>
           <li><strong>DKIM:</strong> pure-std RSA-SHA256, relaxed/relaxed; signing path verified against <code>dkimpy</code> in project tests.</li>
-          <li><strong>Missing for “real MTA” use:</strong> no spam filter, limited IMAP surface, no rate limiting, no Let’s Encrypt automation until TLS lands in-process.</li>
+          <li><strong>Missing for “real MTA” use:</strong> no spam filter, limited IMAP surface, no rate limiting, no ACME / auto-cert inside the binary.</li>
         </ul>
         <p class="warn">If you need a production mail gateway today, use Postfix/OpenSMTPD/etc. Use DesertEmail when you want ownership, tiny footprint, and a codebase you can actually finish reading.</p>
       </section>
@@ -714,6 +786,8 @@ default_password = "changeme"   # change this!
       <section class="pix-panel" aria-labelledby="faq">
         <div class="heading-wrap"><h2 id="faq">FAQ</h2><a class="anchor" href="#faq" aria-label="Link to this section">#</a></div>
         <dl class="faq">
+          <dt>Does it support TLS / encryption?</dt>
+          <dd>Yes — built in via <strong>rustls</strong>. Set <code>tls_cert_file</code> and <code>tls_key_file</code> (both required). You get STARTTLS on SMTP/IMAP, optional implicit ports (465/993), HTTPS webmail, and opportunistic outbound STARTTLS. There is no ACME auto-cert; bring your own files (self-signed, certbot, acme.sh, or a reverse proxy). See <a href="#tls">TLS / encryption setup</a>.</dd>
           <dt>Will Gmail accept my mail?</dt>
           <dd>Maybe. SPF + DKIM + sensible rDNS help a lot. New or residential IPs still have low reputation; expect spam folders or rejects until reputation builds — or send via a smarthost with good standing.</dd>
           <dt>Can I run it on my phone?</dt>
@@ -730,6 +804,8 @@ default_password = "changeme"   # change this!
           <dd>Yes: MSVC <code>.exe</code> + PowerShell installer. Maildir uses NTFS-safe naming (<code>!2,</code> instead of <code>:2,</code> in filenames).</dd>
           <dt>Does the installer call GitHub?</dt>
           <dd>No. Binaries and checksums come from this site under <code>/bin/</code>. Source is on GitHub if you want to read or build it.</dd>
+          <dt>Is it still “zero dependencies”?</dt>
+          <dd>No. Mail/IMAP/webmail/DKIM/DNS/HTTP remain pure <code>std</code> (no async runtime). The only crates are <code>rustls</code> (ring), <code>rustls-pemfile</code>, and <code>webpki-roots</code> for TLS — the one thing you should never hand-roll. Binary size is ~1.2&nbsp;MB with TLS.</dd>
         </dl>
       </section>
 
