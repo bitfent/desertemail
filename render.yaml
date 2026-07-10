@@ -1,0 +1,25 @@
+# DesertEmail static landing site (Render Blueprint)
+#
+# How to connect:
+#   1. Push this repo to GitHub (with bitfent/desertemail substituted in install.sh / site).
+#   2. In the Render dashboard: New → Blueprint → select this repository.
+#   3. Render creates the static site service defined below and deploys on each push.
+#
+# Binaries are NOT hosted on Render. GitHub Actions builds them and publishes to
+# GitHub Releases; install.sh downloads those release assets at install time.
+#
+# After deploy, users install with:
+#   curl -fsSL https://<your-render-host>/install.sh | sh
+
+services:
+  - type: web
+    name: desertemail-site
+    runtime: static
+    # Copy repo-root install.sh into the publish tree so /install.sh is served
+    # without maintaining a second copy under site/.
+    buildCommand: cp install.sh site/install.sh
+    staticPublishPath: site
+    headers:
+      - path: /install.sh
+        name: Content-Type
+        value: text/plain; charset=utf-8

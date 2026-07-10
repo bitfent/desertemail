@@ -1,0 +1,166 @@
+# Build static release binaries and publish them to GitHub Releases.
+# Trigger: push a tag matching v* (e.g. git tag v0.1.0 && git push origin v0.1.0)
+#
+# Artifact naming (must match install.sh exactly):
+#   desertemail-<tag>-<target>
+#   desertemail-<tag>-<target>.tar.gz
+#   SHA256SUMS
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Linux ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          # ARMv6 (Pi Zero / Pi 1) — armv7 binaries are illegal instructions there
+          - arm-unknown-linux-musleabihf
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build release binary
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package artifacts
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME}"
+          TARGET="${{ matrix.target }}"
+          BIN="target/${TARGET}/release/desertemail"
+          NAME="desertemail-${VERSION}-${TARGET}"
+
+          if [ ! -f "${BIN}" ]; then
+            echo "error: binary not found at ${BIN}" >&2
+            exit 1
+          fi
+
+          # Prefer multi-arch strip; release profile also strips via Cargo.toml.
+          if command -v llvm-strip >/dev/null 2>&1; then
+            llvm-strip -s "${BIN}" || true
+          else
+            strip "${BIN}" 2>/dev/null || true
+          fi
+
+          cp "${BIN}" "${NAME}"
+          tar czf "${NAME}.tar.gz" "${NAME}"
+          ls -la "${NAME}" "${NAME}.tar.gz"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            desertemail-${{ github.ref_name }}-${{ matrix.target }}
+            desertemail-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package artifacts
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME}"
+          TARGET="${{ matrix.target }}"
+          BIN="target/${TARGET}/release/desertemail"
+          NAME="desertemail-${VERSION}-${TARGET}"
+
+          if [ ! -f "${BIN}" ]; then
+            echo "error: binary not found at ${BIN}" >&2
+            exit 1
+          fi
+
+          strip -x "${BIN}" 2>/dev/null || strip "${BIN}" 2>/dev/null || true
+
+          cp "${BIN}" "${NAME}"
+          tar czf "${NAME}.tar.gz" "${NAME}"
+          ls -la "${NAME}" "${NAME}.tar.gz"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            desertemail-${{ github.ref_name }}-${{ matrix.target }}
+            desertemail-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Prepare release assets and SHA256SUMS
+        working-directory: dist
+        run: |
+          set -eu
+          ls -la
+          # Flatten any leftover nested dirs just in case
+          find . -type f \( -name 'desertemail-*' -o -name 'SHA256SUMS' \) -print
+          sha256sum desertemail-* > SHA256SUMS
+          cat SHA256SUMS
+          ls -la
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DesertEmail ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/desertemail-*
+            dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

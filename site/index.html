@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DesertEmail — pure-Rust email server</title>
+<meta name="description" content="DesertEmail: from-scratch pure Rust email server. Zero deps, ~488KB static binary, runs on 128MB RAM.">
+<style>
+  :root {
+    --bg: #f6f3ee;
+    --fg: #1a1814;
+    --muted: #5c564c;
+    --card: #fffdf9;
+    --border: #d9d0c3;
+    --accent: #b45309;
+    --accent-fg: #fff8f0;
+    --code-bg: #1e1b16;
+    --code-fg: #f5efe6;
+    --ok: #166534;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12100e;
+      --fg: #f0e9df;
+      --muted: #a89f91;
+      --card: #1c1915;
+      --border: #3a342c;
+      --accent: #f59e0b;
+      --accent-fg: #1a1408;
+      --code-bg: #0c0a08;
+      --code-fg: #f5efe6;
+      --ok: #86efac;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { font-size: 16px; }
+  body {
+    margin: 0;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.55;
+    min-height: 100vh;
+  }
+  .wrap {
+    max-width: 40rem;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 3rem;
+  }
+  header { margin-bottom: 1.75rem; }
+  h1 {
+    font-size: 1.85rem;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.35rem;
+    font-weight: 700;
+  }
+  .tagline {
+    color: var(--muted);
+    margin: 0;
+    font-size: 1.05rem;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem 1.1rem;
+    margin: 1.25rem 0;
+  }
+  h2 {
+    font-size: 1.05rem;
+    margin: 0 0 0.65rem;
+    letter-spacing: -0.01em;
+  }
+  ul {
+    margin: 0;
+    padding-left: 1.15rem;
+  }
+  li { margin: 0.35rem 0; }
+  .install-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+  }
+  pre {
+    flex: 1 1 14rem;
+    margin: 0;
+    padding: 0.75rem 0.9rem;
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: 8px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  button.copy {
+    border: 1px solid var(--border);
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-radius: 8px;
+    padding: 0.55rem 0.9rem;
+    font: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button.copy:hover { filter: brightness(1.05); }
+  button.copy:active { transform: translateY(1px); }
+  button.copy.copied { background: var(--ok); color: #052e16; }
+  .note {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin: 0.65rem 0 0;
+  }
+  a { color: var(--accent); }
+  footer {
+    margin-top: 2rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>DesertEmail</h1>
+      <p class="tagline">A from-scratch pure-Rust email server for tiny machines — zero dependencies, one binary.</p>
+    </header>
+
+    <section class="card" aria-labelledby="install-h">
+      <h2 id="install-h">Install (one command)</h2>
+      <div class="install-row">
+        <pre id="install-cmd">curl -fsSL https://YOUR-SITE/install.sh | sh</pre>
+        <button type="button" class="copy" id="copy-btn" aria-label="Copy install command">Copy</button>
+      </div>
+      <p class="note">Downloads a prebuilt static binary — no local compile, works on low-memory systems (including ~128&nbsp;MB RAM).</p>
+    </section>
+
+    <section class="card" aria-labelledby="feat-h">
+      <h2 id="feat-h">Features</h2>
+      <ul>
+        <li>From-scratch pure Rust — <strong>zero external crates</strong></li>
+        <li>~488&nbsp;KB static binary after strip/LTO</li>
+        <li>SMTP + IMAP + webmail + DKIM + outbound MTA</li>
+        <li>Runs on 128&nbsp;MB RAM devices (e.g. Raspberry Pi Zero)</li>
+        <li>Prebuilt musl Linux + macOS binaries via GitHub Releases</li>
+      </ul>
+    </section>
+
+    <section class="card" aria-labelledby="wiz-h">
+      <h2 id="wiz-h">What the installer does</h2>
+      <ul>
+        <li>Detects OS/arch and fetches the matching release binary</li>
+        <li>Verifies SHA-256 against <code>SHA256SUMS</code></li>
+        <li>Installs under <code>~/.desertemail</code> (override with <code>DESERTEMAIL_PREFIX</code>)</li>
+        <li>Interactive wizard for domain, admin user, ports, webmail, DKIM</li>
+        <li>Writes <code>config.toml</code>; optionally installs a systemd unit</li>
+        <li>Headless-safe: <code>curl | sh</code> works with env-var defaults</li>
+      </ul>
+    </section>
+
+    <footer>
+      <p>
+        Source &amp; releases:
+        <a id="repo-link" href="https://github.com/bitfent/desertemail">github.com/bitfent/desertemail</a>
+      </p>
+      <p class="note">Binaries are published on GitHub Releases; this site only serves the landing page and <code>install.sh</code>.</p>
+    </footer>
+  </div>
+  <script>
+    (function () {
+      var pre = document.getElementById("install-cmd");
+      var btn = document.getElementById("copy-btn");
+      var origin = (typeof location !== "undefined" && location.protocol && location.protocol.indexOf("http") === 0)
+        ? location.origin
+        : "";
+      var cmd = origin
+        ? ("curl -fsSL " + origin + "/install.sh | sh")
+        : "curl -fsSL https://YOUR-SITE/install.sh | sh";
+      pre.textContent = cmd;
+      btn.addEventListener("click", function () {
+        var done = function () {
+          btn.textContent = "Copied";
+          btn.classList.add("copied");
+          setTimeout(function () {
+            btn.textContent = "Copy";
+            btn.classList.remove("copied");
+          }, 1600);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(cmd).then(done).catch(function () {
+            fallback();
+          });
+        } else {
+          fallback();
+        }
+        function fallback() {
+          var ta = document.createElement("textarea");
+          ta.value = cmd;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed";
+          ta.style.left = "-9999px";
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand("copy"); } catch (e) {}
+          document.body.removeChild(ta);
+          done();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
