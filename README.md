@@ -16,23 +16,23 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - **Maildir storage**: Standard, simple, filesystem-based. Easy to backup, rsync, or even mount remotely.
 - **Secure-ish by design**: Passwords (plain for simplicity; hash later), AUTH PLAIN, basic command validation. Add TLS via stunnel/socat or future rustls.
 
-> ⚠️ **This is an educational / personal-use MVP.** Not production-hardened yet (no TLS by default, no DKIM/SPF auto, limited IMAP commands, no spam filter, no rate limiting). Great starting point to learn email protocols and extend!
+> ⚠️ **This is an educational / personal-use MVP.** Not production-hardened yet (no TLS by default, plaintext passwords, limited IMAP commands, no spam filter, no rate limiting). Great starting point to learn email protocols and extend!
 
-## Features (v0.1)
+## Features (v0.2)
 
 - [x] SMTP server (port 25): receive inbound mail from the internet
-- [x] SMTP submission (port 587): authenticated clients can send (currently queues or relays via optional smarthost; full MX resolution in pure std is limited)
+- [x] SMTP submission (port 587): authenticated clients can send
 - [x] IMAP server (port 143): basic clients can LOGIN, SELECT Inbox, FETCH, LIST, etc.
 - [x] Maildir storage per user
 - [x] Simple TOML-like config (parsed by hand)
 - [x] Multi-domain / multi-user
 - [x] Catch-all / auto-routing for any@yourdomain
 - [x] Logging to stdout
-- [ ] STARTTLS / TLS (use external wrapper for now)
-- [ ] DKIM signing
-- [ ] Full outbound MTA (MX lookup + retry queue) — partial
-- [ ] Web admin / simple webmail
-- [ ] Let's Encrypt auto
+- [x] **Full outbound MTA**: pure-std DNS client (MX/A over UDP), persistent disk queue, exponential backoff (1m→5m→15m→1h→4h), bounces after 24h, optional smarthost relay
+- [x] **DKIM signing**: from-scratch SHA-256 + bignum RSA (PKCS#1 v1.5), relaxed/relaxed canonicalization, `--dkim-dns` prints the TXT record to publish (verified against dkimpy)
+- [x] **Webmail + admin UI**: pure-std HTTP server with session login — inbox, read, compose, sent; admin page shows domains/users and lets you inspect/delete the outbound queue
+- [ ] STARTTLS / TLS (use external wrapper for now — stunnel/Caddy/socat)
+- [ ] Let's Encrypt auto (needs TLS first)
 
 ## Quick Start (Raspberry Pi / any Linux)
 
@@ -75,10 +75,19 @@ smtp_listen = "0.0.0.0:25"
 submission_listen = "0.0.0.0:587"
 imap_listen = "0.0.0.0:143"
 
-# Optional: smarthost for outbound (e.g. your ISP or free relay)
+# Webmail / admin UI (empty string disables)
+web_listen = "0.0.0.0:8080"
+# admin_user = "alice"   # user allowed on /admin (unset = admin disabled)
+
+# Optional: smarthost for outbound (e.g. your ISP or free relay).
+# When unset, mail is delivered directly via MX lookup.
 # smarthost = "smtp.example.com:587"
 # smarthost_user = "user"
 # smarthost_pass = "pass"
+
+# DKIM signing of outbound mail (recommended for deliverability)
+# dkim_selector = "mail"
+# dkim_key_file = "/etc/desertemail/dkim.pem"
 
 # Users: local-part or full email -> password (plain for now)
 # Auto-routing: if catch_all = true, any unknown local@domain creates/uses a mailbox
@@ -97,7 +106,13 @@ The parser is hand-written and very simple (key = "value", sections).
 1. Point an **A (or AAAA)** record for `mail.example.com` → your public IP (use DynDNS like duckdns.org / freedns if dynamic home IP).
 2. Add **MX** record for `example.com` → `mail.example.com` (priority 10).
 3. (Recommended) SPF: `v=spf1 mx a:mail.example.com ~all` as TXT.
-4. (Later) DKIM: generate key, publish TXT.
+4. (Recommended) DKIM:
+   ```bash
+   openssl genrsa -out dkim.pem 2048
+   # set dkim_key_file = "dkim.pem" in config.toml, then:
+   ./desertemail --dkim-dns example.com
+   # publishes instructions: TXT at mail._domainkey.example.com
+   ```
 5. Open ports 25, 587, 143 (and 993/465 for TLS later) in your firewall / router port-forward.
 
 Test with: `swaks --to you@example.com --server your-ip` or real email from Gmail etc.
@@ -119,13 +134,18 @@ You can also run multiple instances or use subdomains for isolation.
 
 ```
 src/
-├── main.rs          # CLI, config load, start 3 listeners (SMTP/IMAP/submission)
+├── main.rs          # CLI, config load, start listeners (SMTP/IMAP/submission/web)
 ├── config.rs        # Hand-rolled simple config parser (no serde/toml crate!)
 ├── storage.rs       # Maildir create/write/list/read (pure std::fs)
 ├── smtp.rs          # Full SMTP state machine (inbound + auth submission)
 ├── imap.rs          # Basic IMAP state machine + command handlers
 ├── auth.rs          # Simple password check + AUTH PLAIN decoder (hand-rolled base64)
-└── util.rs          # Line reader, logging helpers, etc.
+├── dns.rs           # DNS client over UDP: MX/A/AAAA, name compression (pure std)
+├── queue.rs         # Outbound queue: disk persistence, retries/backoff, ESMTP client
+├── crypto.rs        # SHA-256, bignum RSA (PKCS#1 v1.5), PEM/DER key parsing
+├── dkim.rs          # DKIM signing: relaxed/relaxed canonicalization (RFC 6376)
+├── web.rs           # Webmail + admin: HTTP/1.1 server, sessions, HTML rendering
+└── util.rs          # Line reader, base64, RFC 2822 dates, logging
 ```
 
 All protocol handling is pure string matching + state machines. No PEG, no external parsers.
@@ -151,17 +171,14 @@ The release profile is size-optimized (`opt-level = "z"`, LTO, strip).
 
 This is intentionally minimal so you can:
 
-1. Read the SMTP/IMAP RFCs alongside the code.
+1. Read the SMTP/IMAP/DKIM RFCs alongside the code.
 2. Add STARTTLS (rustls is easy once deps allowed).
-3. Add DKIM (implement RSA signing with pure or tiny crypto).
-4. Add a tiny webmail with std HTTP (or hyper later).
-5. Make full asynchronous with tokio (if you accept the dep).
-6. Add proper password hashing (argon2id pure Rust exists).
+3. Make full asynchronous with tokio (if you accept the dep).
+4. Add proper password hashing (argon2id pure Rust exists).
 
 PRs welcome! Especially:
 
 - Better IMAP (SEARCH, IDLE, APPEND for drafts)
-- Outbound queue + exponential backoff + MX (using pure DNS over UDP is fun!)
 - Config hot-reload
 - Metrics / Prometheus exporter (text)
 
