@@ -37,7 +37,10 @@ pub fn resolve_mx(domain: &str) -> io::Result<Vec<MxRecord>> {
         if ans.rdata.len() < 3 {
             continue;
         }
-        let pref = u16::from_be_bytes([ans.rdata[0], ans.rdata[1]]);
+        let pref = u16::from_be_bytes([
+            *ans.rdata.get(0).unwrap_or(&0),
+            *ans.rdata.get(1).unwrap_or(&0),
+        ]);
         // Exchange name is encoded starting at rdata[2]; may use compression
         // relative to the full message — we re-parse via stored message offset.
         if let Some(name) = ans.rdata_name {
@@ -150,14 +153,22 @@ fn query_once(
     if n < 12 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "DNS response too short"));
     }
-    let resp = &buf[..n];
+    let resp = buf.get(..n).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "DNS response slice OOB")
+    })?;
 
-    let resp_id = u16::from_be_bytes([resp[0], resp[1]]);
+    let resp_id = u16::from_be_bytes([
+        *resp.get(0).unwrap_or(&0),
+        *resp.get(1).unwrap_or(&0),
+    ]);
     if resp_id != id {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "DNS id mismatch"));
     }
 
-    let flags = u16::from_be_bytes([resp[2], resp[3]]);
+    let flags = u16::from_be_bytes([
+        *resp.get(2).unwrap_or(&0),
+        *resp.get(3).unwrap_or(&0),
+    ]);
     let truncated = (flags & 0x0200) != 0;
     let rcode = flags & 0x000F;
     if rcode != 0 {
@@ -171,8 +182,14 @@ fn query_once(
         ));
     }
 
-    let qdcount = u16::from_be_bytes([resp[4], resp[5]]) as usize;
-    let ancount = u16::from_be_bytes([resp[6], resp[7]]) as usize;
+    let qdcount = u16::from_be_bytes([
+        *resp.get(4).unwrap_or(&0),
+        *resp.get(5).unwrap_or(&0),
+    ]) as usize;
+    let ancount = u16::from_be_bytes([
+        *resp.get(6).unwrap_or(&0),
+        *resp.get(7).unwrap_or(&0),
+    ]) as usize;
 
     let mut pos = 12usize;
     for _ in 0..qdcount {
@@ -185,17 +202,26 @@ fn query_once(
     let mut answers = Vec::new();
     for _ in 0..ancount {
         pos = skip_name(resp, pos)?;
-        if pos + 10 > resp.len() {
+        if pos.saturating_add(10) > resp.len() {
             break;
         }
-        let rtype = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
+        let rtype = u16::from_be_bytes([
+            *resp.get(pos).unwrap_or(&0),
+            *resp.get(pos + 1).unwrap_or(&0),
+        ]);
         // class at pos+2..+4, ttl at +4..+8
-        let rdlength = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
-        pos += 10;
-        if pos + rdlength > resp.len() {
+        let rdlength = u16::from_be_bytes([
+            *resp.get(pos + 8).unwrap_or(&0),
+            *resp.get(pos + 9).unwrap_or(&0),
+        ]) as usize;
+        pos = pos.saturating_add(10);
+        if pos.saturating_add(rdlength) > resp.len() {
             break;
         }
-        let rdata = resp[pos..pos + rdlength].to_vec();
+        let rdata = resp
+            .get(pos..pos + rdlength)
+            .unwrap_or(&[])
+            .to_vec();
         let rdata_name = if rtype == QTYPE_MX && rdlength >= 3 {
             // preference (2) + name
             parse_name(resp, pos + 2).ok().map(|(n, _)| n)
@@ -210,7 +236,7 @@ fn query_once(
             rdata,
             rdata_name,
         });
-        pos += rdlength;
+        pos = pos.saturating_add(rdlength);
     }
 
     Ok((answers, truncated))
@@ -249,6 +275,46 @@ fn encode_name(buf: &mut Vec<u8>, name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Fuzz-visible: parse DNS names and walk answer sections without I/O.
+pub fn fuzz_parse_response(resp: &[u8]) {
+    if resp.len() < 12 {
+        return;
+    }
+    let mut pos = 12usize;
+    let qdcount = u16::from_be_bytes([
+        *resp.get(4).unwrap_or(&0),
+        *resp.get(5).unwrap_or(&0),
+    ]) as usize;
+    let ancount = u16::from_be_bytes([
+        *resp.get(6).unwrap_or(&0),
+        *resp.get(7).unwrap_or(&0),
+    ]) as usize;
+    for _ in 0..qdcount.min(64) {
+        match skip_name(resp, pos) {
+            Ok(p) => pos = p.saturating_add(4),
+            Err(_) => return,
+        }
+        if pos > resp.len() {
+            return;
+        }
+    }
+    for _ in 0..ancount.min(64) {
+        match skip_name(resp, pos) {
+            Ok(p) => pos = p,
+            Err(_) => return,
+        }
+        if pos.saturating_add(10) > resp.len() {
+            return;
+        }
+        let rdlength = u16::from_be_bytes([
+            *resp.get(pos + 8).unwrap_or(&0),
+            *resp.get(pos + 9).unwrap_or(&0),
+        ]) as usize;
+        pos = pos.saturating_add(10).saturating_add(rdlength);
+        let _ = parse_name(resp, 0);
+    }
+}
+
 fn parse_name(msg: &[u8], mut pos: usize) -> io::Result<(String, usize)> {
     let mut labels = Vec::new();
     let mut jumped = false;
@@ -259,10 +325,12 @@ fn parse_name(msg: &[u8], mut pos: usize) -> io::Result<(String, usize)> {
         if pos >= msg.len() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "DNS name OOB"));
         }
-        let len = msg[pos];
+        let len = *msg.get(pos).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "DNS name OOB")
+        })?;
         if len == 0 {
             if !jumped {
-                end_pos = pos + 1;
+                end_pos = pos.saturating_add(1);
             }
             break;
         }
@@ -270,9 +338,12 @@ fn parse_name(msg: &[u8], mut pos: usize) -> io::Result<(String, usize)> {
             if pos + 1 >= msg.len() {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "DNS ptr OOB"));
             }
-            let ptr = (((len as usize) & 0x3F) << 8) | (msg[pos + 1] as usize);
+            let b1 = *msg.get(pos + 1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "DNS ptr OOB")
+            })?;
+            let ptr = (((len as usize) & 0x3F) << 8) | (b1 as usize);
             if !jumped {
-                end_pos = pos + 2;
+                end_pos = pos.saturating_add(2);
             }
             pos = ptr;
             jumped = true;
@@ -286,13 +357,13 @@ fn parse_name(msg: &[u8], mut pos: usize) -> io::Result<(String, usize)> {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad DNS label"));
         }
         let l = len as usize;
-        pos += 1;
-        if pos + l > msg.len() {
+        pos = pos.saturating_add(1);
+        if pos.saturating_add(l) > msg.len() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "DNS label OOB"));
         }
-        let label = String::from_utf8_lossy(&msg[pos..pos + l]).into_owned();
+        let label = String::from_utf8_lossy(msg.get(pos..pos + l).unwrap_or(&[])).into_owned();
         labels.push(label);
-        pos += l;
+        pos = pos.saturating_add(l);
         if !jumped {
             end_pos = pos;
         }

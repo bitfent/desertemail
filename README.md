@@ -14,9 +14,9 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - **Open source**: MIT/Apache-2.0. Fork, improve, self-host forever.
 - **DNS ready**: Full instructions for MX/A/SPF. Or use the built-in **auto-routing** mode that accepts any address under your domain and maps to local mailboxes (or a catch-all).
 - **Maildir storage**: Standard, simple, filesystem-based. Easy to backup, rsync, or even mount remotely.
-- **Secure-ish by design**: Passwords (plain for simplicity; hash later), AUTH PLAIN, basic command validation. Built-in TLS when you supply a cert+key; optional `require_tls_for_auth` rejects AUTH on plaintext (538).
+- **Secure-ish by design**: PBKDF2-HMAC-SHA256 password hashes (`desertemail --hash-password`), AUTH PLAIN, auth lockout, connection limits, basic command validation. Built-in TLS when you supply a cert+key; optional `require_tls_for_auth` rejects AUTH on plaintext (538).
 
-> ⚠️ **This is an educational / personal-use MVP.** Not production-hardened yet (TLS is optional and off until you configure cert/key; plaintext passwords in config; limited IMAP commands; no spam filter; no rate limiting; no ACME auto-cert). Great starting point to learn email protocols and extend!
+> ⚠️ **This is an educational / personal-use MVP.** Tier 1 hardening is in tree (PBKDF2 password hashes, auth lockout, connection limits, relay/loop guards, fuzz targets) but TLS is optional until you configure cert/key; IMAP is still a subset; no spam filter; no ACME auto-cert. Great starting point to learn email protocols and extend!
 
 ## Features (v0.2)
 
@@ -87,6 +87,26 @@ imap_listen = "0.0.0.0:143"
 web_listen = "0.0.0.0:8080"
 # admin_user = "alice"   # user allowed on /admin (unset = admin disabled)
 
+# Mail routing: accept any local-part@domain (does NOT grant authentication)
+catch_all = true
+# default_password is only used when allow_default_password_auth = true (keep false)
+default_password = "changeme"
+allow_default_password_auth = false
+
+# Auth brute-force lockout (SMTP AUTH / IMAP LOGIN / webmail)
+auth_max_failures = 10
+auth_window_secs = 300
+auth_lockout_secs = 900
+
+# Connection limits + idle timeouts (DoS / slowloris)
+max_connections = 512
+max_connections_per_ip = 20
+io_timeout_secs = 120
+
+# Relay / loop / abuse
+max_received_hops = 30              # inbound DATA with more Received: => 554
+outbound_max_rcpts_per_hour = 200   # per authenticated submission user
+
 # Optional: smarthost for outbound (e.g. your ISP or free relay).
 # When unset, mail is delivered directly via MX lookup.
 # smarthost = "smtp.example.com:587"
@@ -105,17 +125,20 @@ web_listen = "0.0.0.0:8080"
 # web_tls_listen = "0.0.0.0:8443"   # HTTPS webmail
 # require_tls_for_auth = false      # true => reject AUTH on plaintext (538)
 
-# Users: local-part or full email -> password (plain for now)
-# Auto-routing: if catch_all = true, any unknown local@domain creates/uses a mailbox
+# Users: local-part or full email -> password or PBKDF2 hash
+# Generate: desertemail --hash-password
+#   "alice" = "pbkdf2_sha256$210000$....$...."
+# Plaintext still works (migration) but logs a startup WARNING.
 [users]
 "alice" = "s3cret"
 "bob@example.com" = "p@ssw0rd"
-"catch-all" = "defaultpass"   # used if catch_all enabled
-
-catch_all = true
 ```
 
 The parser is hand-written and very simple (key = "value", sections).
+
+**Passwords:** prefer hashes from `desertemail --hash-password` (or
+`desertemail --hash-password 'secret'` for scripts). Format:
+`pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>` (PBKDF2-HMAC-SHA256, 210k iters).
 
 ## DNS Setup (the "configure with DNS" path)
 
@@ -151,18 +174,22 @@ You can also run multiple instances or use subdomains for isolation.
 ```
 src/
 ├── main.rs          # CLI, config load, start listeners (SMTP/IMAP/submission/web + TLS)
+├── lib.rs           # Library root (shared with cargo-fuzz targets)
 ├── config.rs        # Hand-rolled simple config parser (no serde/toml crate!)
 ├── storage.rs       # Maildir create/write/list/read (pure std::fs)
 ├── smtp.rs          # Full SMTP state machine (inbound + auth submission + STARTTLS)
 ├── imap.rs          # Basic IMAP state machine + STARTTLS (RFC 2595)
-├── auth.rs          # Simple password check + AUTH PLAIN decoder (hand-rolled base64)
+├── auth.rs          # AUTH PLAIN decoder + authenticate()
+├── passwd.rs        # PBKDF2-HMAC-SHA256 password hashing (from crypto::sha256)
+├── ratelimit.rs     # Auth brute-force lockout + outbound rcpt throttle
+├── limits.rs        # Global/per-IP connection caps + I/O timeouts
 ├── dns.rs           # DNS client over UDP: MX/A/AAAA, name compression (pure std)
 ├── queue.rs         # Outbound queue: disk persistence, retries/backoff, opportunistic STARTTLS
 ├── crypto.rs        # SHA-256, bignum RSA (PKCS#1 v1.5), PEM/DER key parsing
 ├── dkim.rs          # DKIM signing: relaxed/relaxed canonicalization (RFC 6376)
 ├── web.rs           # Webmail + admin: HTTP/1.1 (+ optional HTTPS), sessions, HTML
 ├── tls.rs           # rustls: server Conn, client ClientConn, PEM load, webpki-roots
-└── util.rs          # Line reader, base64, RFC 2822 dates, logging
+└── util.rs          # Line reader, base64, random fill, RFC 2822 dates, logging
 ```
 
 Mail, IMAP, webmail, DKIM, DNS, and HTTP protocol handling is pure string matching + state machines (no PEG, no external parsers). **Only TLS** uses crates: `rustls` (ring), `rustls-pemfile`, `webpki-roots`.

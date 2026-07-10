@@ -2,7 +2,7 @@
 //! Supports: LOGIN, SELECT, LIST, FETCH (RFC822 / BODY[] / FLAGS / UID), LOGOUT, NOOP, CAPABILITY.
 //! Optional STARTTLS (RFC 2595) and implicit IMAPS when TLS is configured.
 
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
@@ -11,6 +11,8 @@ use rustls::ServerConfig;
 
 use crate::auth;
 use crate::config::Config;
+use crate::limits;
+use crate::ratelimit;
 use crate::storage::{Maildir, MessageMeta};
 use crate::tls::{self, Conn};
 use crate::util::{self, read_line, write_line, write_raw};
@@ -38,15 +40,31 @@ impl ImapServer {
         util::log!(
             "IMAP{} listening on {}",
             if self.implicit_tls { "S" } else { "" },
-            listener.local_addr().unwrap()
+            listener
+                .local_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| "?".into())
         );
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    let ip = limits::peer_ip_from_stream(&stream);
+                    let guard = match limits::try_acquire(&ip) {
+                        Some(g) => g,
+                        None => {
+                            limits::apply_timeouts(&stream);
+                            let mut s = stream;
+                            let _ = s.write_all(b"* BYE too many connections\r\n");
+                            let _ = s.flush();
+                            continue;
+                        }
+                    };
+                    limits::apply_timeouts(&stream);
                     let cfg = Arc::clone(&self.cfg);
                     let tls_cfg = self.tls_cfg.clone();
                     let implicit = self.implicit_tls;
                     thread::spawn(move || {
+                        let _guard = guard;
                         if let Err(e) = handle_client(stream, cfg, tls_cfg, implicit) {
                             util::log!("IMAP client error: {}", e);
                         }
@@ -64,6 +82,7 @@ enum State {
     Auth { user: String },
     Selected {
         user: String,
+        #[allow(dead_code)]
         mailbox: String,
         msgs: Vec<MessageMeta>,
     },
@@ -75,16 +94,23 @@ fn handle_client(
     tls_cfg: Option<Arc<ServerConfig>>,
     implicit_tls: bool,
 ) -> io::Result<()> {
+    limits::apply_timeouts(&stream);
+
     let conn = if implicit_tls {
         let tc = tls_cfg.as_ref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "implicit TLS without config")
         })?;
-        tls::accept_tls(stream, tc)?
+        let c = tls::accept_tls(stream, tc)?;
+        c.set_timeouts(std::time::Duration::from_secs(limits::io_timeout_secs()));
+        c
     } else {
-        Conn::Plain(stream)
+        let c = Conn::Plain(stream);
+        c.set_timeouts(std::time::Duration::from_secs(limits::io_timeout_secs()));
+        c
     };
 
     let peer = conn.peer_addr_string();
+    let peer_ip = limits::ip_key(&peer);
     util::log!(
         "IMAP connect from {}{}",
         peer,
@@ -98,7 +124,6 @@ fn handle_client(
     write_line(reader.get_mut(), "* OK desertemail IMAP4rev1 ready")?;
 
     let mut state = State::NotAuth;
-    let mut tag = String::new();
 
     loop {
         let line = match read_line(&mut reader)? {
@@ -108,7 +133,7 @@ fn handle_client(
         util::log!("IMAP << {}", line);
 
         let mut parts = line.splitn(2, ' ');
-        tag = parts.next().unwrap_or("").to_string();
+        let tag = parts.next().unwrap_or("").to_string();
         let rest = parts.next().unwrap_or("").trim();
         let mut cmd_parts = rest.split_whitespace();
         let cmd = cmd_parts.next().unwrap_or("").to_uppercase();
@@ -126,7 +151,6 @@ fn handle_client(
                 write_line(reader.get_mut(), &format!("{} OK CAPABILITY completed", tag))?;
             }
             ("STARTTLS", State::NotAuth) if starttls_available && !is_tls => {
-                // RFC 2595: tagged OK, then upgrade. Only valid in NotAuth.
                 write_line(reader.get_mut(), &format!("{} OK Begin TLS negotiation now", tag))?;
                 let plain = match reader.into_inner() {
                     Conn::Plain(s) => s,
@@ -137,8 +161,17 @@ fn handle_client(
                         ));
                     }
                 };
-                let tc = tls_cfg.as_ref().unwrap();
+                let tc = match tls_cfg.as_ref() {
+                    Some(t) => t,
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "STARTTLS without TLS config",
+                        ));
+                    }
+                };
                 let upgraded = tls::upgrade(plain, tc)?;
+                upgraded.set_timeouts(std::time::Duration::from_secs(limits::io_timeout_secs()));
                 reader = BufReader::new(upgraded);
                 is_tls = true;
                 state = State::NotAuth;
@@ -153,15 +186,22 @@ fn handle_client(
                 break;
             }
             ("LOGIN", State::NotAuth) => {
+                if !ratelimit::check_allowed(&peer_ip) {
+                    write_line(
+                        reader.get_mut(),
+                        &format!("{} NO Too many failed attempts, try later", tag),
+                    )?;
+                    continue;
+                }
                 let (user, pass) = parse_login_args(rest);
                 if auth::authenticate(&cfg, &user, &pass) {
-                    // Map the login name to its mailbox the same way SMTP
-                    // delivery does, so both sides use the same Maildir.
+                    ratelimit::record_success(&peer_ip);
                     let mailbox = cfg.resolve_mailbox(&user).unwrap_or_else(|| user.clone());
                     state = State::Auth { user: mailbox };
                     write_line(reader.get_mut(), &format!("{} OK LOGIN completed", tag))?;
                     util::log!("IMAP login ok for {}", user);
                 } else {
+                    ratelimit::record_failure(&peer_ip);
                     write_line(reader.get_mut(), &format!("{} NO LOGIN failed", tag))?;
                 }
             }
@@ -230,7 +270,10 @@ fn handle_client(
                     if idx == 0 || idx > msgs.len() {
                         continue;
                     }
-                    let meta = &msgs[idx - 1];
+                    let meta = match msgs.get(idx - 1) {
+                        Some(m) => m,
+                        None => continue,
+                    };
                     let mut response = format!("* {} FETCH (", idx);
                     let mut first = true;
                     if items.contains("FLAGS") || items.contains("ALL") || items.contains("FAST") {
@@ -308,7 +351,8 @@ fn handle_client(
     Ok(())
 }
 
-fn parse_login_args(rest: &str) -> (String, String) {
+/// Parse IMAP LOGIN arguments (fuzz-visible).
+pub fn parse_login_args(rest: &str) -> (String, String) {
     let tokens: Vec<String> = {
         let mut t = Vec::new();
         let mut cur = String::new();
@@ -333,15 +377,22 @@ fn parse_login_args(rest: &str) -> (String, String) {
         t
     };
     if tokens.len() >= 3 {
-        (tokens[1].clone(), tokens[2].clone())
+        (
+            tokens.get(1).cloned().unwrap_or_default(),
+            tokens.get(2).cloned().unwrap_or_default(),
+        )
     } else if tokens.len() == 2 {
-        (tokens[0].clone(), tokens[1].clone())
+        (
+            tokens.get(0).cloned().unwrap_or_default(),
+            tokens.get(1).cloned().unwrap_or_default(),
+        )
     } else {
         (String::new(), String::new())
     }
 }
 
-fn parse_seq_set(s: &str, max: usize) -> Vec<usize> {
+/// Parse IMAP sequence set (fuzz-visible).
+pub fn parse_seq_set(s: &str, max: usize) -> Vec<usize> {
     let mut res = Vec::new();
     for part in s.split(',') {
         if part == "*" {
@@ -355,8 +406,11 @@ fn parse_seq_set(s: &str, max: usize) -> Vec<usize> {
             } else {
                 b.parse().unwrap_or(max)
             };
-            for i in start..=end.min(max) {
-                res.push(i);
+            let end = end.min(max);
+            if start <= end {
+                for i in start..=end {
+                    res.push(i);
+                }
             }
         } else if let Ok(n) = part.parse::<usize>() {
             if n >= 1 && n <= max {

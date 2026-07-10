@@ -17,11 +17,30 @@ imap_listen = "0.0.0.0:2143"          # IMAP (real: 143)
 # smarthost_pass = "app-password"
 
 # Catch-all: accept ANY local-part@domain and auto-create mailbox under data_dir/<local>
-# If false, only listed users are accepted.
+# This affects MAIL ROUTING only — not authentication. Auth always needs a [users] entry
+# (unless allow_default_password_auth is explicitly enabled).
 catch_all = true
 
-# Default password for auto-created catch-all mailboxes (change me!)
+# Used only when allow_default_password_auth = true (default false — leave it false).
+# Prefer a hashed value from: desertemail --hash-password
 default_password = "changeme"
+# OPT-IN backdoor: if true, unknown usernames can authenticate with default_password.
+# Keep false in any real deployment.
+allow_default_password_auth = false
+
+# --- Auth brute-force lockout (SMTP AUTH / IMAP LOGIN / webmail) ---
+auth_max_failures = 10       # failures within window before lockout
+auth_window_secs = 300       # sliding window (5 minutes)
+auth_lockout_secs = 900      # lockout duration (15 minutes)
+
+# --- Connection limits / DoS resistance ---
+max_connections = 512        # global concurrent connections (all protocols)
+max_connections_per_ip = 20  # per client IP
+io_timeout_secs = 120        # socket idle read/write timeout (slowloris)
+
+# --- Relay / loop / abuse ---
+max_received_hops = 30                 # drop inbound DATA with more Received: headers
+outbound_max_rcpts_per_hour = 200      # per authenticated user (submission)
 
 # Optional DKIM signing for outbound mail (rsa-sha256, relaxed/relaxed).
 # Generate a key: openssl genrsa -out dkim.pem 2048
@@ -49,9 +68,10 @@ web_listen = "0.0.0.0:8080"
 # require_tls_for_auth = false
 
 [users]
-# local-part or full address = "password"
-# Passwords are stored in plain text for simplicity.
-# In production hash them!
+# local-part or full address = password or pbkdf2 hash
+# Generate a hash:  desertemail --hash-password
+#   "alice" = "pbkdf2_sha256$210000$....$...."
+# Plaintext still works for migration but logs a startup WARNING.
 "alice" = "alicepass"
 "bob" = "bobpass"
 "postmaster" = "adminpass"

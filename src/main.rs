@@ -3,28 +3,25 @@
 //! Run with: cargo run -- --config config.toml
 //! Or release binary.
 
-mod auth;
-mod config;
-mod crypto;
-mod dkim;
-mod dns;
-mod imap;
-mod queue;
-mod smtp;
-mod storage;
-mod tls;
-mod util;
-mod web;
-
 use std::env;
+use std::io::{self, BufRead, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
-use config::Config;
-use imap::ImapServer;
-use smtp::SmtpServer;
+use desertemail::config::Config;
+use desertemail::crypto;
+use desertemail::dkim;
+use desertemail::imap::ImapServer;
+use desertemail::limits;
+use desertemail::passwd;
+use desertemail::queue;
+use desertemail::ratelimit;
+use desertemail::smtp::SmtpServer;
+use desertemail::tls;
+use desertemail::util;
+use desertemail::web;
 
 fn main() {
     util::log!("desertemail starting");
@@ -32,6 +29,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut config_path = "config.toml".to_string();
     let mut dkim_dns_domain: Option<String> = None;
+    let mut hash_password_mode: Option<Option<String>> = None; // Some(None)=prompt, Some(Some(p))=non-interactive
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--config" || args[i] == "-c" {
@@ -47,9 +45,17 @@ fn main() {
                 eprintln!("Usage: desertemail --dkim-dns <domain>");
                 std::process::exit(1);
             }
+        } else if args[i] == "--hash-password" {
+            if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                hash_password_mode = Some(Some(args[i + 1].clone()));
+                i += 1;
+            } else {
+                hash_password_mode = Some(None);
+            }
         } else if args[i] == "--help" || args[i] == "-h" {
             println!("Usage: desertemail [--config path/to/config.toml]");
             println!("       desertemail --dkim-dns <domain> [--config path]");
+            println!("       desertemail --hash-password [plaintext]");
             println!();
             println!("DKIM setup:");
             println!("  1. Generate a key:  openssl genrsa -out dkim.pem 2048");
@@ -57,10 +63,20 @@ fn main() {
             println!("  3. Publish DNS:     desertemail --dkim-dns example.com");
             println!("     (TXT at <selector>._domainkey.<domain>)");
             println!();
+            println!("Password hashing:");
+            println!("  desertemail --hash-password");
+            println!("  desertemail --hash-password 'my secret'");
+            println!("  Paste the pbkdf2_sha256$... string into [users] in config.toml");
+            println!();
             println!("See config.example.toml and README.md");
             return;
         }
         i += 1;
+    }
+
+    if let Some(maybe_plain) = hash_password_mode {
+        run_hash_password(maybe_plain);
+        return;
     }
 
     let mut cfg = match Config::load(Path::new(&config_path)) {
@@ -76,6 +92,19 @@ fn main() {
             }
         }
     };
+
+    // Security audit (loud non-fatal warnings)
+    cfg.audit();
+
+    // Apply runtime limiters from config
+    ratelimit::configure_auth(
+        cfg.auth_max_failures,
+        cfg.auth_window_secs,
+        cfg.auth_lockout_secs,
+    );
+    ratelimit::configure_outbound(cfg.outbound_max_rcpts_per_hour);
+    limits::configure(cfg.max_connections, cfg.max_connections_per_ip);
+    limits::configure_io_timeout(cfg.io_timeout_secs);
 
     // Load DKIM private key if configured
     if let Some(ref key_path) = cfg.dkim_key_file.clone() {
@@ -232,6 +261,52 @@ fn main() {
     for h in handles {
         let _ = h.join();
     }
+}
+
+fn run_hash_password(maybe_plain: Option<String>) {
+    let password = match maybe_plain {
+        Some(p) => p,
+        None => {
+            let p1 = prompt_password("Password: ");
+            let p2 = prompt_password("Confirm:  ");
+            if p1 != p2 {
+                eprintln!("error: passwords do not match");
+                std::process::exit(1);
+            }
+            if p1.is_empty() {
+                eprintln!("error: empty password");
+                std::process::exit(1);
+            }
+            p1
+        }
+    };
+    let hashed = passwd::hash_password(&password);
+    println!("{}", hashed);
+}
+
+fn prompt_password(prompt: &str) -> String {
+    eprint!("{}", prompt);
+    let _ = io::stderr().flush();
+    // Hide echo on Unix via stty (no extra crates).
+    #[cfg(unix)]
+    let _ = std::process::Command::new("stty")
+        .arg("-echo")
+        .stdin(std::process::Stdio::inherit())
+        .status();
+    let mut line = String::new();
+    let _ = io::stdin().lock().read_line(&mut line);
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("stty")
+            .arg("echo")
+            .stdin(std::process::Stdio::inherit())
+            .status();
+        eprintln!();
+    }
+    while line.ends_with('\n') || line.ends_with('\r') {
+        line.pop();
+    }
+    line
 }
 
 fn print_dkim_dns(cfg: &Config, domain: &str) {

@@ -1,0 +1,60 @@
+[package]
+name = "desertemail-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.desertemail]
+path = ".."
+
+# Prevent this from interfering with workspaces.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "smtp_line"
+path = "fuzz_targets/smtp_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "imap_line"
+path = "fuzz_targets/imap_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_response"
+path = "fuzz_targets/dns_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_parse"
+path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_decode"
+path = "fuzz_targets/auth_decode.rs"
+test = false
+doc = false
+bench = false

@@ -14,7 +14,9 @@ use rustls::ServerConfig;
 use crate::auth;
 use crate::config::Config;
 use crate::crypto;
+use crate::limits;
 use crate::queue;
+use crate::ratelimit;
 use crate::storage::Maildir;
 use crate::tls::{self, Conn};
 use crate::util;
@@ -28,49 +30,19 @@ fn sessions() -> &'static Mutex<HashMap<String, String>> {
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 32 bytes from the OS CSPRNG. Timestamp/PID would be guessable, letting an
-/// attacker who knows the rough login time brute-force session tokens.
+/// 32 bytes from the OS CSPRNG (via util::fill_random). Timestamp/PID alone
+/// would be guessable; fill_random prefers /dev/urandom.
 fn os_random_seed() -> [u8; 32] {
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        let mut buf = [0u8; 32];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            if f.read_exact(&mut buf).is_ok() {
-                return buf;
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        // BCryptGenRandom via system bcrypt.dll (no external crates).
-        #[link(name = "bcrypt")]
-        extern "system" {
-            fn BCryptGenRandom(
-                h_algorithm: *mut core::ffi::c_void,
-                pb_buffer: *mut u8,
-                cb_buffer: u32,
-                dw_flags: u32,
-            ) -> i32; // NTSTATUS
-        }
-        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
-        let mut buf = [0u8; 32];
-        // STATUS_SUCCESS == 0
-        let status = unsafe {
-            BCryptGenRandom(
-                core::ptr::null_mut(),
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        };
-        if status == 0 {
-            return buf;
-        }
-    }
-    // Last-resort fallback (CSPRNG unavailable): hash time + pid.
+    let mut buf = [0u8; 32];
+    util::fill_random(&mut buf);
+    // Fold in sha256(time+pid) so a weak fill_random fallback is strengthened
+    // the same way the previous web.rs path did.
     let material = format!("{}:{}", util::now_millis(), std::process::id());
-    crypto::sha256(material.as_bytes())
+    let dig = crypto::sha256(material.as_bytes());
+    for i in 0..32 {
+        buf[i] ^= dig[i];
+    }
+    buf
 }
 
 fn session_seed() -> &'static [u8; 32] {
@@ -128,6 +100,19 @@ struct Request {
     body: Vec<u8>,
 }
 
+/// Fuzz-visible HTTP request parser entry (from raw bytes).
+pub fn fuzz_parse_http(data: &[u8]) {
+    use std::io::Cursor;
+    let mut reader = BufReader::new(Cursor::new(data));
+    let _ = parse_request(&mut reader);
+    // Also exercise URL/MIME helpers on the same bytes as text.
+    let s = String::from_utf8_lossy(data);
+    let _ = percent_decode(&s);
+    let _ = parse_urlencoded(&s);
+    let _ = split_path_query(&s);
+    let _ = mime_boundary(&s);
+}
+
 fn parse_request(reader: &mut impl BufRead) -> io::Result<Option<Request>> {
     let first = match util::read_line(reader)? {
         Some(l) => l,
@@ -151,8 +136,8 @@ fn parse_request(reader: &mut impl BufRead) -> io::Result<Option<Request>> {
             break;
         }
         if let Some(colon) = line.find(':') {
-            let key = line[..colon].trim().to_lowercase();
-            let val = line[colon + 1..].trim().to_string();
+            let key = line.get(..colon).unwrap_or("").trim().to_lowercase();
+            let val = line.get(colon + 1..).unwrap_or("").trim().to_string();
             headers.insert(key, val);
         }
     }
@@ -181,7 +166,9 @@ fn parse_request(reader: &mut impl BufRead) -> io::Result<Option<Request>> {
 
 fn split_path_query(target: &str) -> (String, HashMap<String, String>) {
     if let Some(q) = target.find('?') {
-        (target[..q].to_string(), parse_urlencoded(&target[q + 1..]))
+        let path = target.get(..q).unwrap_or(target).to_string();
+        let qs = target.get(q + 1..).unwrap_or("");
+        (path, parse_urlencoded(qs))
     } else {
         (target.to_string(), HashMap::new())
     }
@@ -193,17 +180,20 @@ pub fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+        if bytes.get(i) == Some(&b'%') && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).and_then(|b| from_hex(*b)),
+                bytes.get(i + 2).and_then(|b| from_hex(*b)),
+            ) {
                 out.push((hi << 4) | lo);
                 i += 3;
                 continue;
             }
         }
-        if bytes[i] == b'+' {
-            out.push(b' ');
-        } else {
-            out.push(bytes[i]);
+        match bytes.get(i) {
+            Some(&b'+') => out.push(b' '),
+            Some(&b) => out.push(b),
+            None => break,
         }
         i += 1;
     }
@@ -226,8 +216,8 @@ fn parse_urlencoded(s: &str) -> HashMap<String, String> {
             continue;
         }
         if let Some(eq) = pair.find('=') {
-            let k = percent_decode(&pair[..eq]);
-            let v = percent_decode(&pair[eq + 1..]);
+            let k = percent_decode(pair.get(..eq).unwrap_or(""));
+            let v = percent_decode(pair.get(eq + 1..).unwrap_or(""));
             map.insert(k, v);
         } else {
             map.insert(percent_decode(pair), String::new());
@@ -256,8 +246,8 @@ fn cookie_value(req: &Request, name: &str) -> Option<String> {
     for part in cookie.split(';') {
         let part = part.trim();
         if let Some(eq) = part.find('=') {
-            if part[..eq].trim() == name {
-                return Some(part[eq + 1..].trim().to_string());
+            if part.get(..eq).unwrap_or("").trim() == name {
+                return Some(part.get(eq + 1..).unwrap_or("").trim().to_string());
             }
         }
     }
@@ -408,9 +398,28 @@ fn start_listener(
         for conn in listener.incoming() {
             match conn {
                 Ok(stream) => {
+                    let ip = limits::peer_ip_from_stream(&stream);
+                    let guard = match limits::try_acquire(&ip) {
+                        Some(g) => g,
+                        None => {
+                            limits::apply_timeouts(&stream);
+                            let mut s = stream;
+                            let body = b"503 Service Unavailable\r\n";
+                            let _ = write!(
+                                s,
+                                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = s.write_all(body);
+                            let _ = s.flush();
+                            continue;
+                        }
+                    };
+                    limits::apply_timeouts(&stream);
                     let cfg = Arc::clone(&cfg);
                     let tls_cfg = tls_cfg.clone();
                     thread::spawn(move || {
+                        let _guard = guard;
                         if let Err(e) = handle_connection(stream, &cfg, tls_cfg, secure) {
                             util::log!("web: connection error: {}", e);
                         }
@@ -428,20 +437,24 @@ fn handle_connection(
     tls_cfg: Option<Arc<ServerConfig>>,
     secure: bool,
 ) -> io::Result<()> {
+    limits::apply_timeouts(&stream);
+    let timeout = std::time::Duration::from_secs(limits::io_timeout_secs());
+
     let conn = if secure {
         let tc = tls_cfg.as_ref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "HTTPS without TLS config")
         })?;
         let c = tls::accept_tls(stream, tc)?;
-        c.set_timeouts(std::time::Duration::from_secs(30));
+        c.set_timeouts(timeout);
         c
     } else {
         let c = Conn::Plain(stream);
-        c.set_timeouts(std::time::Duration::from_secs(30));
+        c.set_timeouts(timeout);
         c
     };
 
     let peer = conn.peer_addr_string();
+    let peer_ip = limits::ip_key(&peer);
     let mut reader = BufReader::new(conn);
 
     let req = match parse_request(&mut reader)? {
@@ -456,17 +469,17 @@ fn handle_connection(
         req.path
     );
 
-    let resp = route(cfg, &req, secure);
+    let resp = route(cfg, &req, secure, &peer_ip);
     resp.write_to(reader.get_mut())
 }
 
-fn route(cfg: &Config, req: &Request, secure: bool) -> Response {
+fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
     let token = cookie_value(req, "session");
     let user = session_user(token.as_deref());
 
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/login") => page_login(None),
-        ("POST", "/login") => handle_login(cfg, req, secure),
+        ("GET", "/login") => page_login(None, 200),
+        ("POST", "/login") => handle_login(cfg, req, secure, peer_ip),
         ("GET", "/logout") => {
             clear_session(token.as_deref());
             Response::redirect("/login").with_cookie(&clear_session_cookie(secure))
@@ -527,7 +540,7 @@ fn page_shell(title: &str, user: &str, body: &str) -> String {
     )
 }
 
-fn page_login(error: Option<&str>) -> Response {
+fn page_login(error: Option<&str>, status: u16) -> Response {
     let err = error
         .map(|e| format!("<p class=\"err\">{}</p>", esc(e)))
         .unwrap_or_default();
@@ -538,19 +551,29 @@ fn page_login(error: Option<&str>) -> Response {
          <p><button type=\"submit\">Sign in</button></p></form>",
         err
     );
-    Response::html(200, "OK", page_shell("Login", "", &body))
+    let reason = if status == 429 {
+        "Too Many Requests"
+    } else {
+        "OK"
+    };
+    Response::html(status, reason, page_shell("Login", "", &body))
 }
 
-fn handle_login(cfg: &Config, req: &Request, secure: bool) -> Response {
+fn handle_login(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
+    if !ratelimit::check_allowed(peer_ip) {
+        return page_login(Some("Too many failed attempts, try later"), 429);
+    }
     let form = form_body(req);
     let username = form.get("username").map(|s| s.trim()).unwrap_or("");
     let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
     if username.is_empty() {
-        return page_login(Some("Username required"));
+        return page_login(Some("Username required"), 200);
     }
     if !auth::authenticate(cfg, username, password) {
-        return page_login(Some("Invalid username or password"));
+        ratelimit::record_failure(peer_ip);
+        return page_login(Some("Invalid username or password"), 200);
     }
+    ratelimit::record_success(peer_ip);
     let user = username.to_lowercase();
     let token = make_session_token(&user);
     set_session(&token, &user);
@@ -794,8 +817,8 @@ fn extract_headers(raw: &[u8]) -> HashMap<String, String> {
             map.insert(current_key.clone(), current_val.clone());
         }
         if let Some(colon) = line.find(':') {
-            current_key = line[..colon].trim().to_lowercase();
-            current_val = line[colon + 1..].trim().to_string();
+            current_key = line.get(..colon).unwrap_or("").trim().to_lowercase();
+            current_val = line.get(colon + 1..).unwrap_or("").trim().to_string();
         } else {
             current_key.clear();
             current_val.clear();
@@ -809,18 +832,18 @@ fn extract_headers(raw: &[u8]) -> HashMap<String, String> {
 
 fn header_block_end(raw: &[u8]) -> usize {
     if let Some(p) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-        return p + 4;
+        return p.saturating_add(4);
     }
     if let Some(p) = raw.windows(2).position(|w| w == b"\n\n") {
-        return p + 2;
+        return p.saturating_add(2);
     }
     raw.len()
 }
 
 /// Minimal MIME: if multipart, return first text/plain part body; else whole body.
 fn extract_text_body(raw: &[u8], headers: &HashMap<String, String>) -> String {
-    let body_start = header_block_end(raw);
-    let body = &raw[body_start..];
+    let body_start = header_block_end(raw).min(raw.len());
+    let body = raw.get(body_start..).unwrap_or(&[]);
     let ct = headers
         .get("content-type")
         .map(|s| s.as_str())
@@ -843,12 +866,12 @@ fn mime_boundary(content_type: &str) -> Option<String> {
     // boundary=foo or boundary="foo"
     let lower = content_type.to_lowercase();
     let idx = lower.find("boundary=")?;
-    let rest = content_type[idx + 9..].trim();
+    let rest = content_type.get(idx + 9..)?.trim();
     let rest = rest.trim_start_matches('"');
     let end = rest
         .find(|c: char| c == '"' || c == ';' || c.is_whitespace())
         .unwrap_or(rest.len());
-    let b = rest[..end].trim().trim_matches('"');
+    let b = rest.get(..end).unwrap_or("").trim().trim_matches('"');
     if b.is_empty() {
         None
     } else {
@@ -906,8 +929,8 @@ fn split_mime_part(part: &str) -> (HashMap<String, String>, String) {
                 headers.insert(cur_k.clone(), cur_v.clone());
             }
             if let Some(colon) = line.find(':') {
-                cur_k = line[..colon].trim().to_lowercase();
-                cur_v = line[colon + 1..].trim().to_string();
+                cur_k = line.get(..colon).unwrap_or("").trim().to_lowercase();
+                cur_v = line.get(colon + 1..).unwrap_or("").trim().to_string();
             }
         } else {
             body_lines.push(line);
@@ -972,8 +995,11 @@ fn parse_address_list(s: &str) -> Vec<String> {
             continue;
         }
         let addr = if let Some(start) = part.find('<') {
-            if let Some(end) = part[start..].find('>') {
-                part[start + 1..start + end].trim().to_string()
+            if let Some(rel_end) = part.get(start..).and_then(|s| s.find('>')) {
+                part.get(start + 1..start + rel_end)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
             } else {
                 part.to_string()
             }

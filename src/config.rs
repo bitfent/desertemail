@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::crypto::RsaKey;
+use crate::passwd;
 use crate::util;
 
 #[derive(Debug, Clone)]
@@ -17,8 +18,12 @@ pub struct Config {
     pub smarthost: Option<String>,
     pub smarthost_user: Option<String>,
     pub smarthost_pass: Option<String>,
+    /// Accept mail for any local-part@our-domain (mailbox routing only; not auth).
     pub catch_all: bool,
+    /// Password used only when `allow_default_password_auth = true` for unknown users.
     pub default_password: String,
+    /// If true, unknown users may authenticate with `default_password`. Default false.
+    pub allow_default_password_auth: bool,
     pub users: HashMap<String, String>,
     /// DKIM selector (default "mail"). DNS: `<selector>._domainkey.<domain>`
     pub dkim_selector: String,
@@ -42,6 +47,22 @@ pub struct Config {
     pub web_tls_listen: String,
     /// If true, reject AUTH on plaintext SMTP (reply 538). Default false.
     pub require_tls_for_auth: bool,
+    /// Failed auth attempts before lockout (default 10).
+    pub auth_max_failures: u32,
+    /// Sliding window for counting failures, seconds (default 300).
+    pub auth_window_secs: u64,
+    /// Lockout duration after threshold, seconds (default 900).
+    pub auth_lockout_secs: u64,
+    /// Max concurrent connections global (default 512).
+    pub max_connections: usize,
+    /// Max concurrent connections per client IP (default 20).
+    pub max_connections_per_ip: usize,
+    /// Socket idle read/write timeout, seconds (default 120).
+    pub io_timeout_secs: u64,
+    /// Max Received: headers on inbound DATA before 554 (default 30).
+    pub max_received_hops: usize,
+    /// Max recipients per authenticated user per rolling hour (default 200).
+    pub outbound_max_rcpts_per_hour: u32,
 }
 
 impl Default for Config {
@@ -57,6 +78,7 @@ impl Default for Config {
             smarthost_pass: None,
             catch_all: true,
             default_password: "changeme".into(),
+            allow_default_password_auth: false,
             users: HashMap::new(),
             dkim_selector: "mail".into(),
             dkim_key_file: None,
@@ -69,6 +91,14 @@ impl Default for Config {
             imaps_listen: String::new(),
             web_tls_listen: String::new(),
             require_tls_for_auth: false,
+            auth_max_failures: 10,
+            auth_window_secs: 300,
+            auth_lockout_secs: 900,
+            max_connections: 512,
+            max_connections_per_ip: 20,
+            io_timeout_secs: 120,
+            max_received_hops: 30,
+            outbound_max_rcpts_per_hour: 200,
         }
     }
 }
@@ -88,8 +118,12 @@ impl Config {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            if line.starts_with('[') && line.ends_with(']') {
-                section = line[1..line.len() - 1].trim().to_lowercase();
+            if line.starts_with('[') && line.ends_with(']') && line.len() >= 2 {
+                section = line
+                    .get(1..line.len() - 1)
+                    .unwrap_or("")
+                    .trim()
+                    .to_lowercase();
                 continue;
             }
 
@@ -97,22 +131,28 @@ impl Config {
                 Some(i) => i,
                 None => return Err(format!("line {}: expected key = value", lineno + 1)),
             };
-            let mut key = line[..eq].trim().to_lowercase();
-            let mut val = line[eq + 1..].trim().to_string();
+            let mut key = line.get(..eq).unwrap_or("").trim().to_lowercase();
+            let mut val = line.get(eq + 1..).unwrap_or("").trim().to_string();
 
             if let Some(hash) = val.find('#') {
-                val = val[..hash].trim().to_string();
+                // Only strip trailing comments when not inside a hash string that
+                // uses $ (pbkdf2). Simple rule: strip # only if not after $ or if
+                // the value looks like plain text with a space-hash comment.
+                // Keep it simple: strip unquoted trailing # comments.
+                if !val.starts_with("pbkdf2_sha256$") {
+                    val = val.get(..hash).unwrap_or("").trim().to_string();
+                }
             }
 
-            if (key.starts_with('"') && key.ends_with('"'))
-                || (key.starts_with('\'') && key.ends_with('\''))
+            if (key.starts_with('"') && key.ends_with('"') && key.len() >= 2)
+                || (key.starts_with('\'') && key.ends_with('\'') && key.len() >= 2)
             {
-                key = key[1..key.len() - 1].to_string();
+                key = key.get(1..key.len() - 1).unwrap_or("").to_string();
             }
-            if (val.starts_with('"') && val.ends_with('"'))
-                || (val.starts_with('\'') && val.ends_with('\''))
+            if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2)
+                || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2)
             {
-                val = val[1..val.len() - 1].to_string();
+                val = val.get(1..val.len() - 1).unwrap_or("").to_string();
             }
 
             match (section.as_str(), key.as_str()) {
@@ -128,6 +168,9 @@ impl Config {
                 ("", "smarthost_pass") => cfg.smarthost_pass = Some(val),
                 ("", "catch_all") => cfg.catch_all = parse_bool(&val),
                 ("", "default_password") => cfg.default_password = val,
+                ("", "allow_default_password_auth") => {
+                    cfg.allow_default_password_auth = parse_bool(&val)
+                }
                 ("", "dkim_selector") => cfg.dkim_selector = val,
                 ("", "dkim_key_file") => cfg.dkim_key_file = Some(val),
                 ("", "web_listen") => cfg.web_listen = val,
@@ -156,6 +199,31 @@ impl Config {
                 ("", "imaps_listen") => cfg.imaps_listen = val,
                 ("", "web_tls_listen") => cfg.web_tls_listen = val,
                 ("", "require_tls_for_auth") => cfg.require_tls_for_auth = parse_bool(&val),
+                ("", "auth_max_failures") => {
+                    cfg.auth_max_failures = parse_u32(&val, cfg.auth_max_failures)
+                }
+                ("", "auth_window_secs") => {
+                    cfg.auth_window_secs = parse_u64(&val, cfg.auth_window_secs)
+                }
+                ("", "auth_lockout_secs") => {
+                    cfg.auth_lockout_secs = parse_u64(&val, cfg.auth_lockout_secs)
+                }
+                ("", "max_connections") => {
+                    cfg.max_connections = parse_usize(&val, cfg.max_connections)
+                }
+                ("", "max_connections_per_ip") => {
+                    cfg.max_connections_per_ip = parse_usize(&val, cfg.max_connections_per_ip)
+                }
+                ("", "io_timeout_secs") => {
+                    cfg.io_timeout_secs = parse_u64(&val, cfg.io_timeout_secs)
+                }
+                ("", "max_received_hops") => {
+                    cfg.max_received_hops = parse_usize(&val, cfg.max_received_hops)
+                }
+                ("", "outbound_max_rcpts_per_hour") => {
+                    cfg.outbound_max_rcpts_per_hour =
+                        parse_u32(&val, cfg.outbound_max_rcpts_per_hour)
+                }
                 ("users", k) => {
                     cfg.users.insert(k.to_string(), val);
                 }
@@ -175,6 +243,41 @@ impl Config {
         cfg.users = new_users;
 
         Ok(cfg)
+    }
+
+    /// Log loud non-fatal security warnings about insecure config.
+    pub fn audit(&self) {
+        for (user, stored) in &self.users {
+            if !passwd::is_hashed(stored) {
+                util::log!(
+                    "WARNING: user {} has a plaintext password in config; run `desertemail --hash-password` and replace it",
+                    user
+                );
+            }
+        }
+        if self.allow_default_password_auth {
+            util::log!(
+                "WARNING: allow_default_password_auth=true — unknown users can authenticate with default_password"
+            );
+        }
+        if self.default_password == "changeme" {
+            util::log!(
+                "WARNING: default_password is still \"changeme\" — change it (or leave allow_default_password_auth=false)"
+            );
+        }
+        if self.catch_all && self.users.is_empty() {
+            util::log!(
+                "WARNING: catch_all=true with no [users] defined — mail is accepted but nobody can authenticate"
+            );
+        }
+        if !passwd::is_hashed(&self.default_password)
+            && self.allow_default_password_auth
+            && !self.default_password.is_empty()
+        {
+            util::log!(
+                "WARNING: default_password is stored as plaintext; run `desertemail --hash-password` and replace it"
+            );
+        }
     }
 
     pub fn resolve_mailbox(&self, addr: &str) -> Option<String> {
@@ -205,13 +308,16 @@ impl Config {
         }
     }
 
+    /// Authenticate a user. Requires an explicit [users] entry unless
+    /// `allow_default_password_auth` is true (then default_password may be used
+    /// for unknown users). `catch_all` does NOT grant authentication.
     pub fn check_password(&self, user: &str, pass: &str) -> bool {
         let user = user.to_lowercase();
         if let Some(stored) = self.users.get(&user) {
-            return stored == pass;
+            return passwd::verify_password(stored, pass);
         }
-        if self.catch_all {
-            return pass == self.default_password;
+        if self.allow_default_password_auth {
+            return passwd::verify_password(&self.default_password, pass);
         }
         false
     }
@@ -231,4 +337,88 @@ fn parse_list(s: &str) -> Vec<String> {
 
 fn parse_bool(s: &str) -> bool {
     matches!(s.to_lowercase().as_str(), "true" | "1" | "yes" | "on")
+}
+
+fn parse_u32(s: &str, default: u32) -> u32 {
+    s.parse().unwrap_or(default)
+}
+
+fn parse_u64(s: &str, default: u64) -> u64 {
+    s.parse().unwrap_or(default)
+}
+
+fn parse_usize(s: &str, default: usize) -> usize {
+    s.parse().unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_password_requires_user_entry() {
+        let mut cfg = Config::default();
+        cfg.catch_all = true;
+        cfg.allow_default_password_auth = false;
+        cfg.default_password = "changeme".into();
+        cfg.users
+            .insert("alice".into(), "alicepass".into());
+        assert!(cfg.check_password("alice", "alicepass"));
+        assert!(!cfg.check_password("alice", "wrong"));
+        // Unknown user: rejected even with catch_all + default_password
+        assert!(!cfg.check_password("bob", "changeme"));
+    }
+
+    #[test]
+    fn allow_default_password_auth_opt_in() {
+        let mut cfg = Config::default();
+        cfg.allow_default_password_auth = true;
+        cfg.default_password = "shared".into();
+        assert!(cfg.check_password("anyone", "shared"));
+        assert!(!cfg.check_password("anyone", "nope"));
+    }
+
+    #[test]
+    fn hashed_password_in_config() {
+        let mut cfg = Config::default();
+        let hashed = passwd::hash_password("s3cret");
+        cfg.users.insert("alice".into(), hashed);
+        assert!(cfg.check_password("alice", "s3cret"));
+        assert!(!cfg.check_password("alice", "wrong"));
+    }
+
+    #[test]
+    fn parse_new_keys() {
+        let toml = r#"
+domains = ["example.com"]
+allow_default_password_auth = true
+auth_max_failures = 5
+auth_window_secs = 60
+auth_lockout_secs = 120
+max_connections = 100
+max_connections_per_ip = 5
+io_timeout_secs = 30
+max_received_hops = 10
+outbound_max_rcpts_per_hour = 50
+[users]
+"alice" = "pass"
+"#;
+        let cfg = Config::parse(toml).unwrap();
+        assert!(cfg.allow_default_password_auth);
+        assert_eq!(cfg.auth_max_failures, 5);
+        assert_eq!(cfg.max_connections, 100);
+        assert_eq!(cfg.max_received_hops, 10);
+        assert_eq!(cfg.outbound_max_rcpts_per_hour, 50);
+    }
+
+    #[test]
+    fn foreign_domain_not_resolved() {
+        let mut cfg = Config::default();
+        cfg.domains = vec!["example.com".into()];
+        cfg.catch_all = true;
+        assert!(cfg.resolve_mailbox("a@example.com").is_some());
+        assert!(cfg.resolve_mailbox("a@evil.com").is_none());
+        assert!(!cfg.is_our_domain("evil.com"));
+        assert!(cfg.is_our_domain("example.com"));
+    }
 }

@@ -17,6 +17,60 @@ pub fn now_millis() -> u128 {
         .as_millis()
 }
 
+/// Fill `buf` with random bytes from the OS CSPRNG (`/dev/urandom` or
+/// BCryptGenRandom). Falls back to a time+pid mix if unavailable (same idea
+/// as the web session seed fallback; prefer OS entropy).
+pub fn fill_random(buf: &mut [u8]) {
+    if buf.is_empty() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(buf).is_ok() {
+                return;
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                h_algorithm: *mut core::ffi::c_void,
+                pb_buffer: *mut u8,
+                cb_buffer: u32,
+                dw_flags: u32,
+            ) -> i32;
+        }
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+        let status = unsafe {
+            BCryptGenRandom(
+                core::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status == 0 {
+            return;
+        }
+    }
+    // Last-resort fallback (CSPRNG unavailable): mix time + pid.
+    // Callers that need crypto-quality randomness should prefer passwd's
+    // path which can also hash via crypto::sha256 when available.
+    let mut state = (now_millis() as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(std::process::id() as u64);
+    for b in buf.iter_mut() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
+        *b = (state >> 33) as u8;
+    }
+}
+
 /// Read one CRLF/LF-terminated line from a persistent buffered reader.
 /// Callers must keep ONE BufReader per connection: constructing a fresh
 /// BufReader per line would discard whatever the previous one buffered.
@@ -75,7 +129,6 @@ pub fn base64_decode(input: &str) -> Vec<u8> {
     out
 }
 
-#[allow(dead_code)]
 pub fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -134,7 +187,9 @@ fn civil_from_days(mut z: i64) -> (i32, u32, u32) {
 pub fn parse_email_addr(s: &str) -> (String, String) {
     let s = s.trim().trim_matches(|c| c == '<' || c == '>');
     if let Some(at) = s.find('@') {
-        (s[..at].to_lowercase(), s[at + 1..].to_lowercase())
+        let local = s.get(..at).unwrap_or("").to_lowercase();
+        let domain = s.get(at + 1..).unwrap_or("").to_lowercase();
+        (local, domain)
     } else {
         (s.to_lowercase(), String::new())
     }

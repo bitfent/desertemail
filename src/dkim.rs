@@ -122,24 +122,26 @@ fn split_message(raw: &[u8]) -> (Vec<String>, &[u8]) {
     // Find header/body separator: \r\n\r\n or \n\n
     let text = String::from_utf8_lossy(raw);
     let (hdr_str, body_start) = if let Some(i) = find_double_crlf(raw) {
-        (String::from_utf8_lossy(&raw[..i]).into_owned(), i + 4)
+        (
+            String::from_utf8_lossy(raw.get(..i).unwrap_or(&[])).into_owned(),
+            i.saturating_add(4),
+        )
     } else if text.contains("\n\n") {
         // body starts after \n\n; if lines were LF-only
         let byte_i = raw
             .windows(2)
             .position(|w| w == b"\n\n")
             .unwrap_or(raw.len());
-        (String::from_utf8_lossy(&raw[..byte_i]).into_owned(), byte_i + 2)
+        (
+            String::from_utf8_lossy(raw.get(..byte_i).unwrap_or(&[])).into_owned(),
+            byte_i.saturating_add(2),
+        )
     } else {
         (text.into_owned(), raw.len())
     };
 
     let headers = parse_header_fields(&hdr_str);
-    let body = if body_start <= raw.len() {
-        &raw[body_start..]
-    } else {
-        &raw[raw.len()..]
-    };
+    let body = raw.get(body_start.min(raw.len())..).unwrap_or(&[]);
     (headers, body)
 }
 
@@ -182,7 +184,7 @@ fn parse_header_fields(hdr: &str) -> Vec<String> {
 fn find_header<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
     for h in headers {
         if let Some(colon) = h.find(':') {
-            let n = h[..colon].trim();
+            let n = h.get(..colon).unwrap_or("").trim();
             if n.eq_ignore_ascii_case(name) {
                 return Some(h.as_str());
             }
@@ -199,7 +201,10 @@ fn find_header<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
 pub fn canonicalize_header_relaxed(field: &str) -> String {
     // field may contain folded lines with \n or \r\n
     let (name_raw, value) = if let Some(colon) = field.find(':') {
-        (field[..colon].to_string(), field[colon + 1..].to_string())
+        (
+            field.get(..colon).unwrap_or("").to_string(),
+            field.get(colon + 1..).unwrap_or("").to_string(),
+        )
     } else {
         (field.to_string(), String::new())
     };

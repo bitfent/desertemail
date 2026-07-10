@@ -13,6 +13,14 @@ readme = "README.md"
 # Minimal deps: rustls for TLS (STARTTLS + implicit SMTPS/IMAPS/HTTPS).
 # Everything else is hand-rolled from std (no tokio/async).
 
+[lib]
+name = "desertemail"
+path = "src/lib.rs"
+
+[[bin]]
+name = "desertemail"
+path = "src/main.rs"
+
 [dependencies]
 # Explicit ring provider (rustls 0.23 defaults to aws-lc-rs otherwise).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
