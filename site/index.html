@@ -68,8 +68,9 @@
   p { margin: 0.5rem 0; }
   .tagline { color: var(--muted); max-width: 46ch; }
 
-  header { text-align: left; display: flex; gap: 1.2rem; align-items: center; flex-wrap: wrap; padding-top: 0.5rem; }
+  header { text-align: left; display: flex; gap: 1.2rem; align-items: center; flex-wrap: nowrap; padding-top: 0.5rem; }
   .logo { width: 66px; height: 88px; flex: none; }
+  header > div { min-width: 0; }
 
   /* --- install block --------------------------------------------------- */
   pre#install-cmd {
@@ -180,10 +181,14 @@
   /* --- mobile (360–414px) ----------------------------------------------- */
   @media (max-width: 480px) {
     h1 {
-      font-size: clamp(1.35rem, 7.5vw, 2rem);
-      letter-spacing: 0.08em;
+      font-size: clamp(1.15rem, 6vw, 2rem);
+      letter-spacing: 0.06em;
       text-shadow: 2px 2px 0 var(--accent-dark);
     }
+    /* keep the cactus beside the text, just smaller */
+    header { gap: 0.9rem; }
+    .logo { width: 45px; height: 60px; }
+    .tagline { font-size: 0.88rem; }
     .pix-panel {
       box-shadow: 5px 5px 0 0 var(--accent-dark);
       margin-left: 0;
