@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::dkim::{self, DkimStatus};
 use crate::dmarc::{self, DmarcPolicy};
 use crate::limits;
+use crate::metrics;
 use crate::queue;
 use crate::ratelimit;
 use crate::spamscore::{self, GreylistDecision, SpamScore, SpamScoreInput};
@@ -181,7 +182,10 @@ fn handle_client(
                     write_line(reader.get_mut(), "250-STARTTLS")?;
                 }
                 write_line(reader.get_mut(), "250-AUTH PLAIN LOGIN")?;
-                write_line(reader.get_mut(), "250-SIZE 10485760")?;
+                write_line(
+                    reader.get_mut(),
+                    &format!("250-SIZE {}", cfg.max_message_bytes),
+                )?;
                 write_line(reader.get_mut(), "250-8BITMIME")?;
                 write_line(reader.get_mut(), "250 OK")?;
                 state = State::Greeted;
@@ -242,10 +246,12 @@ fn handle_client(
                     if let Some((user, pass)) = auth::decode_plain(b64) {
                         if auth::authenticate(&cfg, &user, &pass) {
                             ratelimit::record_success(&peer_ip);
+                            metrics::inc_auth_success();
                             authenticated_user = Some(user);
                             write_line(reader.get_mut(), "235 Authentication successful")?;
                         } else {
                             ratelimit::record_failure(&peer_ip);
+                            metrics::inc_auth_failure();
                             util::log_event!(
                                 "warn",
                                 "SMTP auth failed",
@@ -268,10 +274,12 @@ fn handle_client(
                         if let Some((user, pass)) = auth::decode_plain(&b64) {
                             if auth::authenticate(&cfg, &user, &pass) {
                                 ratelimit::record_success(&peer_ip);
+                                metrics::inc_auth_success();
                                 authenticated_user = Some(user);
                                 write_line(reader.get_mut(), "235 Authentication successful")?;
                             } else {
                                 ratelimit::record_failure(&peer_ip);
+                                metrics::inc_auth_failure();
                                 util::log_event!(
                                     "warn",
                                     "SMTP auth failed",
@@ -362,6 +370,7 @@ fn handle_client(
                             now,
                         );
                         if decision == GreylistDecision::Defer {
+                            metrics::inc_greylist_rejects();
                             util::log!(
                                 "greylist defer ip={} from={} rcpt={}",
                                 peer_ip,
@@ -415,6 +424,8 @@ fn handle_client(
                     rcpts: rcpts.clone(),
                 };
                 data_buf.clear();
+                let max_msg = cfg.max_message_bytes as usize;
+                let mut oversized = false;
                 loop {
                     let dline = match read_line(&mut reader)? {
                         Some(l) => l,
@@ -423,13 +434,35 @@ fn handle_client(
                     if dline == "." {
                         break;
                     }
+                    if oversized {
+                        // Drain until terminating "." without growing the buffer.
+                        continue;
+                    }
                     let content = if dline.starts_with('.') {
                         dline.get(1..).unwrap_or("")
                     } else {
                         dline.as_str()
                     };
+                    let add = content.len().saturating_add(2);
+                    if data_buf.len().saturating_add(add) > max_msg {
+                        oversized = true;
+                        data_buf.clear();
+                        continue;
+                    }
                     data_buf.extend_from_slice(content.as_bytes());
                     data_buf.extend_from_slice(b"\r\n");
+                }
+                if oversized {
+                    util::log!(
+                        "rejecting message: size exceeds max_message_bytes={}",
+                        cfg.max_message_bytes
+                    );
+                    write_line(
+                        reader.get_mut(),
+                        "552 5.3.4 Message size exceeds fixed maximum message size",
+                    )?;
+                    state = State::Greeted;
+                    continue;
                 }
 
                 // Mail-loop guard: too many Received: headers.
@@ -461,6 +494,7 @@ fn handle_client(
                         hostname,
                     ) {
                         InboundAction::Reject(msg) => {
+                            metrics::inc_spam_rejects();
                             util::log!("inbound reject: {}", msg);
                             write_line(reader.get_mut(), &msg)?;
                             state = State::Greeted;
@@ -481,6 +515,8 @@ fn handle_client(
                 );
                 match delivered {
                     Ok(n) => {
+                        metrics::inc_messages_received();
+                        metrics::inc_messages_delivered(n as u64);
                         write_line(reader.get_mut(), &format!("250 OK: queued as {} msgs", n))?;
                     }
                     Err(e) if e.contains("OVERQUOTA") || e.contains("Mailbox full") => {
@@ -839,6 +875,7 @@ fn deliver_mail(
 
         if !remote.is_empty() {
             let id = queue::enqueue(&cfg.data_dir, from, &remote, raw).map_err(|e| e.to_string())?;
+            metrics::inc_messages_queued();
             util::log!(
                 "submission from {} to {:?}: enqueued as {} ({} remote)",
                 from,
@@ -934,5 +971,15 @@ mod tests {
         // Invalid UTF-8 also safe (lossy not needed; we scan bytes).
         let bad = b"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xf7\r\n\r\n";
         assert_eq!(count_received_headers(bad), 0);
+    }
+
+    #[test]
+    fn max_message_bytes_default() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.max_message_bytes,
+            crate::config::DEFAULT_MAX_MESSAGE_BYTES
+        );
+        assert_eq!(cfg.max_message_bytes, 25 * 1024 * 1024);
     }
 }

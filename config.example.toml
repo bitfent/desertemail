@@ -95,6 +95,12 @@ default_quota_mb = 0
 # Auth failures emit event=auth_fail ip=... user=... for fail2ban (see deploy/).
 log_format = "text"
 
+# --- Message size / metrics (Tier 4) ---
+# Max SMTP DATA / IMAP APPEND size in bytes (default 25 MiB). Oversize => SMTP 552 / IMAP NO.
+max_message_bytes = 26214400
+# If set, GET /metrics requires Authorization: Bearer <token> or ?token=
+# metrics_token = "change-me"
+
 # --- ACME / Let's Encrypt auto TLS (Tier 3) ---
 # When true, obtains/renews certs via ACME HTTP-01. Requires:
 #   - tls_cert_file + tls_key_file paths set (written by ACME)

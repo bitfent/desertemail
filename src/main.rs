@@ -22,23 +22,31 @@ use desertemail::ratelimit;
 use desertemail::shutdown;
 use desertemail::smtp::SmtpServer;
 use desertemail::tls;
+use desertemail::useredit;
 use desertemail::util;
 use desertemail::web;
 
 fn main() {
-    util::log!("desertemail starting");
-    shutdown::install_handlers();
-
     let args: Vec<String> = env::args().collect();
+    // First pass: --config may appear anywhere (including after `user ...`).
     let mut config_path = "config.toml".to_string();
+    let mut i = 1;
+    while i < args.len() {
+        if (args[i] == "--config" || args[i] == "-c") && i + 1 < args.len() {
+            config_path = args[i + 1].clone();
+            i += 1;
+        }
+        i += 1;
+    }
+
     let mut dkim_dns_domain: Option<String> = None;
     let mut hash_password_mode: Option<Option<String>> = None; // Some(None)=prompt, Some(Some(p))=non-interactive
+    let mut user_cmd: Option<UserCmd> = None;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--config" || args[i] == "-c" {
             if i + 1 < args.len() {
-                config_path = args[i + 1].clone();
-                i += 1;
+                i += 1; // already applied
             }
         } else if args[i] == "--dkim-dns" {
             if i + 1 < args.len() {
@@ -55,23 +63,12 @@ fn main() {
             } else {
                 hash_password_mode = Some(None);
             }
+        } else if args[i] == "user" {
+            // desertemail user <add|remove|list|passwd> ...
+            user_cmd = Some(parse_user_cmd(&args, i + 1));
+            break;
         } else if args[i] == "--help" || args[i] == "-h" {
-            println!("Usage: desertemail [--config path/to/config.toml]");
-            println!("       desertemail --dkim-dns <domain> [--config path]");
-            println!("       desertemail --hash-password [plaintext]");
-            println!();
-            println!("DKIM setup:");
-            println!("  1. Generate a key:  openssl genrsa -out dkim.pem 2048");
-            println!("  2. Set dkim_key_file / dkim_selector in config.toml");
-            println!("  3. Publish DNS:     desertemail --dkim-dns example.com");
-            println!("     (TXT at <selector>._domainkey.<domain>)");
-            println!();
-            println!("Password hashing:");
-            println!("  desertemail --hash-password");
-            println!("  desertemail --hash-password 'my secret'");
-            println!("  Paste the pbkdf2_sha256$... string into [users] in config.toml");
-            println!();
-            println!("See config.example.toml and README.md");
+            print_help();
             return;
         }
         i += 1;
@@ -81,6 +78,15 @@ fn main() {
         run_hash_password(maybe_plain);
         return;
     }
+
+    if let Some(cmd) = user_cmd {
+        run_user_cmd(&config_path, cmd);
+        return;
+    }
+
+    // Server path only (not user/--hash-password CLI helpers).
+    util::log!("desertemail starting");
+    shutdown::install_handlers();
 
     let mut cfg = match Config::load(Path::new(&config_path)) {
         Ok(c) => {
@@ -286,6 +292,206 @@ fn main() {
     thread::sleep(std::time::Duration::from_secs(2));
     util::log!("desertemail stopped cleanly");
     std::process::exit(0);
+}
+
+fn print_help() {
+    println!("Usage: desertemail [--config path/to/config.toml]");
+    println!("       desertemail --dkim-dns <domain> [--config path]");
+    println!("       desertemail --hash-password [plaintext]");
+    println!("       desertemail user add <email> [--password <pw>] [--quota <mb>]");
+    println!("       desertemail user remove <email>");
+    println!("       desertemail user list");
+    println!("       desertemail user passwd <email>");
+    println!();
+    println!("DKIM setup:");
+    println!("  1. Generate a key:  openssl genrsa -out dkim.pem 2048");
+    println!("  2. Set dkim_key_file / dkim_selector in config.toml");
+    println!("  3. Publish DNS:     desertemail --dkim-dns example.com");
+    println!("     (TXT at <selector>._domainkey.<domain>)");
+    println!();
+    println!("Password hashing:");
+    println!("  desertemail --hash-password");
+    println!("  desertemail --hash-password 'my secret'");
+    println!("  Paste the pbkdf2_sha256$... string into [users] in config.toml");
+    println!();
+    println!("User management (edits config.toml [users]/[quotas] in place):");
+    println!("  desertemail user add alice@example.com");
+    println!("  desertemail user add bob --password secret --quota 512");
+    println!("  desertemail user list");
+    println!("  desertemail user passwd alice");
+    println!("  desertemail user remove bob");
+    println!();
+    println!("See config.example.toml and README.md");
+}
+
+enum UserCmd {
+    Add {
+        email: String,
+        password: Option<String>,
+        quota_mb: Option<u64>,
+    },
+    Remove {
+        email: String,
+    },
+    List,
+    Passwd {
+        email: String,
+    },
+}
+
+fn parse_user_cmd(args: &[String], start: usize) -> UserCmd {
+    if start >= args.len() {
+        eprintln!("Usage: desertemail user <add|remove|list|passwd> ...");
+        std::process::exit(1);
+    }
+    let sub = args[start].as_str();
+    match sub {
+        "list" => UserCmd::List,
+        "add" => {
+            if start + 1 >= args.len() {
+                eprintln!("Usage: desertemail user add <email> [--password <pw>] [--quota <mb>]");
+                std::process::exit(1);
+            }
+            let email = args[start + 1].clone();
+            let mut password = None;
+            let mut quota_mb = None;
+            let mut j = start + 2;
+            while j < args.len() {
+                if args[j] == "--password" && j + 1 < args.len() {
+                    password = Some(args[j + 1].clone());
+                    j += 2;
+                } else if args[j] == "--quota" && j + 1 < args.len() {
+                    quota_mb = Some(args[j + 1].parse().unwrap_or(0));
+                    j += 2;
+                } else if args[j] == "--config" || args[j] == "-c" {
+                    j += 2; // already handled for path; skip
+                } else {
+                    j += 1;
+                }
+            }
+            UserCmd::Add {
+                email,
+                password,
+                quota_mb,
+            }
+        }
+        "remove" | "rm" | "del" => {
+            if start + 1 >= args.len() {
+                eprintln!("Usage: desertemail user remove <email>");
+                std::process::exit(1);
+            }
+            UserCmd::Remove {
+                email: args[start + 1].clone(),
+            }
+        }
+        "passwd" | "password" => {
+            if start + 1 >= args.len() {
+                eprintln!("Usage: desertemail user passwd <email>");
+                std::process::exit(1);
+            }
+            UserCmd::Passwd {
+                email: args[start + 1].clone(),
+            }
+        }
+        _ => {
+            eprintln!("Unknown user subcommand: {}", sub);
+            eprintln!("Usage: desertemail user <add|remove|list|passwd> ...");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_user_cmd(config_path: &str, cmd: UserCmd) {
+    let path = Path::new(config_path);
+    match cmd {
+        UserCmd::List => {
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: cannot read {}: {}", config_path, e);
+                    std::process::exit(1);
+                }
+            };
+            let names = useredit::list_users(&content);
+            if names.is_empty() {
+                println!("(no users in {})", config_path);
+            } else {
+                for n in names {
+                    println!("{}", n);
+                }
+            }
+        }
+        UserCmd::Add {
+            email,
+            password,
+            quota_mb,
+        } => {
+            let pw = match password {
+                Some(p) => p,
+                None => {
+                    let p1 = prompt_password("Password: ");
+                    let p2 = prompt_password("Confirm:  ");
+                    if p1 != p2 {
+                        eprintln!("error: passwords do not match");
+                        std::process::exit(1);
+                    }
+                    if p1.is_empty() {
+                        eprintln!("error: empty password");
+                        std::process::exit(1);
+                    }
+                    p1
+                }
+            };
+            let email_c = email.clone();
+            let pw_c = pw.clone();
+            match useredit::edit_file(path, |c| useredit::add_user(c, &email_c, &pw_c)) {
+                Ok(_) => println!("user added/updated: {}", email),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            if let Some(mb) = quota_mb {
+                let email_c = email.clone();
+                if let Err(e) = useredit::edit_file(path, |c| useredit::set_quota(c, &email_c, mb))
+                {
+                    eprintln!("warning: user saved but quota failed: {}", e);
+                } else {
+                    println!("quota set: {} = {} MiB", email, mb);
+                }
+            }
+        }
+        UserCmd::Remove { email } => {
+            let email_c = email.clone();
+            match useredit::edit_file(path, |c| useredit::remove_user(c, &email_c)) {
+                Ok(_) => println!("user removed: {}", email),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        UserCmd::Passwd { email } => {
+            let p1 = prompt_password("New password: ");
+            let p2 = prompt_password("Confirm:      ");
+            if p1 != p2 {
+                eprintln!("error: passwords do not match");
+                std::process::exit(1);
+            }
+            if p1.is_empty() {
+                eprintln!("error: empty password");
+                std::process::exit(1);
+            }
+            let email_c = email.clone();
+            match useredit::edit_file(path, |c| useredit::set_password(c, &email_c, &p1)) {
+                Ok(_) => println!("password updated for: {}", email),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 }
 
 fn run_hash_password(maybe_plain: Option<String>) {

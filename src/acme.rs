@@ -630,9 +630,14 @@ fn http_exchange(
         }
     }
 
+    // Cap ACME HTTP bodies (hostile / misconfigured directory).
+    const MAX_ACME_BODY: usize = 2 * 1024 * 1024;
     let resp_body = if chunked {
-        read_chunked(&mut reader)?
+        read_chunked_capped(&mut reader, MAX_ACME_BODY)?
     } else if let Some(n) = content_length {
+        if n > MAX_ACME_BODY {
+            return Err(format!("ACME response too large: {} bytes", n));
+        }
         let mut buf = vec![0u8; n];
         if n > 0 {
             reader.read_exact(&mut buf).map_err(|e| e.to_string())?;
@@ -640,7 +645,18 @@ fn http_exchange(
         String::from_utf8_lossy(&buf).into_owned()
     } else {
         let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        // Bound read without content-length.
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut chunk).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            if buf.len().saturating_add(n) > MAX_ACME_BODY {
+                return Err("ACME response too large".into());
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
         String::from_utf8_lossy(&buf).into_owned()
     };
 
@@ -655,13 +671,17 @@ fn http_exchange(
     Ok((resp_body, headers, status))
 }
 
-fn read_chunked<R: BufRead>(reader: &mut R) -> Result<String, String> {
+fn read_chunked_capped<R: BufRead>(reader: &mut R, max: usize) -> Result<String, String> {
     let mut out = Vec::new();
     loop {
         let line = util::read_line(reader)
             .map_err(|e| e.to_string())?
             .ok_or("EOF chunk size")?;
         let size_hex = line.split(';').next().unwrap_or("0").trim();
+        // Cap hex length to avoid huge usize parses on hostile input.
+        if size_hex.len() > 8 {
+            return Err("chunk size too large".into());
+        }
         let size = usize::from_str_radix(size_hex, 16).map_err(|e| e.to_string())?;
         if size == 0 {
             // trailers
@@ -674,6 +694,9 @@ fn read_chunked<R: BufRead>(reader: &mut R) -> Result<String, String> {
                 }
             }
             break;
+        }
+        if out.len().saturating_add(size) > max {
+            return Err("chunked body too large".into());
         }
         let mut buf = vec![0u8; size];
         reader.read_exact(&mut buf).map_err(|e| e.to_string())?;

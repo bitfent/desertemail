@@ -13,6 +13,7 @@ use rustls::ServerConfig;
 use crate::auth;
 use crate::config::Config;
 use crate::limits;
+use crate::metrics;
 use crate::ratelimit;
 use crate::storage::{self, Maildir, MessageMeta};
 use crate::tls::{self, Conn};
@@ -259,6 +260,7 @@ fn handle_client(
                 let (user, pass) = parse_login_args(rest);
                 if auth::authenticate(&cfg, &user, &pass) {
                     ratelimit::record_success(&peer_ip);
+                    metrics::inc_auth_success();
                     let mailbox = cfg.resolve_mailbox(&user).unwrap_or_else(|| user.clone());
                     state = State::Auth { user: mailbox };
                     write_line(reader.get_mut(), &format!("{} OK LOGIN completed", tag))?;
@@ -273,6 +275,7 @@ fn handle_client(
                     );
                 } else {
                     ratelimit::record_failure(&peer_ip);
+                    metrics::inc_auth_failure();
                     util::log_event!(
                         "warn",
                         "IMAP login failed",
@@ -923,24 +926,40 @@ fn parse_astring(s: &str) -> Result<(String, &str), String> {
     }
 }
 
+/// Hard cap for literal size parsing when no config is available (32 MiB).
+/// Runtime APPEND also enforces `cfg.max_message_bytes`.
+pub const MAX_LITERAL_BYTES: usize = 32 * 1024 * 1024;
+
 pub fn parse_literal_size(s: &str) -> Result<(usize, bool), String> {
+    parse_literal_size_capped(s, MAX_LITERAL_BYTES)
+}
+
+/// Parse `{n}` / `{n+}` with an explicit size cap (checked arithmetic).
+pub fn parse_literal_size_capped(s: &str, max: usize) -> Result<(usize, bool), String> {
     let s = s.trim();
     if !s.starts_with('{') {
         return Err("expected literal {size}".into());
     }
     let end = s.find('}').ok_or("unterminated literal")?;
-    let inner = &s[1..end];
+    let inner = s.get(1..end).unwrap_or("");
     let non_sync = inner.ends_with('+');
     let num = if non_sync {
-        &inner[..inner.len() - 1]
+        inner.get(..inner.len().saturating_sub(1)).unwrap_or("")
     } else {
         inner
     };
-    let size: usize = num.parse().map_err(|_| "bad literal size".to_string())?;
-    if size > 32 * 1024 * 1024 {
+    // Reject oversized digit strings before parse (avoid overflow / huge allocs).
+    if num.is_empty() || num.len() > 12 || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("bad literal size".into());
+    }
+    let size: u64 = num.parse().map_err(|_| "bad literal size".to_string())?;
+    let max_u = max as u64;
+    if size > max_u {
         return Err("literal too large".into());
     }
-    Ok((size, non_sync))
+    // Safe: size <= max <= usize::MAX on our platforms for 32 MiB cap.
+    let size_usz = size as usize;
+    Ok((size_usz, non_sync))
 }
 
 fn parse_flag_list(s: &str) -> Vec<String> {
@@ -1087,8 +1106,15 @@ pub fn parse_imap_date(s: &str) -> Result<u64, String> {
     if parts.len() != 3 {
         return Err("bad date".into());
     }
-    let day: u32 = parts[0].parse().map_err(|_| "bad day".to_string())?;
-    let mon = match parts[1].to_ascii_lowercase().as_str() {
+    let day: u32 = parts
+        .first()
+        .and_then(|p| p.parse().ok())
+        .ok_or_else(|| "bad day".to_string())?;
+    let mon_s = parts
+        .get(1)
+        .map(|s| s.to_ascii_lowercase())
+        .ok_or_else(|| "bad month".to_string())?;
+    let mon = match mon_s.as_str() {
         "jan" => 1,
         "feb" => 2,
         "mar" => 3,
@@ -1103,7 +1129,10 @@ pub fn parse_imap_date(s: &str) -> Result<u64, String> {
         "dec" => 12,
         _ => return Err("bad month".into()),
     };
-    let year: i32 = parts[2].parse().map_err(|_| "bad year".to_string())?;
+    let year: i32 = parts
+        .get(2)
+        .and_then(|p| p.parse().ok())
+        .ok_or_else(|| "bad year".to_string())?;
     if day < 1 || day > 31 || year < 1970 {
         return Err("date out of range".into());
     }
@@ -1627,6 +1656,14 @@ fn do_append_full(
     let (mailbox, flags, size, non_sync) =
         parse_append_args(after).map_err(AppendError::Bad)?;
 
+    let max = (cfg.max_message_bytes as usize).min(MAX_LITERAL_BYTES);
+    if size > max {
+        return Err(AppendError::Bad(format!(
+            "message too large (max {} bytes)",
+            max
+        )));
+    }
+
     if !non_sync {
         write_line(reader.get_mut(), "+ Ready for literal data")
             .map_err(|e| AppendError::Other(e.to_string()))?;
@@ -1770,6 +1807,12 @@ mod tests {
         let (size, ns) = parse_literal_size("{100}").unwrap();
         assert_eq!(size, 100);
         assert!(!ns);
+        // Oversized digit string / beyond hard cap rejected without panic.
+        assert!(parse_literal_size("{999999999999}").is_err());
+        assert!(parse_literal_size("{999999999}").is_err()); // > 32 MiB
+        assert!(parse_literal_size("{notanumber}").is_err());
+        assert!(parse_literal_size_capped("{100}", 50).is_err());
+        assert!(parse_literal_size_capped("{40}", 50).is_ok());
     }
 
     #[test]

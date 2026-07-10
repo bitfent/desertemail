@@ -2,11 +2,15 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use crate::crypto::RsaKey;
 use crate::passwd;
 use crate::util;
+
+/// Default max message size: 25 MiB.
+pub const DEFAULT_MAX_MESSAGE_BYTES: u64 = 25 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -24,7 +28,8 @@ pub struct Config {
     pub default_password: String,
     /// If true, unknown users may authenticate with `default_password`. Default false.
     pub allow_default_password_auth: bool,
-    pub users: HashMap<String, String>,
+    /// Live user map (username → password or pbkdf2 hash). Shared + reloadable.
+    pub users: Arc<RwLock<HashMap<String, String>>>,
     /// DKIM selector (default "mail"). DNS: `<selector>._domainkey.<domain>`
     pub dkim_selector: String,
     /// Path to PEM RSA private key for DKIM (PKCS#1 or PKCS#8).
@@ -89,8 +94,8 @@ pub struct Config {
     // --- Tier 3: protocol completeness, ACME, quotas, logging ---
     /// Default mailbox quota in MiB (0 = unlimited).
     pub default_quota_mb: u64,
-    /// Per-user quota overrides in MiB (`[quotas]` section, key = username).
-    pub quotas: HashMap<String, u64>,
+    /// Per-user quota overrides in MiB (`[quotas]` section, key = username). Live-reloadable.
+    pub quotas: Arc<RwLock<HashMap<String, u64>>>,
     /// Log format: "text" (default) or "json".
     pub log_format: String,
     /// Enable ACME (Let's Encrypt) auto-certificate. Default false.
@@ -101,6 +106,14 @@ pub struct Config {
     pub acme_directory: String,
     /// Domains to request certs for (default = cfg.domains).
     pub acme_domains: Vec<String>,
+
+    // --- Tier 4: ops ---
+    /// Max accepted message size in bytes (SMTP DATA / IMAP APPEND). Default 25 MiB.
+    pub max_message_bytes: u64,
+    /// If non-empty, GET /metrics requires `Authorization: Bearer <token>` or `?token=`.
+    pub metrics_token: String,
+    /// Path of the config file this was loaded from (for in-place user edits).
+    pub config_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -117,7 +130,7 @@ impl Default for Config {
             catch_all: true,
             default_password: "changeme".into(),
             allow_default_password_auth: false,
-            users: HashMap::new(),
+            users: Arc::new(RwLock::new(HashMap::new())),
             dkim_selector: "mail".into(),
             dkim_key_file: None,
             dkim_key: None,
@@ -148,12 +161,15 @@ impl Default for Config {
             spam_score_reject: 0, // disabled
             spam_check_ptr: true,
             default_quota_mb: 0,
-            quotas: HashMap::new(),
+            quotas: Arc::new(RwLock::new(HashMap::new())),
             log_format: "text".into(),
             acme: false,
             acme_email: String::new(),
             acme_directory: "https://acme-v02.api.letsencrypt.org/directory".into(),
             acme_domains: Vec::new(),
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            metrics_token: String::new(),
+            config_path: None,
         }
     }
 }
@@ -161,12 +177,16 @@ impl Default for Config {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
         let content = fs::read_to_string(path).map_err(|e| format!("read config: {}", e))?;
-        Self::parse(&content)
+        let mut cfg = Self::parse(&content)?;
+        cfg.config_path = Some(path.to_path_buf());
+        Ok(cfg)
     }
 
     pub fn parse(content: &str) -> Result<Self, String> {
         let mut cfg = Config::default();
         let mut section = String::new();
+        let mut users = HashMap::new();
+        let mut quotas = HashMap::new();
 
         for (lineno, raw_line) in content.lines().enumerate() {
             let line = raw_line.trim();
@@ -305,12 +325,19 @@ impl Config {
                 ("", "acme_email") => cfg.acme_email = val,
                 ("", "acme_directory") => cfg.acme_directory = val,
                 ("", "acme_domains") => cfg.acme_domains = parse_list(&val),
+                ("", "max_message_bytes") => {
+                    cfg.max_message_bytes = parse_u64(&val, cfg.max_message_bytes);
+                    if cfg.max_message_bytes == 0 {
+                        cfg.max_message_bytes = DEFAULT_MAX_MESSAGE_BYTES;
+                    }
+                }
+                ("", "metrics_token") => cfg.metrics_token = val,
                 ("users", k) => {
-                    cfg.users.insert(k.to_string(), val);
+                    users.insert(k.to_string(), val);
                 }
                 ("quotas", k) => {
                     let mb = parse_u64(&val, 0);
-                    cfg.quotas.insert(k.to_string(), mb);
+                    quotas.insert(k.to_string(), mb);
                 }
                 _ => {
                     if section.is_empty() {
@@ -322,15 +349,15 @@ impl Config {
 
         cfg.domains = cfg.domains.into_iter().map(|d| d.to_lowercase()).collect();
         let mut new_users = HashMap::new();
-        for (k, v) in cfg.users {
+        for (k, v) in users {
             new_users.insert(k.to_lowercase(), v);
         }
-        cfg.users = new_users;
         let mut new_quotas = HashMap::new();
-        for (k, v) in cfg.quotas {
+        for (k, v) in quotas {
             new_quotas.insert(k.to_lowercase(), v);
         }
-        cfg.quotas = new_quotas;
+        *cfg.users.write().unwrap_or_else(|e| e.into_inner()) = new_users;
+        *cfg.quotas.write().unwrap_or_else(|e| e.into_inner()) = new_quotas;
         if cfg.acme_domains.is_empty() {
             cfg.acme_domains = cfg.domains.clone();
         } else {
@@ -344,20 +371,92 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Reload users + quotas maps from `config_path` (live, no restart).
+    pub fn reload_users_quotas(&self) -> Result<(), String> {
+        let path = self
+            .config_path
+            .as_ref()
+            .ok_or_else(|| "config_path not set".to_string())?;
+        let content = fs::read_to_string(path).map_err(|e| format!("read config: {}", e))?;
+        let fresh = Self::parse(&content)?;
+        let users = fresh
+            .users
+            .read()
+            .map_err(|_| "users lock poisoned".to_string())?
+            .clone();
+        let quotas = fresh
+            .quotas
+            .read()
+            .map_err(|_| "quotas lock poisoned".to_string())?
+            .clone();
+        *self
+            .users
+            .write()
+            .map_err(|_| "users lock poisoned".to_string())? = users;
+        *self
+            .quotas
+            .write()
+            .map_err(|_| "quotas lock poisoned".to_string())? = quotas;
+        Ok(())
+    }
+
+    /// Sorted list of configured usernames (no passwords).
+    pub fn user_names(&self) -> Vec<String> {
+        let guard = match self.users.read() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        let mut names: Vec<_> = guard.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Insert/update a user in the live map (does not persist).
+    pub fn set_user_live(&self, user: &str, hash_or_pass: String) {
+        let user = user.to_lowercase();
+        if let Ok(mut g) = self.users.write() {
+            g.insert(user, hash_or_pass);
+        }
+    }
+
+    /// Remove a user from the live map (does not persist).
+    pub fn remove_user_live(&self, user: &str) {
+        let user = user.to_lowercase();
+        if let Ok(mut g) = self.users.write() {
+            g.remove(&user);
+        }
+    }
+
+    /// Set live quota override in MiB (0 removes override).
+    pub fn set_quota_live(&self, user: &str, mb: u64) {
+        let user = user.to_lowercase();
+        if let Ok(mut g) = self.quotas.write() {
+            if mb == 0 {
+                g.remove(&user);
+            } else {
+                g.insert(user, mb);
+            }
+        }
+    }
+
     /// Quota for `user` in bytes (0 = unlimited).
     pub fn quota_bytes_for(&self, user: &str) -> u64 {
         let user = user.to_lowercase();
-        let mb = self
-            .quotas
-            .get(&user)
-            .copied()
-            .unwrap_or(self.default_quota_mb);
+        let guard = match self.quotas.read() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        let mb = guard.get(&user).copied().unwrap_or(self.default_quota_mb);
         mb.saturating_mul(1024 * 1024)
     }
 
     /// Log loud non-fatal security warnings about insecure config.
     pub fn audit(&self) {
-        for (user, stored) in &self.users {
+        let users = match self.users.read() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        for (user, stored) in users.iter() {
             if !passwd::is_hashed(stored) {
                 util::log!(
                     "WARNING: user {} has a plaintext password in config; run `desertemail --hash-password` and replace it",
@@ -375,7 +474,7 @@ impl Config {
                 "WARNING: default_password is still \"changeme\" — change it (or leave allow_default_password_auth=false)"
             );
         }
-        if self.catch_all && self.users.is_empty() {
+        if self.catch_all && users.is_empty() {
             util::log!(
                 "WARNING: catch_all=true with no [users] defined — mail is accepted but nobody can authenticate"
             );
@@ -392,8 +491,12 @@ impl Config {
 
     pub fn resolve_mailbox(&self, addr: &str) -> Option<String> {
         let (local, domain) = util::parse_email_addr(addr);
+        let users = match self.users.read() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         if domain.is_empty() {
-            if self.users.contains_key(&local) {
+            if users.contains_key(&local) {
                 return Some(local);
             }
             if self.catch_all {
@@ -405,10 +508,10 @@ impl Config {
             return None;
         }
         let full = format!("{}@{}", local, domain);
-        if self.users.contains_key(&full) {
+        if users.contains_key(&full) {
             return Some(full);
         }
-        if self.users.contains_key(&local) {
+        if users.contains_key(&local) {
             return Some(local);
         }
         if self.catch_all {
@@ -423,7 +526,11 @@ impl Config {
     /// for unknown users). `catch_all` does NOT grant authentication.
     pub fn check_password(&self, user: &str, pass: &str) -> bool {
         let user = user.to_lowercase();
-        if let Some(stored) = self.users.get(&user) {
+        let users = match self.users.read() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        if let Some(stored) = users.get(&user) {
             return passwd::verify_password(stored, pass);
         }
         if self.allow_default_password_auth {
@@ -476,6 +583,8 @@ mod tests {
         cfg.allow_default_password_auth = false;
         cfg.default_password = "changeme".into();
         cfg.users
+            .write()
+            .unwrap()
             .insert("alice".into(), "alicepass".into());
         assert!(cfg.check_password("alice", "alicepass"));
         assert!(!cfg.check_password("alice", "wrong"));
@@ -494,9 +603,9 @@ mod tests {
 
     #[test]
     fn hashed_password_in_config() {
-        let mut cfg = Config::default();
+        let cfg = Config::default();
         let hashed = passwd::hash_password("s3cret");
-        cfg.users.insert("alice".into(), hashed);
+        cfg.users.write().unwrap().insert("alice".into(), hashed);
         assert!(cfg.check_password("alice", "s3cret"));
         assert!(!cfg.check_password("alice", "wrong"));
     }
@@ -528,6 +637,8 @@ acme = true
 acme_email = "admin@example.com"
 acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
 acme_domains = ["mail.example.com"]
+max_message_bytes = 1048576
+metrics_token = "secret"
 [users]
 "alice" = "pass"
 [quotas]
@@ -552,6 +663,8 @@ acme_domains = ["mail.example.com"]
         assert_eq!(cfg.acme_email, "admin@example.com");
         assert_eq!(cfg.quota_bytes_for("alice"), 512 * 1024 * 1024);
         assert_eq!(cfg.quota_bytes_for("bob"), 100 * 1024 * 1024);
+        assert_eq!(cfg.max_message_bytes, 1048576);
+        assert_eq!(cfg.metrics_token, "secret");
         // defaults stay permissive when unset
         let def = Config::default();
         assert!(!def.spf_enforce);
@@ -560,6 +673,7 @@ acme_domains = ["mail.example.com"]
         assert_eq!(def.spam_score_reject, 0);
         assert_eq!(def.default_quota_mb, 0);
         assert!(!def.acme);
+        assert_eq!(def.max_message_bytes, DEFAULT_MAX_MESSAGE_BYTES);
     }
 
     #[test]

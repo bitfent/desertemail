@@ -838,6 +838,7 @@ fn resolve_socket_addrs(hostport: &str) -> io::Result<SocketAddr> {
 }
 
 fn bounce_message(cfg: &Config, msg: &QueueMessage, reason: &str) {
+    crate::metrics::inc_messages_bounced();
     let bounce_body = format!(
         "From: mailer-daemon@localhost\r\n\
          To: {}\r\n\

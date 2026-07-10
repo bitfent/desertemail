@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::metrics;
+
 /// Default max concurrent connections (all protocols).
 pub const DEFAULT_MAX_CONNECTIONS: usize = 512;
 /// Default max concurrent connections from a single IP.
@@ -53,6 +55,8 @@ impl ConnLimiter {
             return None;
         }
         *map.entry(ip.to_string()).or_insert(0) += 1;
+        metrics::inc_connections_total();
+        metrics::inc_connections_active();
         Some(ConnGuard {
             limiter: self,
             ip: ip.to_string(),
@@ -62,6 +66,7 @@ impl ConnLimiter {
 
     fn release(&self, ip: &str) {
         self.global.fetch_sub(1, Ordering::SeqCst);
+        metrics::dec_connections_active();
         if let Ok(mut map) = self.per_ip.lock() {
             if let Some(n) = map.get_mut(ip) {
                 *n = n.saturating_sub(1);
@@ -71,6 +76,16 @@ impl ConnLimiter {
             }
         }
     }
+
+    /// Current global active connection count.
+    pub fn active_count(&self) -> usize {
+        self.global.load(Ordering::Relaxed)
+    }
+}
+
+/// Active connections held by the global limiter.
+pub fn active_connections() -> usize {
+    global_limiter().active_count()
 }
 
 /// RAII guard: releases the connection slot when dropped.

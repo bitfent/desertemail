@@ -16,10 +16,12 @@ use crate::auth;
 use crate::config::Config;
 use crate::crypto;
 use crate::limits;
+use crate::metrics;
 use crate::queue;
 use crate::ratelimit;
 use crate::storage::Maildir;
 use crate::tls::{self, Conn};
+use crate::useredit;
 use crate::util;
 
 // ---------------------------------------------------------------------------
@@ -143,13 +145,38 @@ fn parse_request(reader: &mut impl BufRead) -> io::Result<Option<Request>> {
         }
     }
 
+    // Cap body size: reject oversize with empty body (caller gets no form fields).
+    // Prefer checked parse; cap at 1 MiB for form posts (mail send is small).
+    const MAX_HTTP_BODY: usize = 1024 * 1024;
     let mut content_len = 0usize;
     if let Some(cl) = headers.get("content-length") {
-        content_len = cl.parse().unwrap_or(0);
-    }
-    // Cap body size to avoid unbounded allocation (16 MiB).
-    if content_len > 16 * 1024 * 1024 {
-        content_len = 0;
+        // Reject non-numeric / huge digit strings without panic.
+        if cl.len() <= 12 && cl.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(n) = cl.parse::<u64>() {
+                if n <= MAX_HTTP_BODY as u64 {
+                    content_len = n as usize;
+                } else {
+                    // Drain a limited amount then stop — do not allocate the claimed size.
+                    let mut drain = [0u8; 8192];
+                    let mut left = n.min(MAX_HTTP_BODY as u64 * 2);
+                    while left > 0 {
+                        let chunk = drain.len().min(left as usize);
+                        match reader.read(&mut drain[..chunk]) {
+                            Ok(0) => break,
+                            Ok(r) => left = left.saturating_sub(r as u64),
+                            Err(_) => break,
+                        }
+                    }
+                    return Ok(Some(Request {
+                        method,
+                        path,
+                        query,
+                        headers,
+                        body: Vec::new(),
+                    }));
+                }
+            }
+        }
     }
     let mut body = vec![0u8; content_len];
     if content_len > 0 {
@@ -296,6 +323,8 @@ impl Response {
     fn plain(status: u16, body: &str) -> Self {
         let reason = match status {
             200 => "OK",
+            401 => "Unauthorized",
+            403 => "Forbidden",
             404 => "Not Found",
             _ => "OK",
         };
@@ -304,7 +333,24 @@ impl Response {
             status,
             reason,
             headers: vec![
-                ("Content-Type".into(), "text/plain".into()),
+                ("Content-Type".into(), "text/plain; charset=utf-8".into()),
+                ("Content-Length".into(), bytes.len().to_string()),
+                ("Connection".into(), "close".into()),
+            ],
+            body: bytes,
+        }
+    }
+
+    fn prometheus(status: u16, body: &str) -> Self {
+        let bytes = body.as_bytes().to_vec();
+        Self {
+            status,
+            reason: "OK",
+            headers: vec![
+                (
+                    "Content-Type".into(),
+                    "text/plain; version=0.0.4; charset=utf-8".into(),
+                ),
                 ("Content-Length".into(), bytes.len().to_string()),
                 ("Connection".into(), "close".into()),
             ],
@@ -512,6 +558,21 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
     let token = cookie_value(req, "session");
     let user = session_user(token.as_deref());
 
+    // Liveness probe (no auth).
+    if req.method == "GET" && req.path == "/healthz" {
+        return Response::plain(200, "ok");
+    }
+
+    // Prometheus metrics (no auth, or gated by metrics_token).
+    if req.method == "GET" && req.path == "/metrics" {
+        if !metrics_authorized(cfg, req) {
+            return Response::plain(401, "unauthorized");
+        }
+        let snap = metrics::snapshot(&cfg.data_dir);
+        let body = metrics::format_prometheus(&snap);
+        return Response::prometheus(200, &body);
+    }
+
     // ACME HTTP-01 challenge (no auth) — required for Let's Encrypt when acme=true.
     // Must be reachable on port 80 (or a reverse-proxy path to this server).
     if req.method == "GET" && req.path.starts_with("/.well-known/acme-challenge/") {
@@ -543,12 +604,81 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
                 ("GET", "/compose") => page_compose_for(&user, None, None),
                 ("POST", "/send") => handle_send(cfg, &user, req),
                 ("GET", "/sent") => page_sent(cfg, &user),
-                ("GET", "/admin") | ("POST", "/admin") => page_admin(cfg, &user, None),
+                ("GET", "/admin") => page_admin(cfg, &user, None),
+                ("POST", "/admin") => handle_admin_post(cfg, &user, req),
+                ("POST", "/admin/user/add") => handle_admin_user_add(cfg, &user, req),
+                ("POST", "/admin/user/remove") => handle_admin_user_remove(cfg, &user, req),
+                ("POST", "/admin/user/quota") => handle_admin_user_quota(cfg, &user, req),
                 ("POST", "/admin/queue/delete") => handle_queue_delete(cfg, &user, req),
                 _ => Response::html(404, "Not Found", page_shell("Not Found", &user, "<p>404</p>")),
             }
         }
     }
+}
+
+fn metrics_authorized(cfg: &Config, req: &Request) -> bool {
+    if cfg.metrics_token.is_empty() {
+        return true;
+    }
+    if let Some(q) = req.query.get("token") {
+        if q == &cfg.metrics_token {
+            return true;
+        }
+    }
+    if let Some(auth) = req.headers.get("authorization") {
+        let prefix = "Bearer ";
+        if let Some(rest) = auth.strip_prefix(prefix) {
+            if rest == cfg.metrics_token {
+                return true;
+            }
+        }
+        // Also accept raw token.
+        if auth == &cfg.metrics_token {
+            return true;
+        }
+    }
+    false
+}
+
+/// Same-origin check for state-changing POSTs (CSRF-ish).
+/// When Origin or Referer is present, require it to match Host.
+fn same_origin_ok(req: &Request) -> bool {
+    let host = match req.headers.get("host") {
+        Some(h) if !h.is_empty() => h.as_str(),
+        _ => return true, // no Host — cannot verify; allow (local/test)
+    };
+    if let Some(origin) = req.headers.get("origin") {
+        return origin_matches_host(origin, host);
+    }
+    if let Some(referer) = req.headers.get("referer") {
+        return origin_matches_host(referer, host);
+    }
+    // Neither header present — older clients / curl; allow (session cookie still required).
+    true
+}
+
+fn origin_matches_host(origin_or_referer: &str, host: &str) -> bool {
+    // origin: "https://mail.example.com" or "http://127.0.0.1:8080"
+    // referer: same + path
+    let s = origin_or_referer.trim();
+    let after_scheme = if let Some(rest) = s.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        rest
+    } else {
+        return false;
+    };
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    // Compare case-insensitively; Host may omit default port.
+    authority.eq_ignore_ascii_case(host)
+        || authority
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .eq_ignore_ascii_case(host.split(':').next().unwrap_or(""))
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +749,7 @@ fn handle_login(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Res
     }
     if !auth::authenticate(cfg, username, password) {
         ratelimit::record_failure(peer_ip);
+        metrics::inc_auth_failure();
         util::log_event!(
             "warn",
             "web login failed",
@@ -631,6 +762,7 @@ fn handle_login(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Res
         return page_login(Some("Invalid username or password"), 200);
     }
     ratelimit::record_success(peer_ip);
+    metrics::inc_auth_success();
     let user = username.to_lowercase();
     let token = make_session_token(&user);
     set_session(&token, &user);
@@ -1197,11 +1329,17 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
         .map(|d| format!("<li>{}</li>", esc(d)))
         .collect();
 
+    let names = cfg.user_names();
     let mut users_html = String::new();
-    let mut names: Vec<_> = cfg.users.keys().cloned().collect();
-    names.sort();
-    for n in names {
-        users_html.push_str(&format!("<li>{}</li>", esc(&n)));
+    for n in &names {
+        users_html.push_str(&format!(
+            "<li>{} \
+             <form method=\"post\" action=\"/admin/user/remove\" style=\"display:inline\">\
+             <input type=\"hidden\" name=\"email\" value=\"{}\">\
+             <button type=\"submit\">remove</button></form></li>",
+            esc(n),
+            esc(n)
+        ));
     }
     if users_html.is_empty() {
         users_html.push_str("<li><em>(none configured)</em></li>");
@@ -1237,24 +1375,144 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
     };
 
     let flash_html = flash
-        .map(|f| format!("<p class=\"ok\">{}</p>", esc(f)))
+        .map(|f| {
+            if f.starts_with("error:") {
+                format!("<p class=\"err\">{}</p>", esc(f))
+            } else {
+                format!("<p class=\"ok\">{}</p>", esc(f))
+            }
+        })
         .unwrap_or_default();
 
     let body = format!(
         "<h1>Admin</h1>{}<h2>Domains</h2><ul>{}</ul>\
          <h2>Users</h2><ul>{}</ul>\
+         <h3>Add user</h3>\
+         <form method=\"post\" action=\"/admin/user/add\">\
+         <label>Email / username</label><input type=\"text\" name=\"email\" required>\
+         <label>Password</label><input type=\"password\" name=\"password\" required>\
+         <p><button type=\"submit\">Add user</button></p></form>\
+         <h3>Set quota (MiB)</h3>\
+         <form method=\"post\" action=\"/admin/user/quota\">\
+         <label>Username</label><input type=\"text\" name=\"email\" required>\
+         <label>Quota MiB (0 = remove override)</label>\
+         <input type=\"text\" name=\"quota_mb\" value=\"512\">\
+         <p><button type=\"submit\">Set quota</button></p></form>\
          <h2>Outbound queue</h2>\
          <table><thead><tr><th>ID</th><th>Sender</th><th>Recipients</th>\
          <th>Retries</th><th>Next attempt</th><th></th></tr></thead>\
-         <tbody>{}</tbody></table>",
+         <tbody>{}</tbody></table>\
+         <p style=\"color:#666;font-size:.9rem\">Ops: <code>/healthz</code> · <code>/metrics</code></p>",
         flash_html, domains, users_html, queue_rows
     );
     Response::html(200, "OK", page_shell("Admin", user, &body))
 }
 
+fn handle_admin_post(cfg: &Config, user: &str, _req: &Request) -> Response {
+    page_admin(cfg, user, None)
+}
+
+fn config_path_for_edit(cfg: &Config) -> Result<&std::path::Path, String> {
+    cfg.config_path
+        .as_deref()
+        .ok_or_else(|| "config_path not set; cannot persist user changes".into())
+}
+
+fn persist_and_reload<F>(cfg: &Config, edit: F) -> Result<(), String>
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    let path = config_path_for_edit(cfg)?;
+    useredit::edit_file(path, edit)?;
+    cfg.reload_users_quotas()?;
+    Ok(())
+}
+
+fn handle_admin_user_add(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"));
+    }
+    if !same_origin_ok(req) {
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"));
+    }
+    let form = form_body(req);
+    let email = form.get("email").map(|s| s.trim()).unwrap_or("");
+    let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
+    if email.is_empty() || password.is_empty() {
+        return page_admin(cfg, user, Some("error: email and password required"));
+    }
+    let email_owned = email.to_string();
+    let password_owned = password.to_string();
+    match persist_and_reload(cfg, |c| useredit::add_user(c, &email_owned, &password_owned)) {
+        Ok(()) => page_admin(
+            cfg,
+            user,
+            Some(&format!("User {} added (live; no restart needed).", email_owned)),
+        ),
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e))),
+    }
+}
+
+fn handle_admin_user_remove(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"));
+    }
+    if !same_origin_ok(req) {
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"));
+    }
+    let form = form_body(req);
+    let email = form.get("email").map(|s| s.trim()).unwrap_or("");
+    if email.is_empty() {
+        return page_admin(cfg, user, Some("error: email required"));
+    }
+    if email.eq_ignore_ascii_case(user) {
+        return page_admin(cfg, user, Some("error: cannot remove the logged-in admin"));
+    }
+    let email_owned = email.to_string();
+    match persist_and_reload(cfg, |c| useredit::remove_user(c, &email_owned)) {
+        Ok(()) => page_admin(
+            cfg,
+            user,
+            Some(&format!("User {} removed.", email_owned)),
+        ),
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e))),
+    }
+}
+
+fn handle_admin_user_quota(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"));
+    }
+    if !same_origin_ok(req) {
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"));
+    }
+    let form = form_body(req);
+    let email = form.get("email").map(|s| s.trim()).unwrap_or("");
+    let mb_s = form.get("quota_mb").map(|s| s.trim()).unwrap_or("0");
+    if email.is_empty() {
+        return page_admin(cfg, user, Some("error: email required"));
+    }
+    let mb: u64 = mb_s.parse().unwrap_or(0);
+    let email_owned = email.to_string();
+    match persist_and_reload(cfg, |c| useredit::set_quota(c, &email_owned, mb)) {
+        Ok(()) => {
+            cfg.set_quota_live(&email_owned, mb);
+            page_admin(
+                cfg,
+                user,
+                Some(&format!("Quota for {} set to {} MiB.", email_owned, mb)),
+            )
+        }
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e))),
+    }
+}
+
 fn handle_queue_delete(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
         return page_admin(cfg, user, None);
+    }
+    if !same_origin_ok(req) {
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"));
     }
     let form = form_body(req);
     let id = form.get("id").map(|s| s.as_str()).unwrap_or("");
@@ -1305,5 +1563,15 @@ mod tests {
             esc("<img src=x onerror=alert(1)>"),
             "&lt;img src=x onerror=alert(1)&gt;"
         );
+    }
+
+    #[test]
+    fn same_origin_checks() {
+        assert!(origin_matches_host("http://127.0.0.1:8080", "127.0.0.1:8080"));
+        assert!(origin_matches_host(
+            "https://mail.example.com/admin",
+            "mail.example.com"
+        ));
+        assert!(!origin_matches_host("https://evil.com", "mail.example.com"));
     }
 }

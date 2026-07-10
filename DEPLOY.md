@@ -170,3 +170,46 @@ binaries in `bin-dist/` before running `site-build.sh`, they appear under
 
 If `SITE_BASE_URL` and `RENDER_EXTERNAL_URL` are both unset, `site-build.sh`
 defaults to `http://127.0.0.1:4173` and prints a warning.
+
+## Operations (server lifecycle)
+
+### User management
+
+```bash
+desertemail --config /etc/desertemail/config.toml user add alice@example.com
+desertemail --config /etc/desertemail/config.toml user list
+desertemail --config /etc/desertemail/config.toml user passwd alice
+desertemail --config /etc/desertemail/config.toml user remove bob
+```
+
+Admin webmail (`admin_user`) can also add/remove users and set quotas; the
+running process reloads the users/quotas map without a full restart. Other
+config keys still need `systemctl restart desertemail`.
+
+### Backup / restore
+
+```bash
+./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail
+```
+
+See `deploy/backup.sh` for remote rsync targets, optional `CONFIG`/`DKIM`/
+`TLS_*` extras, and restore notes. Maildir is generally safe to rsync live;
+stop the service for a fully consistent snapshot.
+
+### Health & metrics
+
+- `GET http://host:8080/healthz` → `200 ok`
+- `GET http://host:8080/metrics` → Prometheus text (`desertemail_*` counters)
+
+Optional `metrics_token` in config gates `/metrics`. Point Prometheus at
+`web_listen` (or a reverse proxy); Grafana can graph queue depth and auth
+failure rates.
+
+### Systemd graceful restart
+
+```bash
+sudo systemctl restart desertemail   # SIGTERM → graceful drain (see src/shutdown.rs)
+```
+
+Unit template: `deploy/desertemail.service`. Fail2ban filter/jail samples live
+under `deploy/fail2ban-*`.

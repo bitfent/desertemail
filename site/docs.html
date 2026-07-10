@@ -652,6 +652,8 @@ export PATH="$HOME/.desertemail/bin:$PATH"
               <tr><td><code>acme_email</code></td><td>string</td><td><code>""</code></td><td>Account contact (required when <code>acme=true</code>)</td></tr>
               <tr><td><code>acme_directory</code></td><td>string</td><td>LE production</td><td>ACME directory URL; use staging for tests</td></tr>
               <tr><td><code>acme_domains</code></td><td>list</td><td><code>domains</code></td><td>Hostnames on the certificate</td></tr>
+              <tr><td><code>max_message_bytes</code></td><td>u64</td><td><code>26214400</code> (25&nbsp;MiB)</td><td>Max SMTP DATA / IMAP APPEND size; oversize → SMTP <code>552</code> / IMAP <code>NO</code></td></tr>
+              <tr><td><code>metrics_token</code></td><td>string</td><td><code>""</code></td><td>If non-empty, <code>GET /metrics</code> requires <code>Authorization: Bearer …</code> or <code>?token=</code></td></tr>
               <tr><td><code>[users]</code></td><td>map</td><td>empty</td><td><code>"local"</code> or <code>"user@domain"</code> = password or PBKDF2 hash</td></tr>
               <tr><td><code>[quotas]</code></td><td>map</td><td>empty</td><td>Per-user quota overrides in MiB (e.g. <code>"alice" = 512</code>)</td></tr>
             </tbody>
@@ -713,7 +715,59 @@ log_format = "text"
 "postmaster" = "adminpass"
 # [quotas]
 # "alice" = 512</code></pre>
-        <p class="note">CLI: <code>desertemail --config path/to/config.toml</code> (or <code>-c</code>). Help: <code>--help</code> / <code>-h</code>. DKIM DNS helper: <code>desertemail --dkim-dns &lt;domain&gt; [--config path]</code>.</p>
+        <p class="note">CLI: <code>desertemail --config path/to/config.toml</code> (or <code>-c</code>). Help: <code>--help</code> / <code>-h</code>. DKIM DNS helper: <code>desertemail --dkim-dns &lt;domain&gt; [--config path]</code>. User management: <code>desertemail user add|remove|list|passwd</code> (see <a href="#operations">Operations</a>).</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="operations">
+        <div class="heading-wrap"><h2 id="operations">Operations</h2><a class="anchor" href="#operations" aria-label="Link to this section">#</a></div>
+        <p>Day-2 ops: add users without hand-editing config, back up Maildirs, scrape health/metrics, fail2ban, and restart under systemd.</p>
+
+        <div class="heading-wrap"><h3 id="ops-users">User management (CLI + admin UI)</h3><a class="anchor" href="#ops-users" aria-label="Link to this section">#</a></div>
+        <p>Prefer the CLI or admin forms over editing <code>[users]</code> by hand. Both paths rewrite only the <code>[users]</code> / <code>[quotas]</code> blocks (atomic temp file + rename) and store PBKDF2 hashes.</p>
+        <pre><code>desertemail --config /etc/desertemail/config.toml user add alice@example.com
+desertemail --config /etc/desertemail/config.toml user add bob --password secret --quota 512
+desertemail --config /etc/desertemail/config.toml user list
+desertemail --config /etc/desertemail/config.toml user passwd alice
+desertemail --config /etc/desertemail/config.toml user remove bob</code></pre>
+        <p>On the webmail <strong>Admin</strong> page (<code>admin_user</code> only): add user (email + password), remove user, set quota (MiB). Mutations require a session cookie and a same-origin check when <code>Origin</code>/<code>Referer</code> is present. The running process reloads the users/quotas map <strong>live</strong> (no full restart).</p>
+
+        <div class="heading-wrap"><h3 id="ops-backup">Backup &amp; restore</h3><a class="anchor" href="#ops-backup" aria-label="Link to this section">#</a></div>
+        <pre><code>./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail
+CONFIG=/etc/desertemail/config.toml DKIM=/etc/desertemail/dkim.pem \
+  TLS_CERT=/etc/desertemail/tls.crt TLS_KEY=/etc/desertemail/tls.key \
+  ./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail</code></pre>
+        <p><strong>Atomicity:</strong> Maildir is safe to rsync while the server runs (you may miss a message mid-write). For a perfectly consistent snapshot, stop the unit first. The script header documents restore steps (<code>rsync</code> data back, restore <code>extras/</code>, start service).</p>
+
+        <div class="heading-wrap"><h3 id="ops-metrics">Health &amp; metrics</h3><a class="anchor" href="#ops-metrics" aria-label="Link to this section">#</a></div>
+        <ul>
+          <li><code>GET /healthz</code> — no auth; returns <code>200</code> and body <code>ok</code> (liveness).</li>
+          <li><code>GET /metrics</code> — Prometheus text format (counters + queue depth gauge). Optionally gated by <code>metrics_token</code>.</li>
+        </ul>
+        <pre><code># prometheus.yml
+scrape_configs:
+  - job_name: desertemail
+    static_configs:
+      - targets: ["mail.example.com:8080"]
+    # authorization:
+    #   credentials: "change-me"</code></pre>
+        <p>Grafana: import a simple dashboard on the <code>desertemail_*</code> metrics (connections, auth success/fail, messages received/delivered/queued/bounced, greylist/spam rejects, queue depth). Alert on rising <code>auth_failures</code>, non-zero queue depth growth, or missing scrapes.</p>
+
+        <div class="heading-wrap"><h3 id="ops-fail2ban">fail2ban</h3><a class="anchor" href="#ops-fail2ban" aria-label="Link to this section">#</a></div>
+        <p>Use <code>log_format = "json"</code> (or text with structured fields). Auth failures emit <code>event=auth_fail</code> with <code>ip</code>, <code>user</code>, <code>proto</code>. Ship <code>deploy/fail2ban-desertemail.conf</code> and <code>deploy/fail2ban-jail-desertemail.local</code> — see also <a href="#fail2ban">Structured logs &amp; fail2ban</a>.</p>
+
+        <div class="heading-wrap"><h3 id="ops-logs">Log formats</h3><a class="anchor" href="#ops-logs" aria-label="Link to this section">#</a></div>
+        <ul>
+          <li><code>log_format = "text"</code> (default) — human-readable lines with level tags.</li>
+          <li><code>log_format = "json"</code> — one JSON object per line: <code>ts</code>, <code>level</code>, <code>msg</code>, plus fields such as <code>event</code>, <code>ip</code>, <code>user</code>, <code>proto</code>.</li>
+        </ul>
+
+        <div class="heading-wrap"><h3 id="ops-systemd">Graceful restart under systemd</h3><a class="anchor" href="#ops-systemd" aria-label="Link to this section">#</a></div>
+        <p>Unit file: <code>deploy/desertemail.service</code>. SIGTERM/SIGINT triggers graceful shutdown (listeners stop accepting; in-flight connections finish briefly; queue is durable on disk).</p>
+        <pre><code>sudo systemctl reload-or-restart desertemail   # or: systemctl restart
+# After config edits that are NOT users/quotas (listen addrs, TLS paths, domains), restart:
+sudo systemctl restart desertemail
+# User/password/quota changes via CLI while the server is stopped take effect on next start;
+# admin UI applies users/quotas live without restart.</code></pre>
       </section>
 
       <section class="pix-panel" aria-labelledby="dns">
@@ -864,11 +918,11 @@ web_tls_listen = "0.0.0.0:8443"</code></pre>
         <ul>
           <li><strong>TLS is built in</strong> (rustls): STARTTLS on SMTP (RFC 3207) and IMAP (RFC 2595), optional implicit SMTPS/IMAPS, HTTPS webmail, and opportunistic outbound STARTTLS with webpki-roots validation. Supply <code>tls_cert_file</code> + <code>tls_key_file</code> to enable. Without them the server runs plaintext — fine for LAN/localhost/VPN; for any internet-facing deploy, configure TLS and consider <code>require_tls_for_auth = true</code>.</li>
           <li><strong>No automatic cert renewal.</strong> Bring your own certificate (self-signed for testing, Let’s Encrypt via certbot/acme.sh externally, or a TLS-terminating reverse proxy). See <a href="#tls">TLS / encryption setup</a>.</li>
-          <li><strong>Passwords are plaintext in <code>config.toml</code>.</strong> Keep the file <code>chmod 600</code> and treat the prefix as secret. Hashing is planned, not present. TLS protects the wire, not the file on disk.</li>
-          <li><strong>Catch-all + <code>default_password</code>:</strong> with <code>catch_all = true</code>, any local-part authenticates with the default password. That is convenient for demos and dangerous if left as <code>changeme</code> on the internet.</li>
-          <li><strong>Webmail sessions:</strong> cookie is <code>HttpOnly</code>, <code>SameSite=Lax</code>; on HTTPS (<code>web_tls_listen</code>) the cookie also gets <code>Secure</code>. Tokens are derived from OS CSPRNG material (not just timestamp/PID).</li>
+          <li><strong>Passwords:</strong> prefer PBKDF2 hashes (<code>desertemail --hash-password</code> or <code>user add</code>). Plaintext still works but logs a startup WARNING. Keep <code>config.toml</code> <code>chmod 600</code>.</li>
+          <li><strong>Catch-all vs auth:</strong> <code>catch_all</code> only routes mail; authentication requires a <code>[users]</code> entry unless <code>allow_default_password_auth = true</code> (keep false).</li>
+          <li><strong>Webmail sessions:</strong> cookie is <code>HttpOnly</code>, <code>SameSite=Lax</code>; on HTTPS (<code>web_tls_listen</code>) the cookie also gets <code>Secure</code>. Admin POSTs check Origin/Referer when present. Tokens are derived from OS CSPRNG material.</li>
           <li><strong>DKIM:</strong> pure-std RSA-SHA256, relaxed/relaxed; signing path verified against <code>dkimpy</code> in project tests.</li>
-          <li><strong>Missing for “real MTA” use:</strong> no full Bayesian/ML spam filter (basic SPF/DKIM/DMARC + greylist/DNSBL score only), limited IMAP surface, no ACME / auto-cert inside the binary.</li>
+          <li><strong>Missing for “real MTA” use:</strong> no full Bayesian/ML spam filter (basic SPF/DKIM/DMARC + greylist/DNSBL score only); ACME is optional and needs correct DNS + port 80.</li>
         </ul>
         <p class="warn">If you need a production mail gateway today, use Postfix/OpenSMTPD/etc. Use DesertEmail when you want ownership, tiny footprint, and a codebase you can actually finish reading.</p>
       </section>

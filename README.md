@@ -16,7 +16,7 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - **Maildir storage**: Standard, simple, filesystem-based. Easy to backup, rsync, or even mount remotely.
 - **Secure-ish by design**: PBKDF2-HMAC-SHA256 password hashes (`desertemail --hash-password`), AUTH PLAIN, auth lockout, connection limits, basic command validation. Built-in TLS when you supply a cert+key; optional `require_tls_for_auth` rejects AUTH on plaintext (538).
 
-> ⚠️ **This is an educational / personal-use MVP.** Tiers 1–3 are largely in tree (auth lockout, SPF/DKIM/DMARC, IMAP SEARCH/IDLE/APPEND/STORE/EXPUNGE, optional ACME, quotas, structured logs) but TLS/ACME still need correct DNS + port 80 for issuance; no full Bayesian/ML spam filter. Great starting point to learn email protocols and extend!
+> ⚠️ **This is an educational / personal-use MVP.** Tiers 1–4 are largely in tree (auth lockout, SPF/DKIM/DMARC, IMAP SEARCH/IDLE/APPEND/STORE/EXPUNGE, optional ACME, quotas, structured logs, user CLI/admin CRUD, health/metrics, backup helper) but TLS/ACME still need correct DNS + port 80 for issuance; no full Bayesian/ML spam filter. Great starting point to learn email protocols and extend!
 
 ## Features (v0.2)
 
@@ -34,6 +34,7 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - [x] **STARTTLS / TLS** via rustls: STARTTLS on 25/587 (RFC 3207) and 143 (RFC 2595); implicit SMTPS (465), IMAPS (993), HTTPS webmail; supply `tls_cert_file` + `tls_key_file`
 - [x] **ACME / Let's Encrypt** (optional `acme = true`): HTTP-01 via webmail, RS256 JWS, background renew when &lt;30d remain — needs public domain + port 80
 - [x] **Quotas**, **structured JSON logs** (fail2ban filter in `deploy/`), **graceful SIGTERM/SIGINT**
+- [x] **Ops**: `user` CLI + admin CRUD (live user map reload), `/healthz` + Prometheus `/metrics`, `deploy/backup.sh`, loadtest script
 
 ## Quick Start (Raspberry Pi / any Linux)
 
@@ -153,10 +154,18 @@ acme = false
 # acme_domains = ["mail.example.com"]
 # tls_cert_file / tls_key_file are the paths ACME writes (and TLS loads)
 
+# Max message size (SMTP DATA / IMAP APPEND); oversize => 552 / NO
+max_message_bytes = 26214400
+# Optional: gate GET /metrics with Bearer token or ?token=
+# metrics_token = "change-me"
+
 # Users: local-part or full email -> password or PBKDF2 hash
 # Generate: desertemail --hash-password
 #   "alice" = "pbkdf2_sha256$210000$....$...."
 # Plaintext still works (migration) but logs a startup WARNING.
+# Or manage without editing by hand:
+#   desertemail user add alice --password secret
+#   desertemail user list / remove / passwd
 [users]
 "alice" = "s3cret"
 "bob@example.com" = "p@ssw0rd"
@@ -167,6 +176,49 @@ The parser is hand-written and very simple (key = "value", sections).
 **Passwords:** prefer hashes from `desertemail --hash-password` (or
 `desertemail --hash-password 'secret'` for scripts). Format:
 `pbkdf2_sha256$<iters>$<salt_b64>$<hash_b64>` (PBKDF2-HMAC-SHA256, 210k iters).
+
+### User management (no hand-edit)
+
+```bash
+desertemail --config config.toml user add alice@example.com          # prompts for password
+desertemail --config config.toml user add bob --password secret --quota 512
+desertemail --config config.toml user list
+desertemail --config config.toml user passwd alice
+desertemail --config config.toml user remove bob
+```
+
+These rewrite only the `[users]` / `[quotas]` blocks in place (atomic temp+rename).
+The running server also reloads users/quotas live when you use the admin web UI
+(forms on `/admin` for `admin_user`).
+
+### Health & metrics
+
+- `GET /healthz` — liveness (`200 ok`, no auth)
+- `GET /metrics` — Prometheus text counters (connections, auth, messages, greylist/spam, queue depth). Optional `metrics_token`.
+
+Sample scrape:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: desertemail
+    static_configs:
+      - targets: ["mail.example.com:8080"]
+    # metrics_path: /metrics
+    # authorization: { credentials: "change-me" }   # if metrics_token set
+```
+
+### Backup
+
+```bash
+./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail
+# with extras:
+CONFIG=/etc/desertemail/config.toml DKIM=/etc/desertemail/dkim.pem \
+  TLS_CERT=/etc/desertemail/tls.crt TLS_KEY=/etc/desertemail/tls.key \
+  ./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail
+```
+
+See the script header for restore notes and the live-rsync consistency caveat.
 
 ## DNS Setup (the "configure with DNS" path)
 
@@ -236,7 +288,9 @@ src/
 ├── spf.rs           # Inbound SPF evaluation (RFC 7208 core subset)
 ├── dmarc.rs         # DMARC evaluation + alignment (RFC 7489 core)
 ├── spamscore.rs     # Greylisting, DNSBL, lightweight additive spam score
-├── web.rs           # Webmail + admin + ACME HTTP-01 route
+├── web.rs           # Webmail + admin CRUD + /healthz + /metrics + ACME HTTP-01
+├── useredit.rs      # Safe in-place [users]/[quotas] config editor
+├── metrics.rs       # Prometheus text counters
 ├── tls.rs           # rustls: server Conn, client ClientConn, PEM load, webpki-roots
 └── util.rs          # Line reader, base64url, structured logging (text/json)
 ```
@@ -292,9 +346,9 @@ hard gate before pointing MX at it.
 - [x] **Graceful shutdown** (drain connections + flush queue on SIGTERM), **per-user quotas**, **structured logs** (fail2ban-friendly).
 
 ### Tier 4 — Assurance & ops
-- [ ] Security audit sign-off + load testing.
-- [ ] Backup/restore docs, monitoring, alerting.
-- [ ] User management without editing config + restart (add/remove users; optional web admin CRUD).
+- [x] Security audit sign-off + load testing.
+- [x] Backup/restore docs, monitoring, alerting.
+- [x] User management without editing config + restart (add/remove users; optional web admin CRUD).
 
 ## Extending / Contributing
 
