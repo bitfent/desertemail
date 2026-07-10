@@ -441,6 +441,29 @@
   .faq dd::before { content: "A · "; color: var(--muted); font-weight: 700; }
 
   footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.9rem; }
+  .slogan {
+    margin: 2.5rem 0 0;
+    padding: 1.6rem 1rem 0;
+    border-top: 4px solid var(--border);
+    text-align: center;
+  }
+  .slogan p {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 700;
+    font-style: italic;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+  .slogan cite {
+    display: block;
+    margin-top: 0.55rem;
+    font-style: normal;
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
 
   @media (max-width: 480px) {
     h1 {
@@ -482,7 +505,7 @@
       <li><a href="/">Home</a></li>
       <li><a href="/#install">Install</a></li>
       <li><a href="/docs.html" class="is-current" aria-current="page">Docs</a></li>
-      <li><a href="https://github.com/bitfent/desertemail">GitHub</a></li>
+      <li><a href="https://t.me/bitfent">Telegram</a></li>
     </ul>
   </div>
 </nav>
@@ -820,16 +843,21 @@ web_tls_listen = "0.0.0.0:8443"</code></pre>
           <dt>Is Windows supported?</dt>
           <dd>Yes: MSVC <code>.exe</code> + PowerShell installer. Maildir uses NTFS-safe naming (<code>!2,</code> instead of <code>:2,</code> in filenames).</dd>
           <dt>Does the installer call GitHub?</dt>
-          <dd>No. Binaries and checksums come from this site under <code>/bin/</code>. Source is on GitHub if you want to read or build it.</dd>
+          <dd>No. Binaries and checksums come from this site under <code>/bin/</code>. The source is open source by request — text <a href="https://t.me/bitfent">@bitfent</a> on Telegram.</dd>
           <dt>Is it still “zero dependencies”?</dt>
           <dd>No. Mail/IMAP/webmail/DKIM/DNS/HTTP remain pure <code>std</code> (no async runtime). The only crates are <code>rustls</code> (ring), <code>rustls-pemfile</code>, and <code>webpki-roots</code> for TLS — the one thing you should never hand-roll. Binary size is ~1.2&nbsp;MB with TLS.</dd>
         </dl>
       </section>
 
       <footer>
-        <p>Source: <a href="https://github.com/bitfent/desertemail">github.com/bitfent/desertemail</a></p>
-        <p>Binaries are served from this site under <code>/bin/</code>; source lives on GitHub.</p>
+        <p>Open source by request — text <a href="https://t.me/bitfent">@bitfent</a> on Telegram for more info.</p>
+        <p>Binaries are served from this site under <code>/bin/</code>.</p>
       </footer>
+
+      <blockquote class="slogan">
+        <p>&ldquo;We can&rsquo;t expect God to do all the work.&rdquo;</p>
+        <cite>— Joshua Graham</cite>
+      </blockquote>
     </div>
   </div>
 </div>

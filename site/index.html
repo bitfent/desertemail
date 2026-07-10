@@ -306,6 +306,29 @@
   a:hover { background: var(--accent); color: #2a1a08; }
 
   footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.9rem; }
+  .slogan {
+    margin: 2.5rem 0 0;
+    padding: 1.6rem 1rem 0;
+    border-top: 4px solid var(--border);
+    text-align: center;
+  }
+  .slogan p {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 700;
+    font-style: italic;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+  .slogan cite {
+    display: block;
+    margin-top: 0.55rem;
+    font-style: normal;
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
   .stats { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.9rem; }
   .stat {
     border: 3px solid var(--border);
@@ -371,7 +394,7 @@
       <li><a href="/" class="is-current" aria-current="page">Home</a></li>
       <li><a href="/#install">Install</a></li>
       <li><a href="/docs.html">Docs</a></li>
-      <li><a href="https://github.com/bitfent/desertemail">GitHub</a></li>
+      <li><a href="https://t.me/bitfent">Telegram</a></li>
     </ul>
   </div>
 </nav>
@@ -463,9 +486,14 @@
   </section>
 
   <footer>
-    <p>Source: <a id="repo-link" href="https://github.com/bitfent/desertemail">github.com/bitfent/desertemail</a></p>
-    <p>Binaries are served from this site under <code>/bin/</code>; source lives on GitHub.</p>
+    <p>Open source by request — text <a href="https://t.me/bitfent">@bitfent</a> on Telegram for more info.</p>
+    <p>Binaries are served from this site under <code>/bin/</code>.</p>
   </footer>
+
+  <blockquote class="slogan">
+    <p>&ldquo;We can&rsquo;t expect God to do all the work.&rdquo;</p>
+    <cite>— Joshua Graham</cite>
+  </blockquote>
 </div>
 
 <script>
