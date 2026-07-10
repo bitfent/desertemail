@@ -7,6 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::util;
 
+// Maildir info separator after the unique name. POSIX uses ":2,"; NTFS forbids
+// ':' in filenames, so Windows uses "!2," instead.
+const INFO_SEP: &str = if cfg!(windows) { "!2," } else { ":2," };
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct Maildir {
@@ -70,8 +74,8 @@ impl Maildir {
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     let flags = if *sub == "cur" {
-                        if let Some(idx) = name.rfind(":2,") {
-                            name[idx + 3..].to_string()
+                        if let Some(idx) = name.rfind(INFO_SEP) {
+                            name[idx + INFO_SEP.len()..].to_string()
                         } else {
                             String::new()
                         }
@@ -106,10 +110,10 @@ impl Maildir {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let new_name = if name.contains(":2,") {
+        let new_name = if name.contains(INFO_SEP) {
             name
         } else {
-            format!("{}:2,S", name)
+            format!("{}{}S", name, INFO_SEP)
         };
         let dest = self.root.join("cur").join(new_name);
         fs::rename(&meta.path, &dest)?;

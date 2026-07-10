@@ -126,9 +126,44 @@ jobs:
           path: desertemail-${{ matrix.target }}
           if-no-files-found: error
 
+  build-windows:
+    name: Windows x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bin = "target/x86_64-pc-windows-msvc/release/desertemail.exe"
+          $name = "desertemail-x86_64-pc-windows-msvc.exe"
+          if (-not (Test-Path $bin)) {
+            Write-Error "binary not found at $bin"
+            exit 1
+          }
+          Copy-Item $bin $name
+          Get-Item $name | Format-List Name, Length
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-pc-windows-msvc
+          path: desertemail-x86_64-pc-windows-msvc.exe
+          if-no-files-found: error
+
   publish-bin-dist:
     name: Commit binaries to bin-dist/
-    needs: [build-linux, build-macos]
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

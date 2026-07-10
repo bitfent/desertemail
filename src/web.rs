@@ -27,14 +27,44 @@ fn sessions() -> &'static Mutex<HashMap<String, String>> {
 /// 32 bytes from the OS CSPRNG. Timestamp/PID would be guessable, letting an
 /// attacker who knows the rough login time brute-force session tokens.
 fn os_random_seed() -> [u8; 32] {
-    use std::io::Read;
-    let mut buf = [0u8; 32];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut buf).is_ok() {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut buf = [0u8; 32];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            if f.read_exact(&mut buf).is_ok() {
+                return buf;
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // BCryptGenRandom via system bcrypt.dll (no external crates).
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                h_algorithm: *mut core::ffi::c_void,
+                pb_buffer: *mut u8,
+                cb_buffer: u32,
+                dw_flags: u32,
+            ) -> i32; // NTSTATUS
+        }
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+        let mut buf = [0u8; 32];
+        // STATUS_SUCCESS == 0
+        let status = unsafe {
+            BCryptGenRandom(
+                core::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status == 0 {
             return buf;
         }
     }
-    // Last-resort fallback (no /dev/urandom): hash time + pid.
+    // Last-resort fallback (CSPRNG unavailable): hash time + pid.
     let material = format!("{}:{}", util::now_millis(), std::process::id());
     crypto::sha256(material.as_bytes())
 }

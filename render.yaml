@@ -42,3 +42,6 @@ services:
       - path: /install-from-source.sh
         name: Content-Type
         value: text/plain; charset=utf-8
+      - path: /install-windows.ps1
+        name: Content-Type
+        value: text/plain; charset=utf-8

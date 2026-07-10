@@ -1,5 +1,6 @@
 //! Minimal DNS client over UDP. Pure std.
-//! Parses /etc/resolv.conf (fallback 8.8.8.8:53). MX + A/AAAA with compression.
+//! On Unix, parses /etc/resolv.conf; otherwise (and as empty fallback) uses
+//! 8.8.8.8:53 and 1.1.1.1:53. MX + A/AAAA with compression.
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -311,32 +312,38 @@ fn skip_name(msg: &[u8], pos: usize) -> io::Result<usize> {
 
 fn system_resolvers() -> Vec<SocketAddr> {
     let mut out = Vec::new();
-    if let Ok(content) = std::fs::read_to_string("/etc/resolv.conf") {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let mut parts = line.split_whitespace();
-            if parts.next() != Some("nameserver") {
-                continue;
-            }
-            if let Some(ip) = parts.next() {
-                let addr = if ip.contains(':') && !ip.contains('.') {
-                    // IPv6 bare
-                    format!("[{}]:53", ip)
-                } else {
-                    format!("{}:53", ip)
-                };
-                if let Ok(sa) = addr.parse::<SocketAddr>() {
-                    out.push(sa);
+    #[cfg(unix)]
+    {
+        if let Ok(content) = std::fs::read_to_string("/etc/resolv.conf") {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let mut parts = line.split_whitespace();
+                if parts.next() != Some("nameserver") {
+                    continue;
+                }
+                if let Some(ip) = parts.next() {
+                    let addr = if ip.contains(':') && !ip.contains('.') {
+                        // IPv6 bare
+                        format!("[{}]:53", ip)
+                    } else {
+                        format!("{}:53", ip)
+                    };
+                    if let Ok(sa) = addr.parse::<SocketAddr>() {
+                        out.push(sa);
+                    }
                 }
             }
         }
     }
+    // Windows has no /etc/resolv.conf; also used when Unix resolv.conf is empty.
     if out.is_empty() {
-        if let Ok(sa) = "8.8.8.8:53".parse() {
-            out.push(sa);
+        for s in ["8.8.8.8:53", "1.1.1.1:53"] {
+            if let Ok(sa) = s.parse() {
+                out.push(sa);
+            }
         }
     }
     out

@@ -29,6 +29,7 @@ BASE_URL=$(printf '%s' "${BASE_URL}" | sed 's|/*$||')
 
 TEMPLATE="${ROOT}/installers/template.sh"
 SOURCE_INSTALLER="${ROOT}/installers/build-from-source.sh"
+WIN_TEMPLATE="${ROOT}/installers/install-windows.ps1"
 SITE_DIR="${ROOT}/site"
 
 if [ ! -f "${TEMPLATE}" ]; then
@@ -37,6 +38,10 @@ if [ ! -f "${TEMPLATE}" ]; then
 fi
 if [ ! -f "${SOURCE_INSTALLER}" ]; then
   printf '%s\n' "error: missing ${SOURCE_INSTALLER}" >&2
+  exit 1
+fi
+if [ ! -f "${WIN_TEMPLATE}" ]; then
+  printf '%s\n' "error: missing ${WIN_TEMPLATE}" >&2
   exit 1
 fi
 if [ ! -d "${SITE_DIR}" ]; then
@@ -83,6 +88,15 @@ done
 # Build-from-source installer (no placeholders)
 cp "${SOURCE_INSTALLER}" "${SITE_DIR}/install-from-source.sh"
 printf '%s\n' "wrote ${SITE_DIR}/install-from-source.sh"
+
+# Windows PowerShell installer
+_win_out="${SITE_DIR}/install-windows.ps1"
+_win_triple="x86_64-pc-windows-msvc"
+sed \
+  -e "s|__TARGET__|${_win_triple}|g" \
+  -e "s|__BASE_URL__|${BASE_URL}|g" \
+  "${WIN_TEMPLATE}" > "${_win_out}"
+printf '%s\n' "wrote ${_win_out} (target=${_win_triple})"
 
 # Optional prebuilt binaries from bin-dist/
 if [ -d "${ROOT}/bin-dist" ]; then

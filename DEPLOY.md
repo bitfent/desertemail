@@ -29,8 +29,10 @@ git push origin v0.1.0
 
 The workflow:
 
-1. Builds the 4 Linux musl targets with `cross` and both macOS Darwin targets.
-2. Names each artifact `desertemail-<rust-triple>` (no version in the filename).
+1. Builds the 4 Linux musl targets with `cross`, both macOS Darwin targets, and
+   Windows `x86_64-pc-windows-msvc` (artifact ends in `.exe`).
+2. Names each artifact `desertemail-<rust-triple>` (no version in the filename;
+   Windows adds `.exe`).
 3. Copies them into `bin-dist/` and commits + pushes to the default branch
    (`CI: update prebuilt binaries`), using `GITHUB_TOKEN` with `contents: write`.
 4. Empty diffs are skipped (`git diff --cached --quiet`).
@@ -73,6 +75,7 @@ desertemail-armv7-unknown-linux-musleabihf
 desertemail-arm-unknown-linux-musleabihf
 desertemail-x86_64-apple-darwin
 desertemail-aarch64-apple-darwin
+desertemail-x86_64-pc-windows-msvc.exe
 ```
 
 `site-build.sh` regenerates `site/bin/SHA256SUMS` from whatever is in
@@ -89,18 +92,25 @@ desertemail-aarch64-apple-darwin
 4. Service `desertemail-site` runs `sh site-build.sh` and publishes `site/`:
    - `site/index.html` — platform picker landing page
    - `site/install-<platform>.sh` — generated from `installers/template.sh`
+   - `site/install-windows.ps1` — generated from `installers/install-windows.ps1`
    - `site/install-from-source.sh` — copy of `installers/build-from-source.sh`
    - `site/bin/*` + `site/bin/SHA256SUMS` — from `bin-dist/` when present
 
-Each `/install-*.sh` path is served as `text/plain`.
+Each `/install-*.sh` and `/install-windows.ps1` path is served as `text/plain`.
 
 ## (c) User install
 
 After the static site is live, open the landing page and pick a platform. Each
-button shows a curl command like:
+button shows an install command like:
 
 ```bash
+# Linux / macOS / Android (Termux)
 curl -fsSL https://<your-render-host>/install-linux-x86_64.sh | sh
+
+# Windows (PowerShell)
+irm https://<your-render-host>/install-windows.ps1 | iex
+# if execution policy blocks scripts:
+powershell -ExecutionPolicy Bypass -c "irm https://<your-render-host>/install-windows.ps1 | iex"
 ```
 
 Supported installer names:
@@ -113,7 +123,14 @@ Supported installer names:
 | Linux ARMv6 (Pi Zero)     | `/install-linux-armv6.sh`           | `arm-unknown-linux-musleabihf`        |
 | macOS Apple Silicon       | `/install-macos-apple-silicon.sh`   | `aarch64-apple-darwin`                |
 | macOS Intel               | `/install-macos-intel.sh`           | `x86_64-apple-darwin`                 |
+| Windows (PowerShell)      | `/install-windows.ps1`              | `x86_64-pc-windows-msvc` (`.exe`)     |
+| Android (Termux)          | same as Linux ARM64                 | `aarch64-unknown-linux-musl`          |
 | Build from source         | `/install-from-source.sh`           | (local `cargo build --release`)       |
+
+**Android (Termux):** static musl ARM64 binaries run unmodified under Termux.
+Install Termux from F-Droid, run `pkg install curl openssl`, then use the
+Linux ARM64 one-liner. No root is needed when using the high-port set
+(2525/2587/2143).
 
 Headless / CI (example for Linux x86_64):
 
@@ -125,7 +142,7 @@ curl -fsSL https://<your-render-host>/install-linux-x86_64.sh \
 Optional env overrides: `DESERTEMAIL_PREFIX`, `DESERTEMAIL_DOMAIN`,
 `DESERTEMAIL_ADMIN_USER`, `DESERTEMAIL_ADMIN_PASSWORD`, `DESERTEMAIL_DATA_DIR`,
 `DESERTEMAIL_WEBMAIL`, `DESERTEMAIL_PORTS`, `DESERTEMAIL_DKIM`,
-`DESERTEMAIL_SYSTEMD`.
+`DESERTEMAIL_SYSTEMD` (POSIX installers only; Windows has no systemd).
 
 There is **no** platform auto-detection and **no** GitHub Releases/API in the
 install path. Users choose their installer; binaries and `SHA256SUMS` come from

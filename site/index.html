@@ -34,7 +34,7 @@
     }
   }
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
+  html { -webkit-text-size-adjust: 100%; overflow-x: hidden; }
   body {
     margin: 0;
     background: var(--bg);
@@ -43,8 +43,9 @@
     font-size: 16px;
     line-height: 1.65;
     image-rendering: pixelated;
+    overflow-x: hidden;
   }
-  .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; overflow-x: hidden; }
 
   /* --- 8-bit chrome --------------------------------------------------- */
   .pix-panel {
@@ -174,6 +175,28 @@
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }
+  #android-note { display: none; margin-top: 0.55rem; }
+
+  /* --- mobile (360–414px) ----------------------------------------------- */
+  @media (max-width: 480px) {
+    h1 {
+      font-size: clamp(1.35rem, 7.5vw, 2rem);
+      letter-spacing: 0.08em;
+      text-shadow: 2px 2px 0 var(--accent-dark);
+    }
+    .pix-panel {
+      box-shadow: 5px 5px 0 0 var(--accent-dark);
+      margin-left: 0;
+      margin-right: 0;
+    }
+    button.plat {
+      min-height: 44px;
+      padding: 0.65rem 0.85rem;
+    }
+    button.copy {
+      min-height: 44px;
+    }
+  }
 </style>
 </head>
 <body>
@@ -208,16 +231,19 @@
     <h2 id="install-h">Install (pick your platform)</h2>
     <p class="note">Choose your machine — the installer never auto-detects. Prebuilt binaries download from this site; pick <strong>Build from source</strong> if yours is not listed.</p>
     <div class="picker" role="group" aria-label="Platform">
-      <button type="button" class="plat is-active" data-script="install-linux-x86_64.sh" aria-pressed="true">Linux x86_64</button>
-      <button type="button" class="plat" data-script="install-linux-arm64.sh" aria-pressed="false">Linux ARM64</button>
-      <button type="button" class="plat" data-script="install-linux-armv7.sh" aria-pressed="false">Linux ARMv7</button>
-      <button type="button" class="plat" data-script="install-linux-armv6.sh" aria-pressed="false">Linux ARMv6 (Pi Zero)</button>
-      <button type="button" class="plat" data-script="install-macos-apple-silicon.sh" aria-pressed="false">macOS Apple Silicon</button>
-      <button type="button" class="plat" data-script="install-macos-intel.sh" aria-pressed="false">macOS Intel</button>
-      <button type="button" class="plat" data-script="install-from-source.sh" aria-pressed="false">Build from source</button>
+      <button type="button" class="plat is-active" data-script="install-linux-x86_64.sh" data-fmt="curl" aria-pressed="true">Linux x86_64</button>
+      <button type="button" class="plat" data-script="install-linux-arm64.sh" data-fmt="curl" aria-pressed="false">Linux ARM64</button>
+      <button type="button" class="plat" data-script="install-linux-armv7.sh" data-fmt="curl" aria-pressed="false">Linux ARMv7</button>
+      <button type="button" class="plat" data-script="install-linux-armv6.sh" data-fmt="curl" aria-pressed="false">Linux ARMv6 (Pi Zero)</button>
+      <button type="button" class="plat" data-script="install-macos-apple-silicon.sh" data-fmt="curl" aria-pressed="false">macOS Apple Silicon</button>
+      <button type="button" class="plat" data-script="install-macos-intel.sh" data-fmt="curl" aria-pressed="false">macOS Intel</button>
+      <button type="button" class="plat" data-script="install-windows.ps1" data-fmt="ps1" aria-pressed="false">Windows (PowerShell)</button>
+      <button type="button" class="plat" data-script="install-linux-arm64.sh" data-fmt="curl" data-android="1" aria-pressed="false">Android (Termux)</button>
+      <button type="button" class="plat" data-script="install-from-source.sh" data-fmt="curl" aria-pressed="false">Build from source</button>
     </div>
     <pre id="install-cmd">curl -fsSL https://YOUR-SITE/install-linux-x86_64.sh | sh</pre>
     <button type="button" class="copy" id="copy-btn" aria-label="Copy install command">Copy</button>
+    <p class="note" id="android-note">Install Termux from F-Droid, run <code>pkg install curl openssl</code>, no root needed on high ports.</p>
     <p class="note" id="install-hint">Downloads a prebuilt static binary from this site — no local compile, no toolchain.</p>
     <div class="stats">
       <span class="stat">~488 KB binary</span>
@@ -238,6 +264,8 @@
           <tr><td>128 MB VPS (cheapest tier)</td><td><code>x86_64 musl</code></td><td>Gets you a public IP + unblocked port 25</td></tr>
           <tr><td>Old netbooks / thin clients</td><td><code>x86_64 musl</code></td><td>Second life as a mail machine</td></tr>
           <tr><td>Mac (Intel & Apple Silicon)</td><td><code>darwin</code></td><td>Great for trying it locally first</td></tr>
+          <tr><td>Android phone/tablet (Termux)</td><td><code>arm64 musl</code></td><td>An old phone makes a fine mail server</td></tr>
+          <tr><td>Windows 10/11</td><td><code>x86_64 .exe</code></td><td>Native MSVC build; PowerShell one-liner installer</td></tr>
         </tbody>
       </table>
     </div>
@@ -254,7 +282,7 @@
       <li>Writes <code>config.toml</code> and — on Linux with systemd — optionally installs and starts a service unit</li>
       <li>Prints the DNS records to publish (MX, SPF, DKIM) so real mailboxes accept your mail</li>
     </ol>
-    <p class="note">The wizard is plain POSIX <code>sh</code> (runs on dash/BusyBox). Piped installs stay interactive via <code>/dev/tty</code>; for CI use <code>DESERTEMAIL_NONINTERACTIVE=1</code> with env-var answers. Re-running never clobbers an existing config without asking. Unsupported machines use <strong>Build from source</strong> (needs <code>git</code> + <code>cargo</code>).</p>
+    <p class="note">The wizard is plain POSIX <code>sh</code> (runs on dash/BusyBox); Windows uses a PowerShell variant (<code>irm … | iex</code>). Piped installs stay interactive via <code>/dev/tty</code>; for CI use <code>DESERTEMAIL_NONINTERACTIVE=1</code> with env-var answers. Re-running never clobbers an existing config without asking. Unsupported machines use <strong>Build from source</strong> (needs <code>git</code> + <code>cargo</code>).</p>
   </section>
 
   <footer>
@@ -273,12 +301,16 @@
     ? location.origin
     : "";
   var script = "install-linux-x86_64.sh";
+  var fmt = "curl";
   var cmd = "";
+  var androidNote = document.getElementById("android-note");
 
-  function buildCmd(s) {
-    return origin
-      ? ("curl -fsSL " + origin + "/" + s + " | sh")
-      : ("curl -fsSL https://YOUR-SITE/" + s + " | sh");
+  function buildCmd(s, f) {
+    var base = origin ? origin : "https://YOUR-SITE";
+    if (f === "ps1") {
+      return "irm " + base + "/" + s + " | iex";
+    }
+    return "curl -fsSL " + base + "/" + s + " | sh";
   }
 
   function setActive(el) {
@@ -290,11 +322,17 @@
     el.classList.add("is-active");
     el.setAttribute("aria-pressed", "true");
     script = el.getAttribute("data-script") || script;
-    cmd = buildCmd(script);
+    fmt = el.getAttribute("data-fmt") || "curl";
+    cmd = buildCmd(script, fmt);
     pre.textContent = cmd;
+    if (androidNote) {
+      androidNote.style.display = el.getAttribute("data-android") === "1" ? "block" : "none";
+    }
     if (hint) {
       if (script === "install-from-source.sh") {
         hint.textContent = "Clones the source repo and runs cargo build --release — needs git and the Rust toolchain (rustup.rs).";
+      } else if (fmt === "ps1") {
+        hint.textContent = "Downloads a prebuilt Windows .exe from this site. If policy blocks scripts: powershell -ExecutionPolicy Bypass -c \"irm <site>/install-windows.ps1 | iex\".";
       } else {
         hint.textContent = "Downloads a prebuilt static binary from this site — no local compile, no toolchain.";
       }
