@@ -1,7 +1,6 @@
-//! Utility helpers: pure std, no deps.
+//! Utility helpers: pure std (TLS lives in tls.rs).
 
 use std::io::{self, BufRead, Write};
-use std::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_secs() -> u64 {
@@ -35,14 +34,18 @@ pub fn read_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
     Ok(Some(line))
 }
 
-pub fn write_line(stream: &mut TcpStream, s: &str) -> io::Result<()> {
-    stream.write_all(s.as_bytes())?;
-    stream.write_all(b"\r\n")?;
+pub fn write_line(stream: &mut impl Write, s: &str) -> io::Result<()> {
+    // Single write of line+CRLF so STARTTLS clients never see a split
+    // response (a trailing bare \r looked like TLS record type 13).
+    let mut buf = Vec::with_capacity(s.len() + 2);
+    buf.extend_from_slice(s.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    stream.write_all(&buf)?;
     stream.flush()?;
     Ok(())
 }
 
-pub fn write_raw(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
+pub fn write_raw(stream: &mut impl Write, data: &[u8]) -> io::Result<()> {
     stream.write_all(data)?;
     stream.flush()?;
     Ok(())

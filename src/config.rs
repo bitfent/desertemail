@@ -30,6 +30,18 @@ pub struct Config {
     pub web_listen: String,
     /// Login name allowed to access /admin. None or empty disables admin page.
     pub admin_user: Option<String>,
+    /// PEM certificate chain for TLS (STARTTLS + implicit listeners).
+    pub tls_cert_file: Option<String>,
+    /// PEM private key (PKCS#8 or RSA) for TLS.
+    pub tls_key_file: Option<String>,
+    /// Implicit SMTPS listen (submission-over-TLS). Empty = disabled.
+    pub smtps_listen: String,
+    /// Implicit IMAPS listen. Empty = disabled.
+    pub imaps_listen: String,
+    /// HTTPS webmail listen. Empty = disabled.
+    pub web_tls_listen: String,
+    /// If true, reject AUTH on plaintext SMTP (reply 538). Default false.
+    pub require_tls_for_auth: bool,
 }
 
 impl Default for Config {
@@ -51,6 +63,12 @@ impl Default for Config {
             dkim_key: None,
             web_listen: "0.0.0.0:8080".into(),
             admin_user: None,
+            tls_cert_file: None,
+            tls_key_file: None,
+            smtps_listen: String::new(),
+            imaps_listen: String::new(),
+            web_tls_listen: String::new(),
+            require_tls_for_auth: false,
         }
     }
 }
@@ -120,6 +138,24 @@ impl Config {
                         cfg.admin_user = Some(val.to_lowercase());
                     }
                 }
+                ("", "tls_cert_file") => {
+                    if val.is_empty() {
+                        cfg.tls_cert_file = None;
+                    } else {
+                        cfg.tls_cert_file = Some(val);
+                    }
+                }
+                ("", "tls_key_file") => {
+                    if val.is_empty() {
+                        cfg.tls_key_file = None;
+                    } else {
+                        cfg.tls_key_file = Some(val);
+                    }
+                }
+                ("", "smtps_listen") => cfg.smtps_listen = val,
+                ("", "imaps_listen") => cfg.imaps_listen = val,
+                ("", "web_tls_listen") => cfg.web_tls_listen = val,
+                ("", "require_tls_for_auth") => cfg.require_tls_for_auth = parse_bool(&val),
                 ("users", k) => {
                     cfg.users.insert(k.to_string(), val);
                 }

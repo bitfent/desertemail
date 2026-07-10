@@ -3,17 +3,21 @@ name = "desertemail"
 version = "0.1.0"
 edition = "2021"
 authors = ["Open Source Community"]
-description = "DesertEmail — a minimal, from-scratch open-source email server in pure Rust (zero external dependencies) for Raspberry Pi and tiny computers. Configure with DNS or simple auto-routing for your addresses. Open source, self-hostable, educational."
+description = "DesertEmail — a minimal, from-scratch open-source email server in pure Rust for Raspberry Pi and tiny computers. Configure with DNS or simple auto-routing for your addresses. Open source, self-hostable, educational."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourusername/desertemail"
-keywords = ["email", "smtp", "imap", "mail", "server", "raspberry-pi", "minimal", "self-hosted", "zero-deps"]
+keywords = ["email", "smtp", "imap", "mail", "server", "raspberry-pi", "minimal", "self-hosted"]
 categories = ["email", "network-programming", "command-line-utilities"]
 readme = "README.md"
 
-# ZERO external dependencies! Everything from std.
-# Perfect for constrained devices. Binary size ~ few hundred KB after strip/LTO.
+# Minimal deps: rustls for TLS (STARTTLS + implicit SMTPS/IMAPS/HTTPS).
+# Everything else is hand-rolled from std (no tokio/async).
 
 [dependencies]
+# Explicit ring provider (rustls 0.23 defaults to aws-lc-rs otherwise).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 
 [profile.release]
 lto = true

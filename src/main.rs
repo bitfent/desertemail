@@ -1,5 +1,5 @@
-//! DesertEmail - zero-dependency email server in pure Rust.
-//! 
+//! DesertEmail - minimal email server in pure Rust (std + rustls).
+//!
 //! Run with: cargo run -- --config config.toml
 //! Or release binary.
 
@@ -12,6 +12,7 @@ mod imap;
 mod queue;
 mod smtp;
 mod storage;
+mod tls;
 mod util;
 mod web;
 
@@ -26,7 +27,7 @@ use imap::ImapServer;
 use smtp::SmtpServer;
 
 fn main() {
-    util::log!("desertemail starting (pure Rust, zero deps)");
+    util::log!("desertemail starting");
 
     let args: Vec<String> = env::args().collect();
     let mut config_path = "config.toml".to_string();
@@ -103,6 +104,27 @@ fn main() {
         return;
     }
 
+    // Load TLS server config when both cert and key paths are set.
+    let tls_cfg = match (
+        cfg.tls_cert_file.as_ref(),
+        cfg.tls_key_file.as_ref(),
+    ) {
+        (Some(cert), Some(key)) => match tls::load_server_config(cert, key) {
+            Ok(c) => {
+                util::log!("TLS enabled (cert={}, key={})", cert, key);
+                Some(c)
+            }
+            Err(e) => {
+                util::log!("warning: TLS disabled — failed to load cert/key: {}", e);
+                None
+            }
+        },
+        _ => {
+            util::log!("TLS not configured (set tls_cert_file + tls_key_file to enable)");
+            None
+        }
+    };
+
     let cfg = Arc::new(cfg);
 
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
@@ -127,6 +149,11 @@ fn main() {
     if !cfg.web_listen.is_empty() {
         web::start(Arc::clone(&cfg));
     }
+    if let Some(ref tc) = tls_cfg {
+        if !cfg.web_tls_listen.is_empty() {
+            web::start_tls(Arc::clone(&cfg), Arc::clone(tc));
+        }
+    }
 
     let smtp_listener = match TcpListener::bind(&cfg.smtp_listen) {
         Ok(l) => l,
@@ -150,27 +177,61 @@ fn main() {
         }
     };
 
+    let mut handles = Vec::new();
+
     let cfg1 = Arc::clone(&cfg);
-    let t1 = thread::spawn(move || {
-        SmtpServer::new(cfg1, false).serve(smtp_listener);
-    });
+    let tls1 = tls_cfg.clone();
+    handles.push(thread::spawn(move || {
+        SmtpServer::new(cfg1, false, tls1, false).serve(smtp_listener);
+    }));
 
     let cfg2 = Arc::clone(&cfg);
-    let t2 = thread::spawn(move || {
-        SmtpServer::new(cfg2, true).serve(sub_listener);
-    });
+    let tls2 = tls_cfg.clone();
+    handles.push(thread::spawn(move || {
+        SmtpServer::new(cfg2, true, tls2, false).serve(sub_listener);
+    }));
 
     let cfg3 = Arc::clone(&cfg);
-    let t3 = thread::spawn(move || {
-        ImapServer::new(cfg3).serve(imap_listener);
-    });
+    let tls3 = tls_cfg.clone();
+    handles.push(thread::spawn(move || {
+        ImapServer::new(cfg3, tls3, false).serve(imap_listener);
+    }));
+
+    // Implicit TLS listeners (only when TLS loaded and listen addr non-empty)
+    if let Some(ref tc) = tls_cfg {
+        if !cfg.smtps_listen.is_empty() {
+            match TcpListener::bind(&cfg.smtps_listen) {
+                Ok(l) => {
+                    let cfg_s = Arc::clone(&cfg);
+                    let tls_s = Some(Arc::clone(tc));
+                    handles.push(thread::spawn(move || {
+                        // SMTPS: submission semantics over implicit TLS
+                        SmtpServer::new(cfg_s, true, tls_s, true).serve(l);
+                    }));
+                }
+                Err(e) => util::log!("warning: cannot bind SMTPS {}: {}", cfg.smtps_listen, e),
+            }
+        }
+        if !cfg.imaps_listen.is_empty() {
+            match TcpListener::bind(&cfg.imaps_listen) {
+                Ok(l) => {
+                    let cfg_i = Arc::clone(&cfg);
+                    let tls_i = Some(Arc::clone(tc));
+                    handles.push(thread::spawn(move || {
+                        ImapServer::new(cfg_i, tls_i, true).serve(l);
+                    }));
+                }
+                Err(e) => util::log!("warning: cannot bind IMAPS {}: {}", cfg.imaps_listen, e),
+            }
+        }
+    }
 
     util::log!("all servers running. Ctrl-C to stop.");
     util::log!("Tip: use high ports + firewall port-forward, or run as root / with capabilities for 25/587/143.");
 
-    let _ = t1.join();
-    let _ = t2.join();
-    let _ = t3.join();
+    for h in handles {
+        let _ = h.join();
+    }
 }
 
 fn print_dkim_dns(cfg: &Config, domain: &str) {

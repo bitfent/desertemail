@@ -34,9 +34,23 @@ web_listen = "0.0.0.0:8080"
 # Login name that may access /admin. Leave unset or empty to disable admin.
 # admin_user = "postmaster"
 
+# --- TLS (optional) ---
+# Both paths set => STARTTLS on SMTP/IMAP and optional implicit-TLS listeners.
+# Generate a self-signed cert for testing:
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+#     -subj "/CN=mail.example.com" -keyout tls.key -out tls.crt
+# tls_cert_file = "tls.crt"
+# tls_key_file = "tls.key"
+# Implicit TLS listeners (only bound when non-empty AND TLS cert/key loaded):
+# smtps_listen = "0.0.0.0:465"      # SMTP submission over TLS
+# imaps_listen = "0.0.0.0:993"      # IMAP over TLS
+# web_tls_listen = "0.0.0.0:8443"   # HTTPS webmail
+# If true, AUTH on plaintext SMTP is rejected with 538 (default false).
+# require_tls_for_auth = false
+
 [users]
 # local-part or full address = "password"
-# Passwords are stored in plain text for simplicity in this zero-dep version.
+# Passwords are stored in plain text for simplicity.
 # In production hash them!
 "alice" = "alicepass"
 "bob" = "bobpass"

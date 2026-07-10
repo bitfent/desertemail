@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::dkim;
 use crate::dns;
 use crate::storage::Maildir;
+use crate::tls::{self, ClientConn};
 use crate::util::{self, base64_encode, read_line, write_line, write_raw};
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -416,20 +417,40 @@ fn deliver_via_smarthost(
         }
     };
 
+    let server_name = host_from_hostport(smarthost);
     match smtp_send(
         &addr,
+        &server_name,
         &helo_name(cfg),
         &msg.sender,
         &msg.recipients,
         raw,
         cfg.smarthost_user.as_deref(),
         cfg.smarthost_pass.as_deref(),
+        true,
     ) {
         Ok(()) => DeliverResult::Success,
         Err(SmtpError::Temp(s)) => temp_fail(s, msg.recipients.clone()),
         Err(SmtpError::Perm(s)) => DeliverResult::PermFail(s),
         Err(SmtpError::Io(s)) => temp_fail(s, msg.recipients.clone()),
     }
+}
+
+/// Hostname portion of `host:port` (or bare host) for TLS SNI.
+fn host_from_hostport(s: &str) -> String {
+    // IPv6 in brackets: [::1]:25
+    if let Some(rest) = s.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+    // host:port — split on last colon if single colon and not pure IPv6-looking
+    if s.matches(':').count() == 1 {
+        if let Some((h, _)) = s.rsplit_once(':') {
+            return h.to_string();
+        }
+    }
+    s.to_string()
 }
 
 /// If DKIM is configured and the sender is in a local domain, return the raw
@@ -555,7 +576,17 @@ fn deliver_to_domain(
                 }
             };
             for addr in addrs {
-                match smtp_send(&addr, helo, sender, recipients, raw, None, None) {
+                match smtp_send(
+                    &addr,
+                    &host,
+                    helo,
+                    sender,
+                    recipients,
+                    raw,
+                    None,
+                    None,
+                    true,
+                ) {
                     Ok(()) => return DeliverResult::Success,
                     Err(SmtpError::Perm(s)) => return DeliverResult::PermFail(s),
                     Err(SmtpError::Temp(s)) => {
@@ -588,16 +619,21 @@ fn classify_code(code: u16, text: &str) -> SmtpError {
     }
 }
 
+/// Outbound SMTP. When `try_starttls` is true and the peer advertises STARTTLS,
+/// upgrade with full cert validation (SNI = `server_name`). On handshake/cert
+/// failure, log and reconnect plaintext without STARTTLS (opportunistic TLS).
 fn smtp_send(
     addr: &SocketAddr,
+    server_name: &str,
     helo_name: &str,
     sender: &str,
     recipients: &[String],
     raw: &[u8],
     auth_user: Option<&str>,
     auth_pass: Option<&str>,
+    try_starttls: bool,
 ) -> Result<(), SmtpError> {
-    let mut stream = TcpStream::connect_timeout(addr, IO_TIMEOUT)
+    let stream = TcpStream::connect_timeout(addr, IO_TIMEOUT)
         .map_err(|e| SmtpError::Io(format!("connect {}: {}", addr, e)))?;
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
@@ -605,78 +641,138 @@ fn smtp_send(
     stream
         .set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|e| SmtpError::Io(e.to_string()))?;
-    let mut reader = io::BufReader::new(
-        stream.try_clone().map_err(|e| SmtpError::Io(e.to_string()))?,
-    );
 
-    let (code, text) = read_smtp_reply(&mut reader)?;
+    let mut reader = io::BufReader::new(ClientConn::Plain(stream));
+
+    let (code, text, _) = read_smtp_reply(&mut reader)?;
     if code != 220 {
         return Err(classify_code(code, &text));
     }
 
     // EHLO, fall back to HELO
-    write_line(&mut stream, &format!("EHLO {}", helo_name))
+    write_line(reader.get_mut(), &format!("EHLO {}", helo_name))
         .map_err(|e| SmtpError::Io(e.to_string()))?;
-    let (code, text) = read_smtp_reply(&mut reader)?;
+    let (code, text, lines) = read_smtp_reply(&mut reader)?;
+    let mut has_starttls = false;
     if code != 250 {
-        write_line(&mut stream, &format!("HELO {}", helo_name))
+        write_line(reader.get_mut(), &format!("HELO {}", helo_name))
             .map_err(|e| SmtpError::Io(e.to_string()))?;
-        let (code, text) = read_smtp_reply(&mut reader)?;
+        let (code, text, _) = read_smtp_reply(&mut reader)?;
         if code != 250 {
             return Err(classify_code(code, &text));
         }
     } else {
+        has_starttls = lines.iter().any(|l| {
+            let u = l.to_uppercase();
+            u.contains("STARTTLS")
+        });
         let _ = text;
+    }
+
+    if try_starttls && has_starttls {
+        write_line(reader.get_mut(), "STARTTLS").map_err(|e| SmtpError::Io(e.to_string()))?;
+        let (code, text) = {
+            let (c, t, _) = read_smtp_reply(&mut reader)?;
+            (c, t)
+        };
+        if code == 220 {
+            let plain = match reader.into_inner().into_plain() {
+                Some(s) => s,
+                None => {
+                    return Err(SmtpError::Io("STARTTLS on non-plain conn".into()));
+                }
+            };
+            match tls::connect_tls(plain, server_name) {
+                Ok(tls_conn) => {
+                    util::log!("outbound STARTTLS ok to {} ({})", server_name, addr);
+                    reader = io::BufReader::new(tls_conn);
+                    // Must EHLO again after STARTTLS.
+                    write_line(reader.get_mut(), &format!("EHLO {}", helo_name))
+                        .map_err(|e| SmtpError::Io(e.to_string()))?;
+                    let (code, text, _) = read_smtp_reply(&mut reader)?;
+                    if code != 250 {
+                        return Err(classify_code(code, &text));
+                    }
+                }
+                Err(e) => {
+                    util::log!(
+                        "outbound STARTTLS failed to {} ({}): {} — reconnecting plaintext",
+                        server_name,
+                        addr,
+                        e
+                    );
+                    // Fresh TCP; never retry STARTTLS on this attempt.
+                    return smtp_send(
+                        addr,
+                        server_name,
+                        helo_name,
+                        sender,
+                        recipients,
+                        raw,
+                        auth_user,
+                        auth_pass,
+                        false,
+                    );
+                }
+            }
+        } else {
+            util::log!(
+                "outbound STARTTLS rejected by {} ({} {}): continuing plaintext",
+                server_name,
+                code,
+                text
+            );
+        }
     }
 
     // Optional AUTH PLAIN for smarthost
     if let (Some(user), Some(pass)) = (auth_user, auth_pass) {
         let payload = format!("\0{}\0{}", user, pass);
         let b64 = base64_encode(payload.as_bytes());
-        write_line(&mut stream, &format!("AUTH PLAIN {}", b64))
+        write_line(reader.get_mut(), &format!("AUTH PLAIN {}", b64))
             .map_err(|e| SmtpError::Io(e.to_string()))?;
-        let (code, text) = read_smtp_reply(&mut reader)?;
+        let (code, text, _) = read_smtp_reply(&mut reader)?;
         if code != 235 {
             return Err(classify_code(code, &text));
         }
     }
 
-    write_line(&mut stream, &format!("MAIL FROM:<{}>", sender))
+    write_line(reader.get_mut(), &format!("MAIL FROM:<{}>", sender))
         .map_err(|e| SmtpError::Io(e.to_string()))?;
-    let (code, text) = read_smtp_reply(&mut reader)?;
+    let (code, text, _) = read_smtp_reply(&mut reader)?;
     if code != 250 {
-        let _ = write_line(&mut stream, "QUIT");
+        let _ = write_line(reader.get_mut(), "QUIT");
         return Err(classify_code(code, &text));
     }
 
     for rcpt in recipients {
-        write_line(&mut stream, &format!("RCPT TO:<{}>", rcpt))
+        write_line(reader.get_mut(), &format!("RCPT TO:<{}>", rcpt))
             .map_err(|e| SmtpError::Io(e.to_string()))?;
-        let (code, text) = read_smtp_reply(&mut reader)?;
+        let (code, text, _) = read_smtp_reply(&mut reader)?;
         if code != 250 && code != 251 {
-            let _ = write_line(&mut stream, "QUIT");
+            let _ = write_line(reader.get_mut(), "QUIT");
             return Err(classify_code(code, &text));
         }
     }
 
-    write_line(&mut stream, "DATA").map_err(|e| SmtpError::Io(e.to_string()))?;
-    let (code, text) = read_smtp_reply(&mut reader)?;
+    write_line(reader.get_mut(), "DATA").map_err(|e| SmtpError::Io(e.to_string()))?;
+    let (code, text, _) = read_smtp_reply(&mut reader)?;
     if code != 354 {
-        let _ = write_line(&mut stream, "QUIT");
+        let _ = write_line(reader.get_mut(), "QUIT");
         return Err(classify_code(code, &text));
     }
 
     // Dot-stuff and send body
     let body = dot_stuff(raw);
-    write_raw(&mut stream, &body).map_err(|e| SmtpError::Io(e.to_string()))?;
-    write_line(&mut stream, ".").map_err(|e| SmtpError::Io(e.to_string()))?;
-    let (code, text) = read_smtp_reply(&mut reader)?;
+    write_raw(reader.get_mut(), &body).map_err(|e| SmtpError::Io(e.to_string()))?;
+    write_line(reader.get_mut(), ".").map_err(|e| SmtpError::Io(e.to_string()))?;
+    let (code, text, _) = read_smtp_reply(&mut reader)?;
     if code != 250 {
-        let _ = write_line(&mut stream, "QUIT");
+        let _ = write_line(reader.get_mut(), "QUIT");
         return Err(classify_code(code, &text));
     }
 
-    let _ = write_line(&mut stream, "QUIT");
+    let _ = write_line(reader.get_mut(), "QUIT");
     let _ = read_smtp_reply(&mut reader);
     Ok(())
 }
@@ -702,8 +798,11 @@ fn dot_stuff(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Read a full SMTP multi-line reply. Returns (code, last-line-text).
-fn read_smtp_reply<R: io::BufRead>(reader: &mut R) -> Result<(u16, String), SmtpError> {
+/// Read a full SMTP multi-line reply. Returns (code, last-line-text, all-line-texts).
+fn read_smtp_reply<R: io::BufRead>(
+    reader: &mut R,
+) -> Result<(u16, String, Vec<String>), SmtpError> {
+    let mut lines = Vec::new();
     loop {
         let line = read_line(reader)
             .map_err(|e| SmtpError::Io(e.to_string()))?
@@ -718,8 +817,9 @@ fn read_smtp_reply<R: io::BufRead>(reader: &mut R) -> Result<(u16, String), Smtp
         } else {
             String::new()
         };
+        lines.push(text.clone());
         if !cont {
-            return Ok((code, text));
+            return Ok((code, text, lines));
         }
     }
 }

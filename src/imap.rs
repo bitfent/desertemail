@@ -1,34 +1,53 @@
 //! Minimal IMAP4rev1 server (RFC 3501 subset) from scratch.
 //! Supports: LOGIN, SELECT, LIST, FETCH (RFC822 / BODY[] / FLAGS / UID), LOGOUT, NOOP, CAPABILITY.
-//! Enough for most clients to read mail (Thunderbird, mutt, Apple Mail basic).
+//! Optional STARTTLS (RFC 2595) and implicit IMAPS when TLS is configured.
 
-use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::io::{self, BufReader};
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
+
+use rustls::ServerConfig;
 
 use crate::auth;
 use crate::config::Config;
 use crate::storage::{Maildir, MessageMeta};
+use crate::tls::{self, Conn};
 use crate::util::{self, read_line, write_line, write_raw};
 
 pub struct ImapServer {
     cfg: Arc<Config>,
+    tls_cfg: Option<Arc<ServerConfig>>,
+    implicit_tls: bool,
 }
 
 impl ImapServer {
-    pub fn new(cfg: Arc<Config>) -> Self {
-        Self { cfg }
+    pub fn new(
+        cfg: Arc<Config>,
+        tls_cfg: Option<Arc<ServerConfig>>,
+        implicit_tls: bool,
+    ) -> Self {
+        Self {
+            cfg,
+            tls_cfg,
+            implicit_tls,
+        }
     }
 
     pub fn serve(&self, listener: TcpListener) {
-        util::log!("IMAP listening on {}", listener.local_addr().unwrap());
+        util::log!(
+            "IMAP{} listening on {}",
+            if self.implicit_tls { "S" } else { "" },
+            listener.local_addr().unwrap()
+        );
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
                     let cfg = Arc::clone(&self.cfg);
+                    let tls_cfg = self.tls_cfg.clone();
+                    let implicit = self.implicit_tls;
                     thread::spawn(move || {
-                        if let Err(e) = handle_client(stream, cfg) {
+                        if let Err(e) = handle_client(stream, cfg, tls_cfg, implicit) {
                             util::log!("IMAP client error: {}", e);
                         }
                     });
@@ -43,19 +62,41 @@ impl ImapServer {
 enum State {
     NotAuth,
     Auth { user: String },
-    Selected { user: String, mailbox: String, msgs: Vec<MessageMeta> },
+    Selected {
+        user: String,
+        mailbox: String,
+        msgs: Vec<MessageMeta>,
+    },
 }
 
-fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
-    let peer = stream
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| "?".into());
-    util::log!("IMAP connect from {}", peer);
+fn handle_client(
+    stream: std::net::TcpStream,
+    cfg: Arc<Config>,
+    tls_cfg: Option<Arc<ServerConfig>>,
+    implicit_tls: bool,
+) -> io::Result<()> {
+    let conn = if implicit_tls {
+        let tc = tls_cfg.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "implicit TLS without config")
+        })?;
+        tls::accept_tls(stream, tc)?
+    } else {
+        Conn::Plain(stream)
+    };
 
-    write_line(&mut stream, "* OK desertemail IMAP4rev1 ready")?;
+    let peer = conn.peer_addr_string();
+    util::log!(
+        "IMAP connect from {}{}",
+        peer,
+        if conn.is_tls() { " (TLS)" } else { "" }
+    );
 
-    let mut reader = std::io::BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(conn);
+    let mut is_tls = reader.get_ref().is_tls();
+    let starttls_available = tls_cfg.is_some();
+
+    write_line(reader.get_mut(), "* OK desertemail IMAP4rev1 ready")?;
+
     let mut state = State::NotAuth;
     let mut tag = String::new();
 
@@ -74,15 +115,41 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
 
         match (cmd.as_str(), &state) {
             ("CAPABILITY", _) => {
-                write_line(&mut stream, "* CAPABILITY IMAP4rev1 AUTH=PLAIN")?;
-                write_line(&mut stream, &format!("{} OK CAPABILITY completed", tag))?;
+                if starttls_available && !is_tls {
+                    write_line(
+                        reader.get_mut(),
+                        "* CAPABILITY IMAP4rev1 AUTH=PLAIN STARTTLS",
+                    )?;
+                } else {
+                    write_line(reader.get_mut(), "* CAPABILITY IMAP4rev1 AUTH=PLAIN")?;
+                }
+                write_line(reader.get_mut(), &format!("{} OK CAPABILITY completed", tag))?;
+            }
+            ("STARTTLS", State::NotAuth) if starttls_available && !is_tls => {
+                // RFC 2595: tagged OK, then upgrade. Only valid in NotAuth.
+                write_line(reader.get_mut(), &format!("{} OK Begin TLS negotiation now", tag))?;
+                let plain = match reader.into_inner() {
+                    Conn::Plain(s) => s,
+                    Conn::Tls(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "STARTTLS on already-TLS conn",
+                        ));
+                    }
+                };
+                let tc = tls_cfg.as_ref().unwrap();
+                let upgraded = tls::upgrade(plain, tc)?;
+                reader = BufReader::new(upgraded);
+                is_tls = true;
+                state = State::NotAuth;
+                util::log!("IMAP STARTTLS completed for {}", peer);
             }
             ("NOOP", _) => {
-                write_line(&mut stream, &format!("{} OK NOOP completed", tag))?;
+                write_line(reader.get_mut(), &format!("{} OK NOOP completed", tag))?;
             }
             ("LOGOUT", _) => {
-                write_line(&mut stream, "* BYE desertemail logging out")?;
-                write_line(&mut stream, &format!("{} OK LOGOUT completed", tag))?;
+                write_line(reader.get_mut(), "* BYE desertemail logging out")?;
+                write_line(reader.get_mut(), &format!("{} OK LOGOUT completed", tag))?;
                 break;
             }
             ("LOGIN", State::NotAuth) => {
@@ -92,18 +159,18 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
                     // delivery does, so both sides use the same Maildir.
                     let mailbox = cfg.resolve_mailbox(&user).unwrap_or_else(|| user.clone());
                     state = State::Auth { user: mailbox };
-                    write_line(&mut stream, &format!("{} OK LOGIN completed", tag))?;
+                    write_line(reader.get_mut(), &format!("{} OK LOGIN completed", tag))?;
                     util::log!("IMAP login ok for {}", user);
                 } else {
-                    write_line(&mut stream, &format!("{} NO LOGIN failed", tag))?;
+                    write_line(reader.get_mut(), &format!("{} NO LOGIN failed", tag))?;
                 }
             }
             ("LIST", State::Auth { .. } | State::Selected { .. }) => {
                 write_line(
-                    &mut stream,
+                    reader.get_mut(),
                     "* LIST (\\HasNoChildren) \"/\" \"INBOX\"",
                 )?;
-                write_line(&mut stream, &format!("{} OK LIST completed", tag))?;
+                write_line(reader.get_mut(), &format!("{} OK LIST completed", tag))?;
             }
             ("SELECT" | "EXAMINE", State::Auth { user } | State::Selected { user, .. }) => {
                 let mbox = cmd_parts.next().unwrap_or("INBOX").trim_matches('"');
@@ -122,20 +189,23 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
                         let msgs = md.list_messages().unwrap_or_default();
                         let exists = msgs.len();
                         let recent = msgs.iter().filter(|m| m.in_new).count();
-                        write_line(&mut stream, &format!("* {} EXISTS", exists))?;
-                        write_line(&mut stream, &format!("* {} RECENT", recent))?;
-                        write_line(&mut stream, "* OK [UIDVALIDITY 1] UIDs valid")?;
+                        write_line(reader.get_mut(), &format!("* {} EXISTS", exists))?;
+                        write_line(reader.get_mut(), &format!("* {} RECENT", recent))?;
+                        write_line(reader.get_mut(), "* OK [UIDVALIDITY 1] UIDs valid")?;
                         write_line(
-                            &mut stream,
+                            reader.get_mut(),
                             &format!("* OK [UIDNEXT {}] Predicted next UID", exists + 1),
                         )?;
-                        write_line(&mut stream, "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)")?;
                         write_line(
-                            &mut stream,
+                            reader.get_mut(),
+                            "* FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)",
+                        )?;
+                        write_line(
+                            reader.get_mut(),
                             "* OK [PERMANENTFLAGS (\\Seen \\Deleted \\*)] Limited",
                         )?;
                         write_line(
-                            &mut stream,
+                            reader.get_mut(),
                             &format!("{} OK [READ-WRITE] SELECT completed", tag),
                         )?;
                         state = State::Selected {
@@ -146,7 +216,7 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
                     }
                     Err(e) => {
                         write_line(
-                            &mut stream,
+                            reader.get_mut(),
                             &format!("{} NO SELECT failed: {}", tag, e),
                         )?;
                     }
@@ -177,23 +247,30 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
                         response.push_str(&format!("UID {}", meta.uid));
                         first = false;
                     }
-                    if items.contains("RFC822.SIZE") || items.contains("ALL") || items.contains("FAST") {
+                    if items.contains("RFC822.SIZE")
+                        || items.contains("ALL")
+                        || items.contains("FAST")
+                    {
                         if !first {
                             response.push(' ');
                         }
                         response.push_str(&format!("RFC822.SIZE {}", meta.size));
                         first = false;
                     }
-                    if items.contains("RFC822") || items.contains("BODY[]") || items.contains("BODY.PEEK[]") || items.contains("ALL") {
+                    if items.contains("RFC822")
+                        || items.contains("BODY[]")
+                        || items.contains("BODY.PEEK[]")
+                        || items.contains("ALL")
+                    {
                         match std::fs::read(&meta.path) {
                             Ok(body) => {
                                 if !first {
                                     response.push(' ');
                                 }
                                 response.push_str(&format!("RFC822 {{{}}}", body.len()));
-                                write_line(&mut stream, &response)?;
-                                write_raw(&mut stream, &body)?;
-                                write_raw(&mut stream, b")\r\n")?;
+                                write_line(reader.get_mut(), &response)?;
+                                write_raw(reader.get_mut(), &body)?;
+                                write_raw(reader.get_mut(), b")\r\n")?;
                                 continue;
                             }
                             Err(_) => {
@@ -205,23 +282,23 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
                         }
                     }
                     response.push(')');
-                    write_line(&mut stream, &response)?;
+                    write_line(reader.get_mut(), &response)?;
                 }
-                write_line(&mut stream, &format!("{} OK FETCH completed", tag))?;
+                write_line(reader.get_mut(), &format!("{} OK FETCH completed", tag))?;
             }
             ("CLOSE", State::Selected { user, .. }) => {
                 state = State::Auth { user: user.clone() };
-                write_line(&mut stream, &format!("{} OK CLOSE completed", tag))?;
+                write_line(reader.get_mut(), &format!("{} OK CLOSE completed", tag))?;
             }
             ("UID", State::Selected { .. }) => {
                 write_line(
-                    &mut stream,
+                    reader.get_mut(),
                     &format!("{} OK UID command accepted (limited)", tag),
                 )?;
             }
             _ => {
                 write_line(
-                    &mut stream,
+                    reader.get_mut(),
                     &format!("{} BAD Command unknown or arguments invalid", tag),
                 )?;
             }

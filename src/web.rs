@@ -1,18 +1,22 @@
 //! Minimal HTTP/1.1 webmail + admin UI. Pure std, thread-per-connection.
+//! Optional HTTPS via web_tls_listen when TLS cert/key are configured.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::sync::Arc;
 use std::thread;
+
+use rustls::ServerConfig;
 
 use crate::auth;
 use crate::config::Config;
 use crate::crypto;
 use crate::queue;
 use crate::storage::Maildir;
+use crate::tls::{self, Conn};
 use crate::util;
 
 // ---------------------------------------------------------------------------
@@ -317,7 +321,7 @@ impl Response {
         self
     }
 
-    fn write_to(self, stream: &mut TcpStream) -> io::Result<()> {
+    fn write_to(self, stream: &mut impl Write) -> io::Result<()> {
         write!(
             stream,
             "HTTP/1.1 {} {}\r\n",
@@ -335,31 +339,79 @@ impl Response {
     }
 }
 
+fn session_cookie(token: &str, secure: bool) -> String {
+    if secure {
+        format!(
+            "session={}; HttpOnly; Path=/; SameSite=Lax; Secure",
+            token
+        )
+    } else {
+        format!("session={}; HttpOnly; Path=/; SameSite=Lax", token)
+    }
+}
+
+fn clear_session_cookie(secure: bool) -> String {
+    if secure {
+        "session=; HttpOnly; Path=/; SameSite=Lax; Secure; Max-Age=0".into()
+    } else {
+        "session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0".into()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
+/// Start plaintext HTTP webmail if `web_listen` is non-empty.
 pub fn start(cfg: Arc<Config>) {
     let addr = cfg.web_listen.clone();
     if addr.is_empty() {
         util::log!("web: disabled (web_listen empty)");
         return;
     }
+    start_listener(cfg, addr, None, false);
+}
+
+/// Start HTTPS webmail on `web_tls_listen` when TLS is configured.
+pub fn start_tls(cfg: Arc<Config>, tls_cfg: Arc<ServerConfig>) {
+    let addr = cfg.web_tls_listen.clone();
+    if addr.is_empty() {
+        return;
+    }
+    start_listener(cfg, addr, Some(tls_cfg), true);
+}
+
+fn start_listener(
+    cfg: Arc<Config>,
+    addr: String,
+    tls_cfg: Option<Arc<ServerConfig>>,
+    secure: bool,
+) {
     thread::spawn(move || {
         let listener = match TcpListener::bind(&addr) {
             Ok(l) => l,
             Err(e) => {
-                util::log!("web: FATAL cannot bind {}: {}", addr, e);
+                util::log!(
+                    "web{}: FATAL cannot bind {}: {}",
+                    if secure { "s" } else { "" },
+                    addr,
+                    e
+                );
                 return;
             }
         };
-        util::log!("web: listening on {}", addr);
+        util::log!(
+            "web{}: listening on {}",
+            if secure { "s" } else { "" },
+            addr
+        );
         for conn in listener.incoming() {
             match conn {
                 Ok(stream) => {
                     let cfg = Arc::clone(&cfg);
+                    let tls_cfg = tls_cfg.clone();
                     thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, &cfg) {
+                        if let Err(e) = handle_connection(stream, &cfg, tls_cfg, secure) {
                             util::log!("web: connection error: {}", e);
                         }
                     });
@@ -370,37 +422,54 @@ pub fn start(cfg: Arc<Config>) {
     });
 }
 
-fn handle_connection(stream: TcpStream, cfg: &Config) -> io::Result<()> {
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
-    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
-    let peer = stream
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| "?".into());
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut writer = stream;
+fn handle_connection(
+    stream: std::net::TcpStream,
+    cfg: &Config,
+    tls_cfg: Option<Arc<ServerConfig>>,
+    secure: bool,
+) -> io::Result<()> {
+    let conn = if secure {
+        let tc = tls_cfg.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "HTTPS without TLS config")
+        })?;
+        let c = tls::accept_tls(stream, tc)?;
+        c.set_timeouts(std::time::Duration::from_secs(30));
+        c
+    } else {
+        let c = Conn::Plain(stream);
+        c.set_timeouts(std::time::Duration::from_secs(30));
+        c
+    };
+
+    let peer = conn.peer_addr_string();
+    let mut reader = BufReader::new(conn);
 
     let req = match parse_request(&mut reader)? {
         Some(r) => r,
         None => return Ok(()),
     };
-    util::log!("web: {} {} {}", peer, req.method, req.path);
+    util::log!(
+        "web{}: {} {} {}",
+        if secure { "s" } else { "" },
+        peer,
+        req.method,
+        req.path
+    );
 
-    let resp = route(cfg, &req);
-    resp.write_to(&mut writer)
+    let resp = route(cfg, &req, secure);
+    resp.write_to(reader.get_mut())
 }
 
-fn route(cfg: &Config, req: &Request) -> Response {
+fn route(cfg: &Config, req: &Request, secure: bool) -> Response {
     let token = cookie_value(req, "session");
     let user = session_user(token.as_deref());
 
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/login") => page_login(None),
-        ("POST", "/login") => handle_login(cfg, req),
+        ("POST", "/login") => handle_login(cfg, req, secure),
         ("GET", "/logout") => {
             clear_session(token.as_deref());
-            Response::redirect("/login")
-                .with_cookie("session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0")
+            Response::redirect("/login").with_cookie(&clear_session_cookie(secure))
         }
         _ => {
             let user = match user {
@@ -472,7 +541,7 @@ fn page_login(error: Option<&str>) -> Response {
     Response::html(200, "OK", page_shell("Login", "", &body))
 }
 
-fn handle_login(cfg: &Config, req: &Request) -> Response {
+fn handle_login(cfg: &Config, req: &Request, secure: bool) -> Response {
     let form = form_body(req);
     let username = form.get("username").map(|s| s.trim()).unwrap_or("");
     let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
@@ -485,10 +554,7 @@ fn handle_login(cfg: &Config, req: &Request) -> Response {
     let user = username.to_lowercase();
     let token = make_session_token(&user);
     set_session(&token, &user);
-    Response::redirect("/").with_cookie(&format!(
-        "session={}; HttpOnly; Path=/; SameSite=Lax",
-        token
-    ))
+    Response::redirect("/").with_cookie(&session_cookie(&token, secure))
 }
 
 fn mailbox_name(cfg: &Config, user: &str) -> String {
