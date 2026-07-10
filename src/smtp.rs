@@ -9,6 +9,7 @@ use std::thread;
 
 use crate::auth;
 use crate::config::Config;
+use crate::queue;
 use crate::storage::Maildir;
 use crate::util::{self, read_line, write_line};
 
@@ -61,12 +62,13 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>, is_submission: bool) -
 
     write_line(&mut stream, "220 desertemail ESMTP ready")?;
 
+    let mut reader = std::io::BufReader::new(stream.try_clone()?);
     let mut state = State::Init;
     let mut authenticated_user: Option<String> = None;
     let mut data_buf = Vec::new();
 
     loop {
-        let line = match read_line(&mut stream)? {
+        let line = match read_line(&mut reader)? {
             Some(l) => l,
             None => break,
         };
@@ -99,7 +101,7 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>, is_submission: bool) -
                     }
                 } else if parts.len() == 2 && parts[1].eq_ignore_ascii_case("PLAIN") {
                     write_line(&mut stream, "334 ")?;
-                    if let Some(b64) = read_line(&mut stream)? {
+                    if let Some(b64) = read_line(&mut reader)? {
                         if let Some((user, pass)) = auth::decode_plain(&b64) {
                             if auth::authenticate(&cfg, &user, &pass) {
                                 authenticated_user = Some(user);
@@ -172,7 +174,7 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>, is_submission: bool) -
                 };
                 data_buf.clear();
                 loop {
-                    let dline = match read_line(&mut stream)? {
+                    let dline = match read_line(&mut reader)? {
                         Some(l) => l,
                         None => break,
                     };
@@ -252,6 +254,7 @@ fn deliver_mail(
 
     let mut count = 0;
     if is_submission {
+        // Copy to authenticated user's Sent folder when local.
         if let Some(user) = auth_user {
             if let Some(mb) = cfg.resolve_mailbox(user) {
                 let md = Maildir::open(&cfg.data_dir, &format!("{}/.Sent", mb))
@@ -260,13 +263,31 @@ fn deliver_mail(
                 count += 1;
             }
         }
-        util::log!("submission from {} to {:?}: stored in Sent (full MX send not yet in zero-dep)", from, rcpts);
+
+        let mut remote: Vec<String> = Vec::new();
         for r in rcpts {
             if let Some(mb) = cfg.resolve_mailbox(r) {
                 let md = Maildir::open(&cfg.data_dir, &mb).map_err(|e| e.to_string())?;
                 md.deliver(raw, from).map_err(|e| e.to_string())?;
                 count += 1;
+            } else {
+                remote.push(r.clone());
             }
+        }
+
+        // Authenticated submissions to non-local recipients go to the outbound queue
+        // (worker delivers via smarthost if configured, otherwise direct MX).
+        if !remote.is_empty() {
+            let id = queue::enqueue(&cfg.data_dir, from, &remote, raw)
+                .map_err(|e| e.to_string())?;
+            util::log!(
+                "submission from {} to {:?}: enqueued as {} ({} remote)",
+                from,
+                remote,
+                id,
+                remote.len()
+            );
+            count += remote.len();
         }
     } else {
         for r in rcpts {
@@ -278,7 +299,7 @@ fn deliver_mail(
         }
     }
     if count == 0 {
-        return Err("no local recipients".into());
+        return Err("no recipients accepted".into());
     }
     Ok(count)
 }

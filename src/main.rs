@@ -5,7 +5,9 @@
 
 mod auth;
 mod config;
+mod dns;
 mod imap;
+mod queue;
 mod smtp;
 mod storage;
 mod util;
@@ -57,13 +59,20 @@ fn main() {
     if let Err(e) = std::fs::create_dir_all(&cfg.data_dir) {
         util::log!("warning: cannot create data_dir {}: {}", cfg.data_dir, e);
     }
+    if let Err(e) = std::fs::create_dir_all(format!("{}/queue", cfg.data_dir)) {
+        util::log!("warning: cannot create queue dir: {}", e);
+    }
 
     util::log!(
-        "domains: {:?} | catch_all={} | data={}",
+        "domains: {:?} | catch_all={} | data={} | smarthost={:?}",
         cfg.domains,
         cfg.catch_all,
-        cfg.data_dir
+        cfg.data_dir,
+        cfg.smarthost
     );
+
+    // Outbound MTA queue worker (MX / smarthost delivery + retries)
+    queue::start_worker(Arc::clone(&cfg));
 
     let smtp_listener = match TcpListener::bind(&cfg.smtp_listen) {
         Ok(l) => l,

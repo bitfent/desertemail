@@ -1,6 +1,6 @@
 //! Utility helpers: pure std, no deps.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, Write};
 use std::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,8 +18,10 @@ pub fn now_millis() -> u128 {
         .as_millis()
 }
 
-pub fn read_line(stream: &mut TcpStream) -> io::Result<Option<String>> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+/// Read one CRLF/LF-terminated line from a persistent buffered reader.
+/// Callers must keep ONE BufReader per connection: constructing a fresh
+/// BufReader per line would discard whatever the previous one buffered.
+pub fn read_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
     let mut line = String::new();
     let n = reader.read_line(&mut line)?;
     if n == 0 {

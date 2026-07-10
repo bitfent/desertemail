@@ -55,11 +55,12 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
 
     write_line(&mut stream, "* OK desertemail IMAP4rev1 ready")?;
 
+    let mut reader = std::io::BufReader::new(stream.try_clone()?);
     let mut state = State::NotAuth;
     let mut tag = String::new();
 
     loop {
-        let line = match read_line(&mut stream)? {
+        let line = match read_line(&mut reader)? {
             Some(l) => l,
             None => break,
         };
@@ -87,7 +88,10 @@ fn handle_client(mut stream: TcpStream, cfg: Arc<Config>) -> io::Result<()> {
             ("LOGIN", State::NotAuth) => {
                 let (user, pass) = parse_login_args(rest);
                 if auth::authenticate(&cfg, &user, &pass) {
-                    state = State::Auth { user: user.clone() };
+                    // Map the login name to its mailbox the same way SMTP
+                    // delivery does, so both sides use the same Maildir.
+                    let mailbox = cfg.resolve_mailbox(&user).unwrap_or_else(|| user.clone());
+                    state = State::Auth { user: mailbox };
                     write_line(&mut stream, &format!("{} OK LOGIN completed", tag))?;
                     util::log!("IMAP login ok for {}", user);
                 } else {
