@@ -4,215 +4,343 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DesertEmail — pure-Rust email server</title>
-<meta name="description" content="DesertEmail: from-scratch pure Rust email server. Zero deps, ~488KB static binary, runs on 128MB RAM.">
+<meta name="description" content="A from-scratch pure-Rust email server for tiny machines. One curl command to install.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2012%2016'%20shape-rendering='crispEdges'%3E%3Crect%20x='6'%20y='0'%20width='1'%20height='1'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='3'%20height='15'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='1'%20height='15'%20fill='%23FFB03A'/%3E%3Crect%20x='7'%20y='1'%20width='1'%20height='15'%20fill='%23B35E00'/%3E%3Crect%20x='1'%20y='4'%20width='2'%20height='5'%20fill='%23E8850C'/%3E%3Crect%20x='1'%20y='4'%20width='1'%20height='5'%20fill='%23FFB03A'/%3E%3Crect%20x='3'%20y='7'%20width='2'%20height='2'%20fill='%23E8850C'/%3E%3Crect%20x='3'%20y='8'%20width='2'%20height='1'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='2'%20height='6'%20fill='%23E8850C'/%3E%3Crect%20x='10'%20y='5'%20width='1'%20height='6'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='1'%20height='1'%20fill='%23FFB03A'/%3E%3Crect%20x='8'%20y='9'%20width='1'%20height='2'%20fill='%23E8850C'/%3E%3C/svg%3E">
 <style>
   :root {
-    --bg: #f6f3ee;
-    --fg: #1a1814;
-    --muted: #5c564c;
-    --card: #fffdf9;
-    --border: #d9d0c3;
-    --accent: #b45309;
-    --accent-fg: #fff8f0;
-    --code-bg: #1e1b16;
-    --code-fg: #f5efe6;
-    --ok: #166534;
+    --bg: #f5e3c0;          /* desert day sand */
+    --panel: #fdf3dd;
+    --ink: #3a2410;
+    --muted: #7a5c38;
+    --accent: #e8850c;
+    --accent-dark: #b35e00;
+    --accent-light: #ffb03a;
+    --border: #3a2410;
+    --code-bg: #2a1a08;
+    --code-ink: #ffd591;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #12100e;
-      --fg: #f0e9df;
-      --muted: #a89f91;
-      --card: #1c1915;
-      --border: #3a342c;
-      --accent: #f59e0b;
-      --accent-fg: #1a1408;
-      --code-bg: #0c0a08;
-      --code-fg: #f5efe6;
-      --ok: #86efac;
+      --bg: #17110a;        /* desert night */
+      --panel: #211809;
+      --ink: #f2e3c8;
+      --muted: #b99a6e;
+      --accent: #e8850c;
+      --accent-dark: #B35E00;
+      --accent-light: #ffb03a;
+      --border: #e8850c;
+      --code-bg: #0d0904;
+      --code-ink: #ffd591;
     }
   }
   * { box-sizing: border-box; }
-  html { font-size: 16px; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
     margin: 0;
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background: var(--bg);
-    color: var(--fg);
-    line-height: 1.55;
-    min-height: 100vh;
+    color: var(--ink);
+    font-family: "Courier New", Courier, ui-monospace, monospace;
+    font-size: 16px;
+    line-height: 1.65;
+    image-rendering: pixelated;
   }
-  .wrap {
-    max-width: 40rem;
-    margin: 0 auto;
-    padding: 2rem 1.25rem 3rem;
+  .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+
+  /* --- 8-bit chrome --------------------------------------------------- */
+  .pix-panel {
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 8px 8px 0 0 var(--accent-dark);
+    padding: 1.25rem 1.25rem 1.4rem;
+    margin: 2rem 0;
   }
-  header { margin-bottom: 1.75rem; }
-  h1 {
-    font-size: 1.85rem;
-    letter-spacing: -0.02em;
-    margin: 0 0 0.35rem;
+  h1, h2 {
+    font-family: "Courier New", Courier, ui-monospace, monospace;
     font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    line-height: 1.25;
   }
-  .tagline {
-    color: var(--muted);
-    margin: 0;
-    font-size: 1.05rem;
-  }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1rem 1.1rem;
-    margin: 1.25rem 0;
-  }
-  h2 {
-    font-size: 1.05rem;
-    margin: 0 0 0.65rem;
-    letter-spacing: -0.01em;
-  }
-  ul {
-    margin: 0;
-    padding-left: 1.15rem;
-  }
-  li { margin: 0.35rem 0; }
-  .install-row {
-    display: flex;
-    gap: 0.5rem;
-    align-items: stretch;
-    flex-wrap: wrap;
-  }
-  code, pre {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.82rem;
-  }
-  pre {
-    flex: 1 1 14rem;
-    margin: 0;
-    padding: 0.75rem 0.9rem;
+  h1 { font-size: 2rem; margin: 0.4rem 0 0.2rem; text-shadow: 3px 3px 0 var(--accent-dark); }
+  h2 { font-size: 1.05rem; margin: 0 0 0.8rem; color: var(--accent); }
+  h2::before { content: "▶ "; color: var(--accent-dark); }
+  p { margin: 0.5rem 0; }
+  .tagline { color: var(--muted); max-width: 46ch; }
+
+  header { text-align: left; display: flex; gap: 1.2rem; align-items: center; flex-wrap: wrap; padding-top: 0.5rem; }
+  .logo { width: 66px; height: 88px; flex: none; }
+
+  /* --- install block --------------------------------------------------- */
+  pre#install-cmd {
     background: var(--code-bg);
-    color: var(--code-fg);
-    border-radius: 8px;
+    color: var(--code-ink);
+    border: 4px solid var(--border);
+    padding: 0.9rem 1rem;
+    margin: 0.6rem 0;
     overflow-x: auto;
     white-space: pre-wrap;
     word-break: break-all;
+    font-size: 0.95rem;
   }
   button.copy {
-    border: 1px solid var(--border);
+    font-family: inherit;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.9rem;
+    color: #2a1a08;
     background: var(--accent);
-    color: var(--accent-fg);
-    border-radius: 8px;
-    padding: 0.55rem 0.9rem;
-    font: inherit;
-    font-size: 0.9rem;
-    font-weight: 600;
+    border: 4px solid var(--border);
+    box-shadow: 4px 4px 0 0 var(--accent-dark);
+    padding: 0.5rem 1.1rem;
     cursor: pointer;
-    white-space: nowrap;
   }
-  button.copy:hover { filter: brightness(1.05); }
-  button.copy:active { transform: translateY(1px); }
-  button.copy.copied { background: var(--ok); color: #052e16; }
-  .note {
-    color: var(--muted);
-    font-size: 0.9rem;
-    margin: 0.65rem 0 0;
+  button.copy:hover { background: var(--accent-light); }
+  button.copy:active { transform: translate(4px, 4px); box-shadow: none; }
+  button.copy.copied { background: #7bc96f; }
+
+  /* --- platform picker -------------------------------------------------- */
+  .picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    margin: 0.75rem 0 0.9rem;
   }
-  a { color: var(--accent); }
-  footer {
-    margin-top: 2rem;
-    color: var(--muted);
-    font-size: 0.9rem;
+  button.plat {
+    font-family: inherit;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.78rem;
+    color: var(--ink);
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 4px 4px 0 0 var(--accent-dark);
+    padding: 0.55rem 0.75rem;
+    cursor: pointer;
+    line-height: 1.2;
+  }
+  button.plat:hover { background: var(--accent-light); color: #2a1a08; }
+  button.plat:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 0 var(--accent-dark); }
+  button.plat.is-active {
+    background: var(--accent);
+    color: #2a1a08;
+    box-shadow: inset 3px 3px 0 0 var(--accent-dark);
+    transform: translate(2px, 2px);
+  }
+  button.plat.is-active:hover { background: var(--accent-light); }
+
+  /* --- lists / tables --------------------------------------------------- */
+  ul { padding-left: 1.1rem; margin: 0.4rem 0; list-style: none; }
+  ul li { margin: 0.35rem 0; }
+  ul li::before { content: "■ "; color: var(--accent); }
+  ol { padding-left: 1.4rem; margin: 0.4rem 0; counter-reset: step; list-style: none; }
+  ol li { margin: 0.55rem 0; counter-increment: step; position: relative; }
+  ol li::before {
+    content: "0" counter(step);
+    color: var(--code-bg);
+    background: var(--accent);
+    font-weight: 700;
+    font-size: 0.75rem;
+    padding: 0.05rem 0.3rem;
+    margin-right: 0.55rem;
+    border: 2px solid var(--border);
+  }
+  code {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 0.08rem 0.35rem;
+    font-size: 0.9em;
+  }
+  .hw-table { width: 100%; border-collapse: collapse; margin-top: 0.4rem; font-size: 0.92rem; }
+  .hw-table th, .hw-table td { border: 3px solid var(--border); padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+  .hw-table th { background: var(--accent); color: #2a1a08; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.8rem; }
+  .table-scroll { overflow-x: auto; }
+  .note { color: var(--muted); font-size: 0.9rem; }
+
+  a { color: var(--accent-dark); text-decoration: none; border-bottom: 3px solid var(--accent); font-weight: 700; }
+  @media (prefers-color-scheme: dark) { a { color: var(--accent-light); } }
+  a:hover { background: var(--accent); color: #2a1a08; }
+
+  footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.9rem; }
+  .stats { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.9rem; }
+  .stat {
+    border: 3px solid var(--border);
+    background: var(--panel);
+    box-shadow: 4px 4px 0 0 var(--accent-dark);
+    padding: 0.3rem 0.7rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <header>
+<div class="wrap">
+
+  <header>
+    <!-- one saguaro cactus, orange, transparent background, 8-bit -->
+    <svg class="logo" viewBox="0 0 12 16" shape-rendering="crispEdges" role="img" aria-label="Pixel-art cactus logo">
+      <!-- trunk -->
+      <rect x="6" y="0" width="1" height="1"  fill="#E8850C"/>
+      <rect x="5" y="1" width="3" height="15" fill="#E8850C"/>
+      <rect x="5" y="1" width="1" height="15" fill="#FFB03A"/>
+      <rect x="7" y="1" width="1" height="15" fill="#B35E00"/>
+      <!-- left arm (lower) -->
+      <rect x="1" y="4" width="2" height="5" fill="#E8850C"/>
+      <rect x="1" y="4" width="1" height="5" fill="#FFB03A"/>
+      <rect x="3" y="7" width="2" height="2" fill="#E8850C"/>
+      <rect x="3" y="8" width="2" height="1" fill="#B35E00"/>
+      <!-- right arm (higher) -->
+      <rect x="9" y="5" width="2" height="6" fill="#E8850C"/>
+      <rect x="10" y="5" width="1" height="6" fill="#B35E00"/>
+      <rect x="9" y="5" width="1" height="1" fill="#FFB03A"/>
+      <rect x="8" y="9" width="1" height="2" fill="#E8850C"/>
+    </svg>
+    <div>
       <h1>DesertEmail</h1>
       <p class="tagline">A from-scratch pure-Rust email server for tiny machines — zero dependencies, one binary.</p>
-    </header>
+    </div>
+  </header>
 
-    <section class="card" aria-labelledby="install-h">
-      <h2 id="install-h">Install (one command)</h2>
-      <div class="install-row">
-        <pre id="install-cmd">curl -fsSL https://YOUR-SITE/install.sh | sh</pre>
-        <button type="button" class="copy" id="copy-btn" aria-label="Copy install command">Copy</button>
-      </div>
-      <p class="note">Downloads a prebuilt static binary — no local compile, works on low-memory systems (including ~128&nbsp;MB RAM).</p>
-    </section>
+  <section class="pix-panel" aria-labelledby="install-h">
+    <h2 id="install-h">Install (pick your platform)</h2>
+    <p class="note">Choose your machine — the installer never auto-detects. Prebuilt binaries download from this site; pick <strong>Build from source</strong> if yours is not listed.</p>
+    <div class="picker" role="group" aria-label="Platform">
+      <button type="button" class="plat is-active" data-script="install-linux-x86_64.sh" aria-pressed="true">Linux x86_64</button>
+      <button type="button" class="plat" data-script="install-linux-arm64.sh" aria-pressed="false">Linux ARM64</button>
+      <button type="button" class="plat" data-script="install-linux-armv7.sh" aria-pressed="false">Linux ARMv7</button>
+      <button type="button" class="plat" data-script="install-linux-armv6.sh" aria-pressed="false">Linux ARMv6 (Pi Zero)</button>
+      <button type="button" class="plat" data-script="install-macos-apple-silicon.sh" aria-pressed="false">macOS Apple Silicon</button>
+      <button type="button" class="plat" data-script="install-macos-intel.sh" aria-pressed="false">macOS Intel</button>
+      <button type="button" class="plat" data-script="install-from-source.sh" aria-pressed="false">Build from source</button>
+    </div>
+    <pre id="install-cmd">curl -fsSL https://YOUR-SITE/install-linux-x86_64.sh | sh</pre>
+    <button type="button" class="copy" id="copy-btn" aria-label="Copy install command">Copy</button>
+    <p class="note" id="install-hint">Downloads a prebuilt static binary from this site — no local compile, no toolchain.</p>
+    <div class="stats">
+      <span class="stat">~488 KB binary</span>
+      <span class="stat">0 crates</span>
+      <span class="stat">runs in 128 MB RAM</span>
+    </div>
+  </section>
 
-    <section class="card" aria-labelledby="feat-h">
-      <h2 id="feat-h">Features</h2>
-      <ul>
-        <li>From-scratch pure Rust — <strong>zero external crates</strong></li>
-        <li>~488&nbsp;KB static binary after strip/LTO</li>
-        <li>SMTP + IMAP + webmail + DKIM + outbound MTA</li>
-        <li>Runs on 128&nbsp;MB RAM devices (e.g. Raspberry Pi Zero)</li>
-        <li>Prebuilt musl Linux + macOS binaries via GitHub Releases</li>
-      </ul>
-    </section>
+  <section class="pix-panel" aria-labelledby="hw-h">
+    <h2 id="hw-h">Runs on almost anything</h2>
+    <p>The binary is fully static (musl on Linux) with no libc or library requirements, uses plain threads instead of an async runtime, and idles at a few MB of RSS. If it has a CPU from this century and a network jack, it probably works:</p>
+    <div class="table-scroll">
+      <table class="hw-table">
+        <thead><tr><th>Hardware</th><th>Arch / binary</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Raspberry Pi Zero / Pi 1</td><td><code>armv6 musl</code></td><td>512 MB RAM is plenty; dedicated ARMv6 build — no illegal-instruction crashes</td></tr>
+          <tr><td>Pi 2/3/4/5, ARM SBCs</td><td><code>armv7</code> / <code>aarch64 musl</code></td><td>The classic always-on home server</td></tr>
+          <tr><td>128 MB VPS (cheapest tier)</td><td><code>x86_64 musl</code></td><td>Gets you a public IP + unblocked port 25</td></tr>
+          <tr><td>Old netbooks / thin clients</td><td><code>x86_64 musl</code></td><td>Second life as a mail machine</td></tr>
+          <tr><td>Mac (Intel & Apple Silicon)</td><td><code>darwin</code></td><td>Great for trying it locally first</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Everything on board: SMTP (receive + submit) · IMAP · webmail + admin UI · DKIM signing · outbound MTA with retry queue.</p>
+  </section>
 
-    <section class="card" aria-labelledby="wiz-h">
-      <h2 id="wiz-h">What the installer does</h2>
-      <ul>
-        <li>Detects OS/arch and fetches the matching release binary</li>
-        <li>Verifies SHA-256 against <code>SHA256SUMS</code></li>
-        <li>Installs under <code>~/.desertemail</code> (override with <code>DESERTEMAIL_PREFIX</code>)</li>
-        <li>Interactive wizard for domain, admin user, ports, webmail, DKIM</li>
-        <li>Writes <code>config.toml</code>; optionally installs a systemd unit</li>
-        <li>Headless-safe: <code>curl | sh</code> works with env-var defaults</li>
-      </ul>
-    </section>
+  <section class="pix-panel" aria-labelledby="inst-h">
+    <h2 id="inst-h">How the installer works</h2>
+    <ol>
+      <li>You pick your platform above — the installer never guesses</li>
+      <li>Downloads the matching prebuilt binary from this site (<code>/bin/desertemail-&lt;target&gt;</code>) and verifies SHA-256 against <code>/bin/SHA256SUMS</code> — mismatch aborts; missing sums file warns and continues</li>
+      <li>Installs to <code>~/.desertemail/bin</code> and wires up your <code>PATH</code> (override with <code>DESERTEMAIL_PREFIX</code>)</li>
+      <li>Runs a terminal wizard: domain, admin user, password (hidden input), ports, webmail on/off, DKIM key generation</li>
+      <li>Writes <code>config.toml</code> and — on Linux with systemd — optionally installs and starts a service unit</li>
+      <li>Prints the DNS records to publish (MX, SPF, DKIM) so real mailboxes accept your mail</li>
+    </ol>
+    <p class="note">The wizard is plain POSIX <code>sh</code> (runs on dash/BusyBox). Piped installs stay interactive via <code>/dev/tty</code>; for CI use <code>DESERTEMAIL_NONINTERACTIVE=1</code> with env-var answers. Re-running never clobbers an existing config without asking. Unsupported machines use <strong>Build from source</strong> (needs <code>git</code> + <code>cargo</code>).</p>
+  </section>
 
-    <footer>
-      <p>
-        Source &amp; releases:
-        <a id="repo-link" href="https://github.com/bitfent/desertemail">github.com/bitfent/desertemail</a>
-      </p>
-      <p class="note">Binaries are published on GitHub Releases; this site only serves the landing page and <code>install.sh</code>.</p>
-    </footer>
-  </div>
-  <script>
-    (function () {
-      var pre = document.getElementById("install-cmd");
-      var btn = document.getElementById("copy-btn");
-      var origin = (typeof location !== "undefined" && location.protocol && location.protocol.indexOf("http") === 0)
-        ? location.origin
-        : "";
-      var cmd = origin
-        ? ("curl -fsSL " + origin + "/install.sh | sh")
-        : "curl -fsSL https://YOUR-SITE/install.sh | sh";
-      pre.textContent = cmd;
-      btn.addEventListener("click", function () {
-        var done = function () {
-          btn.textContent = "Copied";
-          btn.classList.add("copied");
-          setTimeout(function () {
-            btn.textContent = "Copy";
-            btn.classList.remove("copied");
-          }, 1600);
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(cmd).then(done).catch(function () {
-            fallback();
-          });
-        } else {
-          fallback();
-        }
-        function fallback() {
-          var ta = document.createElement("textarea");
-          ta.value = cmd;
-          ta.setAttribute("readonly", "");
-          ta.style.position = "fixed";
-          ta.style.left = "-9999px";
-          document.body.appendChild(ta);
-          ta.select();
-          try { document.execCommand("copy"); } catch (e) {}
-          document.body.removeChild(ta);
-          done();
-        }
-      });
-    })();
-  </script>
+  <footer>
+    <p>Source: <a id="repo-link" href="https://github.com/bitfent/desertemail">github.com/bitfent/desertemail</a></p>
+    <p>Binaries are served from this site under <code>/bin/</code>; source lives on GitHub.</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var pre = document.getElementById("install-cmd");
+  var btn = document.getElementById("copy-btn");
+  var hint = document.getElementById("install-hint");
+  var buttons = document.querySelectorAll("button.plat");
+  var origin = (typeof location !== "undefined" && location.protocol && location.protocol.indexOf("http") === 0)
+    ? location.origin
+    : "";
+  var script = "install-linux-x86_64.sh";
+  var cmd = "";
+
+  function buildCmd(s) {
+    return origin
+      ? ("curl -fsSL " + origin + "/" + s + " | sh")
+      : ("curl -fsSL https://YOUR-SITE/" + s + " | sh");
+  }
+
+  function setActive(el) {
+    var i;
+    for (i = 0; i < buttons.length; i++) {
+      buttons[i].classList.remove("is-active");
+      buttons[i].setAttribute("aria-pressed", "false");
+    }
+    el.classList.add("is-active");
+    el.setAttribute("aria-pressed", "true");
+    script = el.getAttribute("data-script") || script;
+    cmd = buildCmd(script);
+    pre.textContent = cmd;
+    if (hint) {
+      if (script === "install-from-source.sh") {
+        hint.textContent = "Clones the source repo and runs cargo build --release — needs git and the Rust toolchain (rustup.rs).";
+      } else {
+        hint.textContent = "Downloads a prebuilt static binary from this site — no local compile, no toolchain.";
+      }
+    }
+  }
+
+  var j;
+  for (j = 0; j < buttons.length; j++) {
+    buttons[j].addEventListener("click", function (ev) {
+      setActive(ev.currentTarget);
+    });
+  }
+
+  // Default: Linux x86_64 (first active button, or force)
+  var active = document.querySelector("button.plat.is-active") || buttons[0];
+  if (active) setActive(active);
+
+  btn.addEventListener("click", function () {
+    var text = cmd || pre.textContent;
+    var done = function () {
+      btn.textContent = "Copied!";
+      btn.classList.add("copied");
+      setTimeout(function () {
+        btn.textContent = "Copy";
+        btn.classList.remove("copied");
+      }, 1600);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(function () { fallback(); });
+    } else {
+      fallback();
+    }
+    function fallback() {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch (e) {}
+      document.body.removeChild(ta);
+      done();
+    }
+  });
+})();
+</script>
 </body>
 </html>

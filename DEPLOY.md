@@ -1,19 +1,25 @@
 # Deploying DesertEmail (binaries + install site)
 
-Short operator guide. Placeholders: leave `bitfent/desertemail` as `OWNER/REPO` until you set the real slug in `install.sh` and `site/index.html`.
+Operator guide. Binaries are **not** published to GitHub Releases. CI (or a
+maintainer) commits prebuilt binaries into `bin-dist/`; Render runs
+`site-build.sh` and serves them under `/bin/` next to the per-platform
+installers.
 
-## (a) Publish a release (prebuilt binaries)
+## (a) Build binaries into `bin-dist/`
 
-The CI workflow lives at **`deploy/release.yml`** in this repo — it is NOT active
-there. GitHub only runs workflows from `.github/workflows/`, and pushing to that
-path needs a token with the `workflow` scope, so we ship it out-of-band. One-time
+### Via GitHub Actions (recommended)
+
+The CI workflow lives at **`deploy/release.yml`** — it is NOT active there.
+GitHub only runs workflows from `.github/workflows/`, and pushing to that path
+needs a token with the `workflow` scope, so we ship it out-of-band. One-time
 activation via the GitHub web UI (your browser session has full permissions):
 
 1. On github.com open the repo → **Add file → Create new file**.
 2. Name it `.github/workflows/release.yml`.
 3. Paste the contents of `deploy/release.yml` and commit.
 
-From then on, GitHub Actions builds fully-static binaries when you push a version tag:
+From then on, GitHub Actions builds static binaries when you push a version tag
+or run **workflow_dispatch**:
 
 ```bash
 # from a clean main with the version you want
@@ -21,54 +27,123 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-That produces assets named:
+The workflow:
 
-```text
-desertemail-v0.1.0-x86_64-unknown-linux-musl
-desertemail-v0.1.0-x86_64-unknown-linux-musl.tar.gz
-desertemail-v0.1.0-aarch64-unknown-linux-musl
-desertemail-v0.1.0-aarch64-unknown-linux-musl.tar.gz
-desertemail-v0.1.0-armv7-unknown-linux-musleabihf
-desertemail-v0.1.0-armv7-unknown-linux-musleabihf.tar.gz
-desertemail-v0.1.0-arm-unknown-linux-musleabihf
-desertemail-v0.1.0-arm-unknown-linux-musleabihf.tar.gz
-desertemail-v0.1.0-x86_64-apple-darwin
-desertemail-v0.1.0-x86_64-apple-darwin.tar.gz
-desertemail-v0.1.0-aarch64-apple-darwin
-desertemail-v0.1.0-aarch64-apple-darwin.tar.gz
-SHA256SUMS
+1. Builds the 4 Linux musl targets with `cross` and both macOS Darwin targets.
+2. Names each artifact `desertemail-<rust-triple>` (no version in the filename).
+3. Copies them into `bin-dist/` and commits + pushes to the default branch
+   (`CI: update prebuilt binaries`), using `GITHUB_TOKEN` with `contents: write`.
+4. Empty diffs are skipped (`git diff --cached --quiet`).
+
+Pushing `bin-dist/` triggers a Render redeploy, which publishes the binaries
+under `/bin/`.
+
+### Locally (macOS binaries, or offline)
+
+On a Mac with the Rust toolchain:
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+
+mkdir -p bin-dist
+cp target/aarch64-apple-darwin/release/desertemail \
+  bin-dist/desertemail-aarch64-apple-darwin
+cp target/x86_64-apple-darwin/release/desertemail \
+  bin-dist/desertemail-x86_64-apple-darwin
+
+# strip if desired
+strip -x bin-dist/desertemail-aarch64-apple-darwin 2>/dev/null || true
+strip -x bin-dist/desertemail-x86_64-apple-darwin 2>/dev/null || true
+
+git add bin-dist
+git commit -m "update prebuilt macOS binaries"
+git push
 ```
 
-…and attaches them to a GitHub Release for that tag. `install.sh` downloads by the same names.
+Linux musl targets are easiest via the CI `cross` jobs (or install `cross`
+locally). Filenames must match exactly:
 
-**Before the first public install:** replace `bitfent/desertemail` in `install.sh` (and the GitHub link in `site/index.html`) with your `owner/repo`.
+```text
+desertemail-x86_64-unknown-linux-musl
+desertemail-aarch64-unknown-linux-musl
+desertemail-armv7-unknown-linux-musleabihf
+desertemail-arm-unknown-linux-musleabihf
+desertemail-x86_64-apple-darwin
+desertemail-aarch64-apple-darwin
+```
 
-## (b) Host the landing page + installer on Render
+`site-build.sh` regenerates `site/bin/SHA256SUMS` from whatever is in
+`bin-dist/` — do not hand-maintain checksums under `site/`.
+
+## (b) Host the landing page + installers on Render
 
 1. Ensure `render.yaml` is on the default branch.
 2. Render dashboard → **New** → **Blueprint** → select this repo → apply.
-3. Service `desertemail-site` publishes `site/` after `cp install.sh site/install.sh`, so `/install.sh` is the same script as the repo root. `Content-Type: text/plain` is set for that path.
+3. Set env var **`SITE_BASE_URL`** to your public origin (e.g.
+   `https://desertemail.onrender.com`) if `RENDER_EXTERNAL_URL` is not injected
+   for static sites on your plan. Installers embed this origin so
+   `curl|sh` downloads `${SITE_BASE_URL}/bin/desertemail-<target>`.
+4. Service `desertemail-site` runs `sh site-build.sh` and publishes `site/`:
+   - `site/index.html` — platform picker landing page
+   - `site/install-<platform>.sh` — generated from `installers/template.sh`
+   - `site/install-from-source.sh` — copy of `installers/build-from-source.sh`
+   - `site/bin/*` + `site/bin/SHA256SUMS` — from `bin-dist/` when present
 
-Binaries stay on GitHub Releases; Render only serves HTML + `install.sh`.
+Each `/install-*.sh` path is served as `text/plain`.
 
-## (c) User install command
+## (c) User install
 
-After the static site is live:
-
-```bash
-curl -fsSL https://<your-render-host>/install.sh | sh
-```
-
-Headless / CI:
-
-```bash
-curl -fsSL https://<your-render-host>/install.sh | DESERTEMAIL_NONINTERACTIVE=1 sh
-```
-
-Optional env overrides: `DESERTEMAIL_VERSION`, `DESERTEMAIL_PREFIX`, `DESERTEMAIL_DOMAIN`, `DESERTEMAIL_ADMIN_USER`, `DESERTEMAIL_ADMIN_PASSWORD`, `DESERTEMAIL_DATA_DIR`, `DESERTEMAIL_WEBMAIL`, `DESERTEMAIL_PORTS`, `DESERTEMAIL_DKIM`, `DESERTEMAIL_SYSTEMD`.
-
-Pin a version:
+After the static site is live, open the landing page and pick a platform. Each
+button shows a curl command like:
 
 ```bash
-DESERTEMAIL_VERSION=v0.1.0 curl -fsSL https://<your-render-host>/install.sh | sh
+curl -fsSL https://<your-render-host>/install-linux-x86_64.sh | sh
 ```
+
+Supported installer names:
+
+| Button                    | Script                              | Binary target                         |
+|---------------------------|-------------------------------------|---------------------------------------|
+| Linux x86_64              | `/install-linux-x86_64.sh`          | `x86_64-unknown-linux-musl`           |
+| Linux ARM64               | `/install-linux-arm64.sh`           | `aarch64-unknown-linux-musl`          |
+| Linux ARMv7               | `/install-linux-armv7.sh`           | `armv7-unknown-linux-musleabihf`      |
+| Linux ARMv6 (Pi Zero)     | `/install-linux-armv6.sh`           | `arm-unknown-linux-musleabihf`        |
+| macOS Apple Silicon       | `/install-macos-apple-silicon.sh`   | `aarch64-apple-darwin`                |
+| macOS Intel               | `/install-macos-intel.sh`           | `x86_64-apple-darwin`                 |
+| Build from source         | `/install-from-source.sh`           | (local `cargo build --release`)       |
+
+Headless / CI (example for Linux x86_64):
+
+```bash
+curl -fsSL https://<your-render-host>/install-linux-x86_64.sh \
+  | DESERTEMAIL_NONINTERACTIVE=1 sh
+```
+
+Optional env overrides: `DESERTEMAIL_PREFIX`, `DESERTEMAIL_DOMAIN`,
+`DESERTEMAIL_ADMIN_USER`, `DESERTEMAIL_ADMIN_PASSWORD`, `DESERTEMAIL_DATA_DIR`,
+`DESERTEMAIL_WEBMAIL`, `DESERTEMAIL_PORTS`, `DESERTEMAIL_DKIM`,
+`DESERTEMAIL_SYSTEMD`.
+
+There is **no** platform auto-detection and **no** GitHub Releases/API in the
+install path. Users choose their installer; binaries and `SHA256SUMS` come from
+this site under `/bin/`.
+
+## Local-dev loop
+
+```bash
+# from repo root
+SITE_BASE_URL=http://127.0.0.1:4173 sh site-build.sh
+
+# serve the publish tree (any static server)
+cd site && python3 -m http.server 4173
+```
+
+Open `http://127.0.0.1:4173/`. The picker fills origin automatically. If you put
+binaries in `bin-dist/` before running `site-build.sh`, they appear under
+`/bin/` for the installers to download.
+
+If `SITE_BASE_URL` and `RENDER_EXTERNAL_URL` are both unset, `site-build.sh`
+defaults to `http://127.0.0.1:4173` and prints a warning.

@@ -1,17 +1,18 @@
 #!/bin/sh
-# DesertEmail one-line installer.
-# Usage:  curl -fsSL https://<site>/install.sh | sh
+# DesertEmail build-from-source installer (unsupported / other platforms).
+# Usage:  curl -fsSL https://<site>/install-from-source.sh | sh
 # Optional env:
-#   DESERTEMAIL_VERSION, DESERTEMAIL_PREFIX, DESERTEMAIL_NONINTERACTIVE=1
+#   DESERTEMAIL_PREFIX, DESERTEMAIL_NONINTERACTIVE=1
 #   DESERTEMAIL_DOMAIN, DESERTEMAIL_ADMIN_USER, DESERTEMAIL_ADMIN_PASSWORD
 #   DESERTEMAIL_DATA_DIR, DESERTEMAIL_WEBMAIL=1|0, DESERTEMAIL_PORTS=high|privileged
 #   DESERTEMAIL_DKIM=1|0, DESERTEMAIL_SYSTEMD=1|0
 #
+# Requires: git, cargo (https://rustup.rs). Clones the source repo and compiles.
 
 set -eu
 
-REPO="bitfent/desertemail"
 APP_NAME="desertemail"
+SOURCE_REPO="https://github.com/bitfent/desertemail"
 DEFAULT_PREFIX="${HOME}/.desertemail"
 PREFIX="${DESERTEMAIL_PREFIX:-$DEFAULT_PREFIX}"
 BIN_DIR="${PREFIX}/bin"
@@ -87,46 +88,6 @@ stty_echo_on() {
     stty echo <"${TTY_IN}" 2>/dev/null || true
   else
     stty echo 2>/dev/null || true
-  fi
-}
-
-# Prefer curl, fall back to wget.
-download() {
-  # download URL DEST
-  _url=$1
-  _dest=$2
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --proto '=https' --tlsv1.2 -o "${_dest}" "${_url}" \
-      || die "download failed: ${_url}"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "${_dest}" "${_url}" \
-      || die "download failed: ${_url}"
-  else
-    die "need curl or wget to download release assets"
-  fi
-}
-
-download_stdout() {
-  # download_stdout URL  -> prints body to stdout
-  _url=$1
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --proto '=https' --tlsv1.2 "${_url}"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -O - "${_url}"
-  else
-    die "need curl or wget to download release assets"
-  fi
-}
-
-sha256_file() {
-  # print hex digest of file $1
-  _f=$1
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "${_f}" | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "${_f}" | awk '{print $1}'
-  else
-    return 1
   fi
 }
 
@@ -207,108 +168,68 @@ random_password() {
 }
 
 # ---------------------------------------------------------------------------
-# Platform detection  (target triples MUST match release.yml asset names)
+# Toolchain + RAM checks, then build from source
 # ---------------------------------------------------------------------------
 
-detect_target() {
-  _os=$(uname -s 2>/dev/null || echo unknown)
-  _arch=$(uname -m 2>/dev/null || echo unknown)
-
-  case "${_os}" in
-    Linux)  _os_key=linux ;;
-    Darwin) _os_key=darwin ;;
-    *)
-      die "unsupported OS '${_os}'. Supported: Linux, macOS (Darwin)."
-      ;;
-  esac
-
-  case "${_arch}" in
-    x86_64|amd64)   _arch_key=x86_64 ;;
-    aarch64|arm64)  _arch_key=aarch64 ;;
-    armv7l|armv7|armhf) _arch_key=armv7 ;;
-    # ARMv6 (Pi Zero / Pi 1) cannot run armv7 binaries — needs its own build.
-    armv6l|armv6)   _arch_key=armv6 ;;
-    *)
-      die "unsupported architecture '${_arch}'. Supported: x86_64, aarch64/arm64, armv7/armhf, armv6."
-      ;;
-  esac
-
-  case "${_os_key}-${_arch_key}" in
-    linux-x86_64)   TARGET="x86_64-unknown-linux-musl" ;;
-    linux-aarch64)  TARGET="aarch64-unknown-linux-musl" ;;
-    linux-armv7)    TARGET="armv7-unknown-linux-musleabihf" ;;
-    linux-armv6)    TARGET="arm-unknown-linux-musleabihf" ;;
-    darwin-x86_64)  TARGET="x86_64-apple-darwin" ;;
-    darwin-aarch64) TARGET="aarch64-apple-darwin" ;;
-    *)
-      die "no prebuilt binary for ${_os}/${_arch}"
-      ;;
-  esac
-}
-
-# ---------------------------------------------------------------------------
-# Version + download
-# ---------------------------------------------------------------------------
-
-resolve_version() {
-  if [ -n "${DESERTEMAIL_VERSION:-}" ]; then
-    VERSION="${DESERTEMAIL_VERSION}"
-    # Accept with or without leading v
-    case "${VERSION}" in
-      v*) ;;
-      *) VERSION="v${VERSION}" ;;
-    esac
-    return 0
+check_tools() {
+  _missing=0
+  if ! command -v git >/dev/null 2>&1; then
+    warn "git is not installed"
+    _missing=1
   fi
-
-  info "Resolving latest release from GitHub (${REPO})..."
-  _api="https://api.github.com/repos/${REPO}/releases/latest"
-  _json=$(download_stdout "${_api}") || die "failed to query GitHub API for latest release"
-  # Portable-ish JSON scrape for "tag_name": "vX.Y.Z"
-  VERSION=$(printf '%s' "${_json}" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-  if [ -z "${VERSION}" ]; then
-    die "could not parse tag_name from GitHub API response"
+  if ! command -v cargo >/dev/null 2>&1; then
+    warn "cargo is not installed"
+    _missing=1
+  fi
+  if [ "${_missing}" -ne 0 ]; then
+    die "need git and cargo to build from source. Install Rust from https://rustup.rs then re-run this installer."
   fi
 }
 
-install_binary() {
-  _asset="${APP_NAME}-${VERSION}-${TARGET}"
-  _base="https://github.com/${REPO}/releases/download/${VERSION}"
-  _url="${_base}/${_asset}"
-  _sums_url="${_base}/SHA256SUMS"
+check_ram() {
+  # Warn if total RAM < ~1 GB. Skip if we cannot determine.
+  _mb=""
+  if [ -r /proc/meminfo ]; then
+    _kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
+    if [ -n "${_kb}" ]; then
+      _mb=$((_kb / 1024))
+    fi
+  elif command -v sysctl >/dev/null 2>&1; then
+    _bytes=$(sysctl -n hw.memsize 2>/dev/null || true)
+    if [ -n "${_bytes}" ] && [ "${_bytes}" -gt 0 ] 2>/dev/null; then
+      _mb=$((_bytes / 1024 / 1024))
+    fi
+  fi
+  if [ -n "${_mb}" ] && [ "${_mb}" -lt 1024 ]; then
+    warn "system reports ~${_mb} MB RAM; compiling Rust may be slow or run out of memory"
+  fi
+}
+
+install_from_source() {
+  check_tools
+  check_ram
 
   TMPDIR_INSTALL=$(mktemp -d 2>/dev/null || mktemp -d -t desertemail)
-  _bin_tmp="${TMPDIR_INSTALL}/${_asset}"
-  _sums_tmp="${TMPDIR_INSTALL}/SHA256SUMS"
+  _src="${TMPDIR_INSTALL}/src"
 
-  info "Downloading ${_asset} ..."
-  download "${_url}" "${_bin_tmp}"
+  info "Cloning ${SOURCE_REPO} ..."
+  git clone --depth 1 "${SOURCE_REPO}" "${_src}" \
+    || die "git clone failed"
 
-  info "Downloading SHA256SUMS ..."
-  if download "${_sums_url}" "${_sums_tmp}" 2>/dev/null; then
-    if _got=$(sha256_file "${_bin_tmp}"); then
-      _want=$(grep -E "[ /]${_asset}\$" "${_sums_tmp}" 2>/dev/null | awk '{print $1}' | head -n 1)
-      if [ -z "${_want}" ]; then
-        # Also try exact basename match on first field lines: HASH  name
-        _want=$(awk -v n="${_asset}" '$2 == n || $2 ~ "/"n"$" {print $1; exit}' "${_sums_tmp}")
-      fi
-      if [ -z "${_want}" ]; then
-        warn "SHA256SUMS has no entry for ${_asset}; continuing without verify"
-      elif [ "${_got}" != "${_want}" ]; then
-        die "SHA256 mismatch for ${_asset}: expected ${_want}, got ${_got}"
-      else
-        info "SHA256 verified."
-      fi
-    else
-      warn "neither sha256sum nor shasum found; skipping checksum verification"
-    fi
-  else
-    warn "could not download SHA256SUMS; continuing without verify"
+  info "Building release binary (this may take several minutes) ..."
+  (
+    CDPATH='' cd -- "${_src}" || exit 1
+    cargo build --release
+  ) || die "cargo build --release failed"
+
+  _built="${_src}/target/release/${APP_NAME}"
+  if [ ! -f "${_built}" ]; then
+    die "build succeeded but binary not found at ${_built}"
   fi
 
   mkdir -p "${BIN_DIR}"
   _dest="${BIN_DIR}/${APP_NAME}"
-  cp "${_bin_tmp}" "${_dest}"
+  cp "${_built}" "${_dest}"
   chmod +x "${_dest}"
   info "Installed binary -> ${_dest}"
 }
@@ -387,7 +308,7 @@ write_config() {
   _esc_imap=$(toml_escape "${_imap}")
 
   {
-    printf '# Generated by install.sh — edit as needed\n'
+    printf '# Generated by desertemail installer — edit as needed\n'
     printf 'domains = ["%s"]\n' "${_esc_domain}"
     printf 'data_dir = "%s"\n' "${_esc_data}"
     printf 'smtp_listen = "%s"\n' "${_esc_smtp}"
@@ -720,14 +641,9 @@ print_summary() {
 # ---------------------------------------------------------------------------
 
 main() {
-  info "DesertEmail installer"
-  detect_target
-  info "Detected target: ${TARGET}"
+  info "DesertEmail installer (build from source)"
 
-  resolve_version
-  info "Version: ${VERSION}"
-
-  install_binary
+  install_from_source
   ensure_path
   configure
   install_systemd
