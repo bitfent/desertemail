@@ -1,0 +1,15 @@
+[Unit]
+Description=DesertEmail minimal email server
+After=network.target
+
+[Service]
+Type=simple
+User=mail
+Group=mail
+WorkingDirectory=/opt/desertemail
+ExecStart=/opt/desertemail/desertemail --config /etc/desertemail/config.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

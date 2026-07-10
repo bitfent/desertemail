@@ -1,0 +1,23 @@
+[package]
+name = "desertemail"
+version = "0.1.0"
+edition = "2021"
+authors = ["Open Source Community"]
+description = "DesertEmail — a minimal, from-scratch open-source email server in pure Rust (zero external dependencies) for Raspberry Pi and tiny computers. Configure with DNS or simple auto-routing for your addresses. Open source, self-hostable, educational."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/desertemail"
+keywords = ["email", "smtp", "imap", "mail", "server", "raspberry-pi", "minimal", "self-hosted", "zero-deps"]
+categories = ["email", "network-programming", "command-line-utilities"]
+readme = "README.md"
+
+# ZERO external dependencies! Everything from std.
+# Perfect for constrained devices. Binary size ~ few hundred KB after strip/LTO.
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = "z"
+strip = true

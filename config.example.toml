@@ -1,0 +1,32 @@
+# DesertEmail configuration (hand-parsed, keep simple)
+
+# Domains this server accepts mail for (MX should point here)
+domains = ["example.com", "mail.example.com"]
+
+# Where to store Maildirs (absolute path recommended)
+data_dir = "./data"
+
+# Listen addresses. Use high ports if not root, then port-forward or use authbind/setcap.
+smtp_listen = "0.0.0.0:2525"          # inbound SMTP (real: 25)
+submission_listen = "0.0.0.0:2587"    # submission (real: 587)
+imap_listen = "0.0.0.0:2143"          # IMAP (real: 143)
+
+# Optional smarthost for sending (if you can't do direct MX or port 25 blocked)
+# smarthost = "smtp.gmail.com:587"
+# smarthost_user = "you@gmail.com"
+# smarthost_pass = "app-password"
+
+# Catch-all: accept ANY local-part@domain and auto-create mailbox under data_dir/<local>
+# If false, only listed users are accepted.
+catch_all = true
+
+# Default password for auto-created catch-all mailboxes (change me!)
+default_password = "changeme"
+
+[users]
+# local-part or full address = "password"
+# Passwords are stored in plain text for simplicity in this zero-dep version.
+# In production hash them!
+"alice" = "alicepass"
+"bob" = "bobpass"
+"postmaster" = "adminpass"
