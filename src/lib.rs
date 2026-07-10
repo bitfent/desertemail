@@ -1,6 +1,7 @@
 //! DesertEmail library surface (for unit tests and cargo-fuzz targets).
 //! The binary entry point is `main.rs`.
 
+pub mod acme;
 pub mod auth;
 pub mod config;
 pub mod crypto;
@@ -12,6 +13,7 @@ pub mod limits;
 pub mod passwd;
 pub mod queue;
 pub mod ratelimit;
+pub mod shutdown;
 pub mod smtp;
 pub mod spamscore;
 pub mod spf;

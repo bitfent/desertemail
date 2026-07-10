@@ -646,10 +646,24 @@ export PATH="$HOME/.desertemail/bin:$PATH"
               <tr><td><code>spam_score_tag</code></td><td>i32</td><td><code>5</code></td><td>Score ≥ this adds <code>X-Spam-Flag: YES</code></td></tr>
               <tr><td><code>spam_score_reject</code></td><td>i32</td><td><code>0</code></td><td>Score ≥ this → 550; <code>0</code> disables reject</td></tr>
               <tr><td><code>spam_check_ptr</code></td><td>bool</td><td><code>true</code></td><td>Include missing/mismatched rDNS in spam score</td></tr>
-              <tr><td><code>[users]</code></td><td>map</td><td>empty</td><td><code>"local"</code> or <code>"user@domain"</code> = plaintext password</td></tr>
+              <tr><td><code>default_quota_mb</code></td><td>u64</td><td><code>0</code></td><td>Default mailbox quota in MiB; <code>0</code> = unlimited. Over-quota: SMTP <code>452 4.2.2</code>, IMAP APPEND <code>NO [OVERQUOTA]</code></td></tr>
+              <tr><td><code>log_format</code></td><td>string</td><td><code>"text"</code></td><td><code>"text"</code> or <code>"json"</code> (one object per line: ts, level, msg, fields). Auth failures: <code>event=auth_fail</code></td></tr>
+              <tr><td><code>acme</code></td><td>bool</td><td><code>false</code></td><td>Enable ACME v2 auto TLS (Let's Encrypt). Non-blocking background thread</td></tr>
+              <tr><td><code>acme_email</code></td><td>string</td><td><code>""</code></td><td>Account contact (required when <code>acme=true</code>)</td></tr>
+              <tr><td><code>acme_directory</code></td><td>string</td><td>LE production</td><td>ACME directory URL; use staging for tests</td></tr>
+              <tr><td><code>acme_domains</code></td><td>list</td><td><code>domains</code></td><td>Hostnames on the certificate</td></tr>
+              <tr><td><code>[users]</code></td><td>map</td><td>empty</td><td><code>"local"</code> or <code>"user@domain"</code> = password or PBKDF2 hash</td></tr>
+              <tr><td><code>[quotas]</code></td><td>map</td><td>empty</td><td>Per-user quota overrides in MiB (e.g. <code>"alice" = 512</code>)</td></tr>
             </tbody>
           </table>
         </div>
+        <div class="heading-wrap"><h3 id="imap-caps">IMAP capabilities</h3><a class="anchor" href="#imap-caps" aria-label="Link to this section">#</a></div>
+        <p>IMAP4rev1 subset: <code>LOGIN</code>, <code>SELECT</code>/<code>EXAMINE</code>, <code>LIST</code>, <code>FETCH</code>, <code>SEARCH</code> (ALL/SEEN/UNSEEN/NEW/OLD/RECENT/FROM/TO/SUBJECT/BODY/TEXT/SINCE/BEFORE/HEADER + UID SEARCH), <code>STORE</code> (±FLAGS), <code>EXPUNGE</code>, <code>CLOSE</code>, <code>APPEND</code> (sync + non-sync literals), <code>IDLE</code> (RFC 2177, polls Maildir ~2s), <code>UID</code> FETCH/STORE/SEARCH/COPY, <code>CAPABILITY</code> (advertises <code>IDLE</code>), <code>STARTTLS</code>. UIDs are stable (filename-hash, flags stripped); UIDVALIDITY is constant.</p>
+        <div class="heading-wrap"><h3 id="acme-setup">ACME / Let's Encrypt</h3><a class="anchor" href="#acme-setup" aria-label="Link to this section">#</a></div>
+        <p>Set <code>acme = true</code>, <code>acme_email</code>, <code>tls_cert_file</code>, <code>tls_key_file</code>, and ensure <code>web_listen</code> is reachable for HTTP-01 at <code>/.well-known/acme-challenge/&lt;token&gt;</code> (typically port <strong>80</strong>). Account key is stored under <code>{data_dir}/acme/account.key</code>. Issuance runs in a background thread after listeners start and re-checks every 12h (renew when &lt;30 days remain). Failures are logged; the server continues with any existing cert or plaintext.</p>
+        <p class="note">Staging for first tests: <code>acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"</code>. A full live run needs a public domain and open port 80 — not available in most CI/sandbox environments.</p>
+        <div class="heading-wrap"><h3 id="fail2ban">Structured logs &amp; fail2ban</h3><a class="anchor" href="#fail2ban" aria-label="Link to this section">#</a></div>
+        <p>With <code>log_format = "json"</code> (or text with level tags), auth failures emit <code>event=auth_fail</code> plus <code>ip</code>/<code>user</code>/<code>proto</code>. Example filter and jail: <code>deploy/fail2ban-desertemail.conf</code> and <code>deploy/fail2ban-jail-desertemail.local</code>.</p>
         <div class="heading-wrap"><h3 id="config-example">Annotated example</h3><a class="anchor" href="#config-example" aria-label="Link to this section">#</a></div>
         <pre><code># Domains this server accepts (MX should point here)
 domains = ["example.com", "mail.example.com"]
@@ -687,10 +701,18 @@ default_password = "changeme"   # change this!
 # web_tls_listen = "0.0.0.0:8443"   # HTTPS webmail
 # require_tls_for_auth = false      # true => AUTH only over TLS (538 on plain)
 
+default_quota_mb = 0
+log_format = "text"
+# acme = true
+# acme_email = "admin@example.com"
+# acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
 [users]
 "alice" = "alicepass"
 "bob" = "bobpass"
-"postmaster" = "adminpass"</code></pre>
+"postmaster" = "adminpass"
+# [quotas]
+# "alice" = 512</code></pre>
         <p class="note">CLI: <code>desertemail --config path/to/config.toml</code> (or <code>-c</code>). Help: <code>--help</code> / <code>-h</code>. DKIM DNS helper: <code>desertemail --dkim-dns &lt;domain&gt; [--config path]</code>.</p>
       </section>
 
@@ -729,7 +751,7 @@ default_password = "changeme"   # change this!
 
       <section class="pix-panel" aria-labelledby="tls">
         <div class="heading-wrap"><h2 id="tls">TLS / encryption setup</h2><a class="anchor" href="#tls" aria-label="Link to this section">#</a></div>
-        <p>TLS is built in via <strong>rustls</strong> (ring crypto provider). There is no async runtime and no other crates for mail protocol code — only TLS uses a library. You supply a certificate and private key; DesertEmail does <strong>not</strong> talk to ACME / Let’s Encrypt for you.</p>
+        <p>TLS is built in via <strong>rustls</strong> (ring crypto provider). There is no async runtime and no other crates for mail protocol code — only TLS uses a library. You can supply a certificate and private key yourself, or enable built-in <strong>ACME</strong> (<code>acme = true</code>) for Let's Encrypt HTTP-01 (requires port 80 / <code>web_listen</code> reachable; see ACME section above).</p>
 
         <div class="heading-wrap"><h3 id="tls-selfsigned">Quick self-signed cert (testing)</h3><a class="anchor" href="#tls-selfsigned" aria-label="Link to this section">#</a></div>
         <pre><code>openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
@@ -765,7 +787,7 @@ tls_key_file  = "/etc/letsencrypt/live/mail.example.com/privkey.pem"
 smtps_listen = "0.0.0.0:465"
 imaps_listen = "0.0.0.0:993"
 web_tls_listen = "0.0.0.0:8443"</code></pre>
-        <p class="note">You own renewal (certbot timer, acme.sh cron, etc.). Restart or re-run DesertEmail after the files on disk change — there is no built-in reload/ACME client.</p>
+        <p class="note">With <code>acme = true</code>, DesertEmail renews in the background when the cert has &lt;30 days left (checks every 12h). For BYO certs (certbot/acme.sh), restart DesertEmail after the files on disk change — there is no config hot-reload.</p>
 
         <div class="heading-wrap"><h3 id="tls-require-auth">Force encrypted logins</h3><a class="anchor" href="#tls-require-auth" aria-label="Link to this section">#</a></div>
         <pre><code>require_tls_for_auth = true</code></pre>
@@ -773,7 +795,7 @@ web_tls_listen = "0.0.0.0:8443"</code></pre>
 
         <div class="heading-wrap"><h3 id="tls-not-covered">What still isn’t covered</h3><a class="anchor" href="#tls-not-covered" aria-label="Link to this section">#</a></div>
         <ul>
-          <li><strong>No automatic certificate issuance or renewal</strong> (no ACME / Let’s Encrypt inside the binary)</li>
+          <li><strong>ACME is optional and needs public HTTP-01</strong> (port 80); without it, bring your own cert</li>
           <li><strong>Outbound TLS is opportunistic</strong> — remote STARTTLS with full cert validation; on failure the queue reconnects plaintext so delivery is not blocked</li>
           <li>Passwords remain plaintext in <code>config.toml</code>; TLS only protects the wire</li>
           <li>You may still put a reverse proxy in front for HTTP(S) if you prefer terminating TLS elsewhere</li>

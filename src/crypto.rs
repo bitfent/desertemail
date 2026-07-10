@@ -379,6 +379,69 @@ impl BigUint {
         self.div_rem(modulus).1
     }
 
+    pub fn add(&self, other: &Self) -> Self {
+        let n = self.limbs.len().max(other.limbs.len());
+        let mut limbs = Vec::with_capacity(n + 1);
+        let mut carry = 0u64;
+        for i in 0..n {
+            let a = self.limbs.get(i).copied().unwrap_or(0) as u64;
+            let b = other.limbs.get(i).copied().unwrap_or(0) as u64;
+            let s = a + b + carry;
+            limbs.push(s as u32);
+            carry = s >> 32;
+        }
+        if carry > 0 {
+            limbs.push(carry as u32);
+        }
+        let mut r = Self { limbs };
+        r.normalize();
+        r
+    }
+
+    /// Modular inverse via signed extended Euclidean algorithm, or None if not invertible.
+    pub fn mod_inverse(&self, modulus: &Self) -> Option<Self> {
+        if modulus.is_zero() {
+            return None;
+        }
+        let a = self.rem(modulus);
+        if a.is_zero() {
+            return None;
+        }
+        // Track coefficient of `a` with an explicit sign bit.
+        let mut old_r = modulus.clone();
+        let mut r = a;
+        let mut old_s = Self::zero();
+        let mut old_s_neg = false;
+        let mut s = Self::from_u32(1);
+        let mut s_neg = false;
+
+        while !r.is_zero() {
+            let (q, _) = old_r.div_rem(&r);
+            let new_r = old_r.sub(&q.mul(&r)).unwrap_or(Self::zero());
+            old_r = r;
+            r = new_r;
+
+            // new_s = old_s - q * s  (signed)
+            let qs = q.mul(&s);
+            let qs_neg = s_neg;
+            let (ns, ns_neg) = signed_sub(&old_s, old_s_neg, &qs, qs_neg);
+            old_s = s;
+            old_s_neg = s_neg;
+            s = ns;
+            s_neg = ns_neg;
+        }
+        // gcd must be 1
+        if !(old_r.limbs.len() == 1 && old_r.limbs[0] == 1) {
+            return None;
+        }
+        let inv = if old_s_neg {
+            modulus.sub(&old_s.rem(modulus))?
+        } else {
+            old_s.rem(modulus)
+        };
+        Some(inv)
+    }
+
     /// Modular exponentiation: self^exp mod modulus (square-and-multiply).
     pub fn modpow(&self, exp: &Self, modulus: &Self) -> Self {
         if modulus.is_zero() {
@@ -397,6 +460,31 @@ impl BigUint {
             base = base.mul(&base).rem(modulus);
         }
         result
+    }
+}
+
+/// Signed subtraction of two non-negative BigUints with independent sign flags.
+/// Returns (abs, is_negative).
+fn signed_sub(a: &BigUint, a_neg: bool, b: &BigUint, b_neg: bool) -> (BigUint, bool) {
+    // a - b with signs
+    match (a_neg, b_neg) {
+        (false, false) => {
+            if a.cmp(b) != std::cmp::Ordering::Less {
+                (a.sub(b).unwrap_or(BigUint::zero()), false)
+            } else {
+                (b.sub(a).unwrap_or(BigUint::zero()), true)
+            }
+        }
+        (true, true) => {
+            // -|a| - (-|b|) = |b| - |a|
+            if b.cmp(a) != std::cmp::Ordering::Less {
+                (b.sub(a).unwrap_or(BigUint::zero()), false)
+            } else {
+                (a.sub(b).unwrap_or(BigUint::zero()), true)
+            }
+        }
+        (false, true) => (a.add(b), false),  // a - (-b) = a+b
+        (true, false) => (a.add(b), true),   // -a - b = -(a+b)
     }
 }
 
@@ -431,6 +519,109 @@ impl RsaKey {
     pub fn from_pem(pem: &str) -> Result<Self, String> {
         let der = pem_to_der(pem)?;
         parse_rsa_private_key_der(&der)
+    }
+
+    /// Generate an RSA key of `bits` (e.g. 2048). Slow with schoolbook arithmetic;
+    /// intended for one-shot ACME account/cert keys, not hot paths.
+    /// Prefers openssl CLI when available for speed; falls back to pure-Rust.
+    pub fn generate(bits: usize) -> Result<Self, String> {
+        if bits < 512 || bits % 8 != 0 {
+            return Err("RSA bits must be >= 512 and multiple of 8".into());
+        }
+        // Prefer openssl for production-sized keys (fast + well-tested).
+        if bits >= 1024 {
+            if let Ok(key) = generate_via_openssl(bits) {
+                return Ok(key);
+            }
+        }
+        generate_rsa_pure(bits)
+    }
+
+    /// PKCS#1 PEM (`BEGIN RSA PRIVATE KEY`).
+    pub fn to_pem_pkcs1(&self) -> String {
+        let der = self.to_der_pkcs1();
+        let b64 = util::base64_encode(&der);
+        let mut out = String::from("-----BEGIN RSA PRIVATE KEY-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            out.push_str(&String::from_utf8_lossy(chunk));
+            out.push('\n');
+        }
+        out.push_str("-----END RSA PRIVATE KEY-----\n");
+        out
+    }
+
+    /// Minimal PKCS#1 RSAPrivateKey DER (version, n, e, d, zeros for p,q,dP,dQ,qInv).
+    /// Enough for our own parser and for rustls-pemfile when wrapped as PEM.
+    pub fn to_der_pkcs1(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&encode_der_integer(&BigUint::from_u32(0))); // version
+        body.extend_from_slice(&encode_der_integer(&self.n));
+        body.extend_from_slice(&encode_der_integer(&self.e));
+        body.extend_from_slice(&encode_der_integer(&self.d));
+        // p, q, dP, dQ, qInv — use 0 (optional for pure modpow; some parsers require presence)
+        let zero = encode_der_integer(&BigUint::from_u32(0));
+        for _ in 0..5 {
+            body.extend_from_slice(&zero);
+        }
+        der_tlv(0x30, &body)
+    }
+
+    /// SubjectPublicKeyInfo DER for RSA (needed by PKCS#10 CSR).
+    pub fn spki_der(&self) -> Vec<u8> {
+        // AlgorithmIdentifier: rsaEncryption OID 1.2.840.113549.1.1.1 + NULL
+        let oid_rsa = [
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+        ];
+        let mut alg = Vec::new();
+        alg.extend_from_slice(&oid_rsa);
+        alg.extend_from_slice(&[0x05, 0x00]); // NULL
+        let alg_seq = der_tlv(0x30, &alg);
+        let rsa_pub = self.public_key_der();
+        let mut bit_str = Vec::with_capacity(1 + rsa_pub.len());
+        bit_str.push(0x00); // unused bits
+        bit_str.extend_from_slice(&rsa_pub);
+        let bit_tlv = der_tlv(0x03, &bit_str);
+        let mut spki = Vec::new();
+        spki.extend_from_slice(&alg_seq);
+        spki.extend_from_slice(&bit_tlv);
+        der_tlv(0x30, &spki)
+    }
+
+    /// Build a minimal PKCS#10 CSR DER for `common_name` (and optional SANs via CN only).
+    /// Signed with sha256WithRSAEncryption.
+    pub fn build_csr_der(&self, common_name: &str, san_dns: &[String]) -> Result<Vec<u8>, String> {
+        // certificationRequestInfo
+        let version = encode_der_integer(&BigUint::from_u32(0));
+        let subject = der_name_cn(common_name, san_dns);
+        let spki = self.spki_der();
+        // attributes [0] EMPTY
+        let attrs = der_tlv(0xa0, &[]);
+        let mut info = Vec::new();
+        info.extend_from_slice(&version);
+        info.extend_from_slice(&subject);
+        info.extend_from_slice(&spki);
+        info.extend_from_slice(&attrs);
+        let info_seq = der_tlv(0x30, &info);
+
+        let sig = self.sign_sha256(&info_seq)?;
+        // signatureAlgorithm sha256WithRSAEncryption
+        let oid_sha256_rsa = [
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
+        ];
+        let mut sigalg = Vec::new();
+        sigalg.extend_from_slice(&oid_sha256_rsa);
+        sigalg.extend_from_slice(&[0x05, 0x00]);
+        let sigalg_seq = der_tlv(0x30, &sigalg);
+        let mut bit = Vec::with_capacity(1 + sig.len());
+        bit.push(0x00);
+        bit.extend_from_slice(&sig);
+        let sig_bit = der_tlv(0x03, &bit);
+
+        let mut csr = Vec::new();
+        csr.extend_from_slice(&info_seq);
+        csr.extend_from_slice(&sigalg_seq);
+        csr.extend_from_slice(&sig_bit);
+        Ok(der_tlv(0x30, &csr))
     }
 
     /// RSASSA-PKCS1-v1_5 sign of a raw message (hash is computed here).
@@ -585,7 +776,7 @@ fn parse_spki_rsa(der: &[u8]) -> Result<RsaPublicKey, String> {
     parse_rsa_public_key_der(key_der)
 }
 
-fn encode_der_integer(n: &BigUint) -> Vec<u8> {
+pub fn encode_der_integer(n: &BigUint) -> Vec<u8> {
     let mut bytes = n.to_be_bytes();
     // DER INTEGER: if high bit set, prepend 0x00 (positive)
     if bytes[0] & 0x80 != 0 {
@@ -594,7 +785,7 @@ fn encode_der_integer(n: &BigUint) -> Vec<u8> {
     der_tlv(0x02, &bytes)
 }
 
-fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+pub fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(2 + value.len() + 4);
     out.push(tag);
     encode_der_length(&mut out, value.len());
@@ -618,6 +809,188 @@ fn encode_der_length(out: &mut Vec<u8>, len: usize) {
         out.push((len >> 8) as u8);
         out.push(len as u8);
     }
+}
+
+/// X.500 Name: CN=<common_name>. Optional SANs are encoded only in CN list for simplicity
+/// (ACME HTTP-01 uses CN + we put first domain as CN; multi-domain via multiple CN RDNs).
+fn der_name_cn(common_name: &str, san_dns: &[String]) -> Vec<u8> {
+    // AttributeTypeAndValue: OID 2.5.4.3 (CN) + UTF8String
+    let oid_cn = [0x06, 0x03, 0x55, 0x04, 0x03];
+    let mut names: Vec<String> = vec![common_name.to_string()];
+    for s in san_dns {
+        if s != common_name && !names.contains(s) {
+            names.push(s.clone());
+        }
+    }
+    let mut rdns = Vec::new();
+    // Only first CN in subject (ACME validates via CSR SAN extension is optional for LE
+    // if order identifiers match; LE accepts CN-only CSRs for single name).
+    let cn = names.first().map(|s| s.as_str()).unwrap_or(common_name);
+    let mut atv = Vec::new();
+    atv.extend_from_slice(&oid_cn);
+    atv.extend_from_slice(&der_tlv(0x0c, cn.as_bytes())); // UTF8String
+    let atv_seq = der_tlv(0x30, &atv);
+    let set = der_tlv(0x31, &atv_seq); // SET OF AttributeTypeAndValue
+    rdns.extend_from_slice(&set);
+    // If multiple SANs, add subjectAltName extension via attributes is complex;
+    // LE accepts CSR with just CN for one domain; multi-domain order uses same key
+    // and identifiers from the order. Add extra CN RDNs for visibility.
+    for extra in names.iter().skip(1) {
+        let mut atv = Vec::new();
+        atv.extend_from_slice(&oid_cn);
+        atv.extend_from_slice(&der_tlv(0x0c, extra.as_bytes()));
+        let atv_seq = der_tlv(0x30, &atv);
+        let set = der_tlv(0x31, &atv_seq);
+        rdns.extend_from_slice(&set);
+    }
+    der_tlv(0x30, &rdns)
+}
+
+fn generate_via_openssl(bits: usize) -> Result<RsaKey, String> {
+    let tmp = std::env::temp_dir().join(format!(
+        "de_rsa_{}_{}.pem",
+        std::process::id(),
+        util::now_millis()
+    ));
+    let status = std::process::Command::new("openssl")
+        .args([
+            "genrsa",
+            "-out",
+            tmp.to_str().unwrap_or("de_rsa.pem"),
+            &bits.to_string(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("openssl: {}", e))?;
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        return Err("openssl genrsa failed".into());
+    }
+    let key = RsaKey::from_pem_file(&tmp);
+    let _ = fs::remove_file(&tmp);
+    key
+}
+
+fn generate_rsa_pure(bits: usize) -> Result<RsaKey, String> {
+    let e = BigUint::from_u32(65537);
+    let prime_bits = bits / 2;
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        if attempts > 200 {
+            return Err("RSA prime generation failed".into());
+        }
+        let p = random_prime(prime_bits)?;
+        let q = random_prime(prime_bits)?;
+        if p.cmp(&q) == std::cmp::Ordering::Equal {
+            continue;
+        }
+        let n = p.mul(&q);
+        if n.bit_len() < bits - 1 {
+            continue;
+        }
+        let p1 = p.sub(&BigUint::from_u32(1)).ok_or("p-1")?;
+        let q1 = q.sub(&BigUint::from_u32(1)).ok_or("q-1")?;
+        let phi = p1.mul(&q1);
+        let d = match e.mod_inverse(&phi) {
+            Some(d) => d,
+            None => continue,
+        };
+        let k = (n.bit_len() + 7) / 8;
+        return Ok(RsaKey { n, e, d, k });
+    }
+}
+
+fn random_prime(bits: usize) -> Result<BigUint, String> {
+    if bits < 16 {
+        return Err("prime bits too small".into());
+    }
+    let nbytes = (bits + 7) / 8;
+    let mut buf = vec![0u8; nbytes];
+    for _ in 0..10_000 {
+        util::fill_random(&mut buf);
+        // set top bit and bottom bit (odd)
+        if let Some(first) = buf.first_mut() {
+            *first |= 0x80;
+            // clear bits above `bits`
+            let excess = nbytes * 8 - bits;
+            if excess > 0 {
+                *first &= 0xff >> excess;
+                *first |= 1 << (7 - excess);
+            }
+        }
+        if let Some(last) = buf.last_mut() {
+            *last |= 1;
+        }
+        let n = BigUint::from_be_bytes(&buf);
+        if is_probable_prime(&n) {
+            return Ok(n);
+        }
+    }
+    Err("could not find prime".into())
+}
+
+fn is_probable_prime(n: &BigUint) -> bool {
+    if n.is_zero() {
+        return false;
+    }
+    // small primes trial division
+    const SMALL: &[u32] = &[
+        3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89,
+        97,
+    ];
+    for &p in SMALL {
+        let d = BigUint::from_u32(p);
+        if n.cmp(&d) == std::cmp::Ordering::Equal {
+            return true;
+        }
+        if n.rem(&d).is_zero() {
+            return false;
+        }
+    }
+    // Miller-Rabin with fixed bases (deterministic for < 2^64; probabilistic else)
+    let bases: &[u32] = &[2, 3, 5, 7, 11, 13, 23];
+    // write n-1 = 2^s * d
+    let one = BigUint::from_u32(1);
+    let n_minus = match n.sub(&one) {
+        Some(x) => x,
+        None => return false,
+    };
+    let mut d = n_minus.clone();
+    let mut s = 0u32;
+    while !d.is_zero() && !d.get_bit(0) {
+        d = d.shr1();
+        s += 1;
+    }
+    for &a in bases {
+        if !miller_rabin_round(n, &n_minus, &d, s, a) {
+            return false;
+        }
+    }
+    true
+}
+
+fn miller_rabin_round(n: &BigUint, n_minus: &BigUint, d: &BigUint, s: u32, a: u32) -> bool {
+    let base = BigUint::from_u32(a);
+    if base.cmp(n) != std::cmp::Ordering::Less {
+        return true;
+    }
+    let mut x = base.modpow(d, n);
+    let one = BigUint::from_u32(1);
+    if x.cmp(&one) == std::cmp::Ordering::Equal || x.cmp(n_minus) == std::cmp::Ordering::Equal {
+        return true;
+    }
+    for _ in 1..s {
+        x = x.mul(&x).rem(n);
+        if x.cmp(n_minus) == std::cmp::Ordering::Equal {
+            return true;
+        }
+        if x.cmp(&one) == std::cmp::Ordering::Equal {
+            return false;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

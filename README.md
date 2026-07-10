@@ -16,13 +16,13 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - **Maildir storage**: Standard, simple, filesystem-based. Easy to backup, rsync, or even mount remotely.
 - **Secure-ish by design**: PBKDF2-HMAC-SHA256 password hashes (`desertemail --hash-password`), AUTH PLAIN, auth lockout, connection limits, basic command validation. Built-in TLS when you supply a cert+key; optional `require_tls_for_auth` rejects AUTH on plaintext (538).
 
-> ⚠️ **This is an educational / personal-use MVP.** Tier 1–2 are in tree (PBKDF2, auth lockout, connection limits, inbound SPF/DKIM/DMARC + greylist/DNSBL/basic spam score — all opt-in for enforcement) but TLS is optional until you configure cert/key; IMAP is still a subset; no full Bayesian/ML spam filter; no ACME auto-cert. Great starting point to learn email protocols and extend!
+> ⚠️ **This is an educational / personal-use MVP.** Tiers 1–3 are largely in tree (auth lockout, SPF/DKIM/DMARC, IMAP SEARCH/IDLE/APPEND/STORE/EXPUNGE, optional ACME, quotas, structured logs) but TLS/ACME still need correct DNS + port 80 for issuance; no full Bayesian/ML spam filter. Great starting point to learn email protocols and extend!
 
 ## Features (v0.2)
 
 - [x] SMTP server (port 25): receive inbound mail from the internet
 - [x] SMTP submission (port 587): authenticated clients can send
-- [x] IMAP server (port 143): basic clients can LOGIN, SELECT Inbox, FETCH, LIST, etc.
+- [x] IMAP server (port 143): LOGIN, SELECT, LIST, FETCH, SEARCH, STORE, EXPUNGE, CLOSE, APPEND, IDLE, UID variants
 - [x] Maildir storage per user
 - [x] Simple TOML-like config (parsed by hand)
 - [x] Multi-domain / multi-user
@@ -32,7 +32,8 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - [x] **DKIM signing**: from-scratch SHA-256 + bignum RSA (PKCS#1 v1.5), relaxed/relaxed canonicalization, `--dkim-dns` prints the TXT record to publish (verified against dkimpy)
 - [x] **Webmail + admin UI**: pure-std HTTP server with session login — inbox, read, compose, sent; admin page shows domains/users and lets you inspect/delete the outbound queue; optional HTTPS (`web_tls_listen`) sets Secure cookies
 - [x] **STARTTLS / TLS** via rustls: STARTTLS on 25/587 (RFC 3207) and 143 (RFC 2595); implicit SMTPS (465), IMAPS (993), HTTPS webmail; supply `tls_cert_file` + `tls_key_file`
-- [ ] Let's Encrypt auto (bring your own cert via certbot/acme.sh, or terminate TLS on a reverse proxy)
+- [x] **ACME / Let's Encrypt** (optional `acme = true`): HTTP-01 via webmail, RS256 JWS, background renew when &lt;30d remain — needs public domain + port 80
+- [x] **Quotas**, **structured JSON logs** (fail2ban filter in `deploy/`), **graceful SIGTERM/SIGINT**
 
 ## Quick Start (Raspberry Pi / any Linux)
 
@@ -137,6 +138,21 @@ spam_check_ptr = true
 # web_tls_listen = "0.0.0.0:8443"   # HTTPS webmail
 # require_tls_for_auth = false      # true => reject AUTH on plaintext (538)
 
+# Quotas (0 = unlimited). Inbound over-quota => SMTP 452; IMAP APPEND => NO [OVERQUOTA]
+default_quota_mb = 0
+# [quotas]
+# "alice" = 512
+
+# Logging: "text" (default) or "json" (one object per line; event=auth_fail for fail2ban)
+log_format = "text"
+
+# ACME auto-cert (optional). Port 80 / web_listen must serve HTTP-01.
+# Test staging first: acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+acme = false
+# acme_email = "admin@example.com"
+# acme_domains = ["mail.example.com"]
+# tls_cert_file / tls_key_file are the paths ACME writes (and TLS loads)
+
 # Users: local-part or full email -> password or PBKDF2 hash
 # Generate: desertemail --hash-password
 #   "alice" = "pbkdf2_sha256$210000$....$...."
@@ -201,26 +217,28 @@ You can also run multiple instances or use subdomains for isolation.
 
 ```
 src/
-├── main.rs          # CLI, config load, start listeners (SMTP/IMAP/submission/web + TLS)
+├── main.rs          # CLI, config load, listeners, graceful shutdown, ACME start
 ├── lib.rs           # Library root (shared with cargo-fuzz targets)
 ├── config.rs        # Hand-rolled simple config parser (no serde/toml crate!)
-├── storage.rs       # Maildir create/write/list/read (pure std::fs)
+├── storage.rs       # Maildir create/write/list/flags/quota (pure std::fs)
 ├── smtp.rs          # Full SMTP state machine (inbound + auth submission + STARTTLS)
-├── imap.rs          # Basic IMAP state machine + STARTTLS (RFC 2595)
+├── imap.rs          # IMAP4rev1 subset: SEARCH/IDLE/APPEND/STORE/EXPUNGE/UID + STARTTLS
+├── acme.rs          # ACME v2 client (RS256 JWS, HTTP-01, PKCS#10 CSR)
+├── shutdown.rs      # SIGTERM/SIGINT (unix) / console Ctrl-C (windows)
 ├── auth.rs          # AUTH PLAIN decoder + authenticate()
 ├── passwd.rs        # PBKDF2-HMAC-SHA256 password hashing (from crypto::sha256)
 ├── ratelimit.rs     # Auth brute-force lockout + outbound rcpt throttle
 ├── limits.rs        # Global/per-IP connection caps + I/O timeouts
 ├── dns.rs           # DNS client over UDP: MX/A/AAAA/TXT/PTR, name compression (pure std)
 ├── queue.rs         # Outbound queue: disk persistence, retries/backoff, opportunistic STARTTLS
-├── crypto.rs        # SHA-256, bignum RSA (PKCS#1 v1.5 sign+verify), PEM/DER key parsing
+├── crypto.rs        # SHA-256, bignum RSA (PKCS#1 v1.5 sign+verify), PEM/DER, CSR
 ├── dkim.rs          # DKIM sign + verify: shared relaxed/relaxed canonicalization (RFC 6376)
 ├── spf.rs           # Inbound SPF evaluation (RFC 7208 core subset)
 ├── dmarc.rs         # DMARC evaluation + alignment (RFC 7489 core)
 ├── spamscore.rs     # Greylisting, DNSBL, lightweight additive spam score
-├── web.rs           # Webmail + admin: HTTP/1.1 (+ optional HTTPS), sessions, HTML
+├── web.rs           # Webmail + admin + ACME HTTP-01 route
 ├── tls.rs           # rustls: server Conn, client ClientConn, PEM load, webpki-roots
-└── util.rs          # Line reader, base64, random fill, RFC 2822 dates, logging
+└── util.rs          # Line reader, base64url, structured logging (text/json)
 ```
 
 Mail, IMAP, webmail, DKIM, DNS, and HTTP protocol handling is pure string matching + state machines (no PEG, no external parsers). **Only TLS** uses crates: `rustls` (ring), `rustls-pemfile`, `webpki-roots`.
@@ -269,9 +287,9 @@ hard gate before pointing MX at it.
 - [x] **Deliverability ops** — rDNS/PTR, MTA-STS, TLS-RPT, IP warm-up (SPF/DKIM publishing already supported).
 
 ### Tier 3 — Protocol completeness & reliability
-- [ ] **IMAP gaps** — `SEARCH` (currently errors), `IDLE` (push; mobile clients need it), `APPEND`, robust flag/UID persistence.
-- [ ] **ACME / Let's Encrypt** auto-issue + renewal (certs are BYO today).
-- [ ] **Graceful shutdown** (drain connections + flush queue on SIGTERM), **per-user quotas**, **structured logs** (fail2ban-friendly).
+- [x] **IMAP gaps** — `SEARCH` (currently errors), `IDLE` (push; mobile clients need it), `APPEND`, robust flag/UID persistence.
+- [x] **ACME / Let's Encrypt** auto-issue + renewal (certs are BYO today).
+- [x] **Graceful shutdown** (drain connections + flush queue on SIGTERM), **per-user quotas**, **structured logs** (fail2ban-friendly).
 
 ### Tier 4 — Assurance & ops
 - [ ] Security audit sign-off + load testing.

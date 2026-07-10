@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
+use desertemail::acme;
 use desertemail::config::Config;
 use desertemail::crypto;
 use desertemail::dkim;
@@ -18,6 +19,7 @@ use desertemail::limits;
 use desertemail::passwd;
 use desertemail::queue;
 use desertemail::ratelimit;
+use desertemail::shutdown;
 use desertemail::smtp::SmtpServer;
 use desertemail::tls;
 use desertemail::util;
@@ -25,6 +27,7 @@ use desertemail::web;
 
 fn main() {
     util::log!("desertemail starting");
+    shutdown::install_handlers();
 
     let args: Vec<String> = env::args().collect();
     let mut config_path = "config.toml".to_string();
@@ -95,6 +98,9 @@ fn main() {
 
     // Security audit (loud non-fatal warnings)
     cfg.audit();
+
+    // Structured logging mode (text default; json for fail2ban / processors)
+    util::set_log_format(&cfg.log_format);
 
     // Apply runtime limiters from config
     ratelimit::configure_auth(
@@ -255,12 +261,31 @@ fn main() {
         }
     }
 
-    util::log!("all servers running. Ctrl-C to stop.");
+    // ACME auto-TLS: non-blocking background thread (needs port 80 / web_listen for HTTP-01)
+    if cfg.acme {
+        util::log!(
+            "ACME enabled (directory={}); HTTP-01 via web_listen — port 80 must be reachable",
+            cfg.acme_directory
+        );
+        acme::start_background(Arc::clone(&cfg));
+    }
+
+    util::log!("all servers running. SIGTERM/SIGINT (Ctrl-C) for graceful shutdown.");
     util::log!("Tip: use high ports + firewall port-forward, or run as root / with capabilities for 25/587/143.");
 
-    for h in handles {
-        let _ = h.join();
+    // Wait until shutdown signal, then join listeners (they exit on flag).
+    while !shutdown::is_shutdown() {
+        thread::sleep(std::time::Duration::from_millis(300));
     }
+    util::log!("shutdown requested — stopping listeners (in-flight connections finish shortly)");
+    // Give in-flight handlers a short grace period, then exit. We do NOT join the
+    // listener threads: they are blocked in TcpListener::accept() and cannot be
+    // unblocked by a flag, so join() would hang forever. The outbound queue is
+    // already durable on disk, so a clean exit here loses nothing.
+    let _ = &handles; // handles intentionally not joined (see above)
+    thread::sleep(std::time::Duration::from_secs(2));
+    util::log!("desertemail stopped cleanly");
+    std::process::exit(0);
 }
 
 fn run_hash_password(maybe_plain: Option<String>) {

@@ -1,0 +1,17 @@
+# Example fail2ban jail snippet for DesertEmail.
+# Copy into /etc/fail2ban/jail.d/desertemail.local (and install the filter first).
+#
+# Requires desertemail logging to a file, e.g. via systemd:
+#   StandardError=append:/var/log/desertemail.log
+# or: desertemail --config ... 2>>/var/log/desertemail.log
+
+[desertemail]
+enabled  = true
+filter   = desertemail
+# Adjust logpath to where your process sends stderr
+logpath  = /var/log/desertemail.log
+backend  = auto
+maxretry = 10
+findtime = 300
+bantime  = 900
+# Prefer the auth_lockout already built into desertemail; fail2ban is defense-in-depth.

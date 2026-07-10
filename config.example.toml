@@ -82,6 +82,33 @@ web_listen = "0.0.0.0:8080"
 # If true, AUTH on plaintext SMTP is rejected with 538 (default false).
 # require_tls_for_auth = false
 
+# --- Quotas (Tier 3) ---
+# Default mailbox size limit in MiB (0 = unlimited). Checked on inbound SMTP
+# delivery (452 4.2.2 Mailbox full) and IMAP APPEND (NO [OVERQUOTA]).
+default_quota_mb = 0
+# Per-user overrides (MiB):
+# [quotas]
+# "alice" = 512
+
+# --- Structured logging ---
+# "text" (default) or "json" — one JSON object per line with ts/level/msg/fields.
+# Auth failures emit event=auth_fail ip=... user=... for fail2ban (see deploy/).
+log_format = "text"
+
+# --- ACME / Let's Encrypt auto TLS (Tier 3) ---
+# When true, obtains/renews certs via ACME HTTP-01. Requires:
+#   - tls_cert_file + tls_key_file paths set (written by ACME)
+#   - web_listen reachable on port 80 for HTTP-01 (or reverse-proxy that path)
+#   - public DNS for acme_domains pointing at this host
+# Does NOT block startup; runs in a background thread. On failure, continues
+# with any existing cert (or plaintext). Renews when <30 days remain (check every 12h).
+# Test against staging first:
+#   acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+acme = false
+# acme_email = "admin@example.com"
+# acme_directory = "https://acme-v02.api.letsencrypt.org/directory"
+# acme_domains = ["mail.example.com"]   # default = domains
+
 [users]
 # local-part or full address = password or pbkdf2 hash
 # Generate a hash:  desertemail --hash-password
@@ -90,3 +117,6 @@ web_listen = "0.0.0.0:8080"
 "alice" = "alicepass"
 "bob" = "bobpass"
 "postmaster" = "adminpass"
+
+# [quotas]
+# "alice" = 512

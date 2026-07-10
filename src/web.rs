@@ -11,6 +11,7 @@ use std::thread;
 
 use rustls::ServerConfig;
 
+use crate::acme;
 use crate::auth;
 use crate::config::Config;
 use crate::crypto;
@@ -292,6 +293,25 @@ impl Response {
         }
     }
 
+    fn plain(status: u16, body: &str) -> Self {
+        let reason = match status {
+            200 => "OK",
+            404 => "Not Found",
+            _ => "OK",
+        };
+        let bytes = body.as_bytes().to_vec();
+        Self {
+            status,
+            reason,
+            headers: vec![
+                ("Content-Type".into(), "text/plain".into()),
+                ("Content-Length".into(), bytes.len().to_string()),
+                ("Connection".into(), "close".into()),
+            ],
+            body: bytes,
+        }
+    }
+
     fn redirect(location: &str) -> Self {
         Self {
             status: 302,
@@ -395,9 +415,15 @@ fn start_listener(
             if secure { "s" } else { "" },
             addr
         );
-        for conn in listener.incoming() {
-            match conn {
-                Ok(stream) => {
+        let _ = listener.set_nonblocking(true);
+        loop {
+            if crate::shutdown::is_shutdown() {
+                util::log!("web: shutting down");
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let ip = limits::peer_ip_from_stream(&stream);
                     let guard = match limits::try_acquire(&ip) {
                         Some(g) => g,
@@ -425,7 +451,16 @@ fn start_listener(
                         }
                     });
                 }
-                Err(e) => util::log!("web: accept error: {}", e),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(200));
+                }
+                Err(e) => {
+                    if crate::shutdown::is_shutdown() {
+                        break;
+                    }
+                    util::log!("web: accept error: {}", e);
+                    thread::sleep(std::time::Duration::from_millis(200));
+                }
             }
         }
     });
@@ -476,6 +511,19 @@ fn handle_connection(
 fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
     let token = cookie_value(req, "session");
     let user = session_user(token.as_deref());
+
+    // ACME HTTP-01 challenge (no auth) — required for Let's Encrypt when acme=true.
+    // Must be reachable on port 80 (or a reverse-proxy path to this server).
+    if req.method == "GET" && req.path.starts_with("/.well-known/acme-challenge/") {
+        let token = req
+            .path
+            .strip_prefix("/.well-known/acme-challenge/")
+            .unwrap_or("");
+        if let Some(key_auth) = acme::get_http01(token) {
+            return Response::plain(200, &key_auth);
+        }
+        return Response::plain(404, "not found");
+    }
 
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/login") => page_login(None, 200),
@@ -571,6 +619,15 @@ fn handle_login(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Res
     }
     if !auth::authenticate(cfg, username, password) {
         ratelimit::record_failure(peer_ip);
+        util::log_event!(
+            "warn",
+            "web login failed",
+            "event" => "auth_fail",
+            "ip" => peer_ip,
+            "user" => username,
+            "proto" => "web",
+            "result" => "fail"
+        );
         return page_login(Some("Invalid username or password"), 200);
     }
     ratelimit::record_success(peer_ip);

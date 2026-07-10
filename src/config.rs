@@ -85,6 +85,22 @@ pub struct Config {
     pub spam_score_reject: i32,
     /// Include PTR/FCrDNS in spam score (extra DNS). Default true when scoring runs.
     pub spam_check_ptr: bool,
+
+    // --- Tier 3: protocol completeness, ACME, quotas, logging ---
+    /// Default mailbox quota in MiB (0 = unlimited).
+    pub default_quota_mb: u64,
+    /// Per-user quota overrides in MiB (`[quotas]` section, key = username).
+    pub quotas: HashMap<String, u64>,
+    /// Log format: "text" (default) or "json".
+    pub log_format: String,
+    /// Enable ACME (Let's Encrypt) auto-certificate. Default false.
+    pub acme: bool,
+    /// ACME account email (required when acme=true for registration).
+    pub acme_email: String,
+    /// ACME directory URL (default: Let's Encrypt production).
+    pub acme_directory: String,
+    /// Domains to request certs for (default = cfg.domains).
+    pub acme_domains: Vec<String>,
 }
 
 impl Default for Config {
@@ -131,6 +147,13 @@ impl Default for Config {
             spam_score_tag: 5,
             spam_score_reject: 0, // disabled
             spam_check_ptr: true,
+            default_quota_mb: 0,
+            quotas: HashMap::new(),
+            log_format: "text".into(),
+            acme: false,
+            acme_email: String::new(),
+            acme_directory: "https://acme-v02.api.letsencrypt.org/directory".into(),
+            acme_domains: Vec::new(),
         }
     }
 }
@@ -274,8 +297,20 @@ impl Config {
                     cfg.spam_score_reject = parse_i32(&val, cfg.spam_score_reject)
                 }
                 ("", "spam_check_ptr") => cfg.spam_check_ptr = parse_bool(&val),
+                ("", "default_quota_mb") => {
+                    cfg.default_quota_mb = parse_u64(&val, cfg.default_quota_mb)
+                }
+                ("", "log_format") => cfg.log_format = val.to_lowercase(),
+                ("", "acme") => cfg.acme = parse_bool(&val),
+                ("", "acme_email") => cfg.acme_email = val,
+                ("", "acme_directory") => cfg.acme_directory = val,
+                ("", "acme_domains") => cfg.acme_domains = parse_list(&val),
                 ("users", k) => {
                     cfg.users.insert(k.to_string(), val);
+                }
+                ("quotas", k) => {
+                    let mb = parse_u64(&val, 0);
+                    cfg.quotas.insert(k.to_string(), mb);
                 }
                 _ => {
                     if section.is_empty() {
@@ -291,8 +326,33 @@ impl Config {
             new_users.insert(k.to_lowercase(), v);
         }
         cfg.users = new_users;
+        let mut new_quotas = HashMap::new();
+        for (k, v) in cfg.quotas {
+            new_quotas.insert(k.to_lowercase(), v);
+        }
+        cfg.quotas = new_quotas;
+        if cfg.acme_domains.is_empty() {
+            cfg.acme_domains = cfg.domains.clone();
+        } else {
+            cfg.acme_domains = cfg
+                .acme_domains
+                .into_iter()
+                .map(|d| d.to_lowercase())
+                .collect();
+        }
 
         Ok(cfg)
+    }
+
+    /// Quota for `user` in bytes (0 = unlimited).
+    pub fn quota_bytes_for(&self, user: &str) -> u64 {
+        let user = user.to_lowercase();
+        let mb = self
+            .quotas
+            .get(&user)
+            .copied()
+            .unwrap_or(self.default_quota_mb);
+        mb.saturating_mul(1024 * 1024)
     }
 
     /// Log loud non-fatal security warnings about insecure config.
@@ -462,8 +522,16 @@ dnsbls = ["zen.spamhaus.org", "bl.spamcop.net"]
 dnsbl_reject = false
 spam_score_tag = 4
 spam_score_reject = 20
+default_quota_mb = 100
+log_format = "json"
+acme = true
+acme_email = "admin@example.com"
+acme_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+acme_domains = ["mail.example.com"]
 [users]
 "alice" = "pass"
+[quotas]
+"alice" = 512
 "#;
         let cfg = Config::parse(toml).unwrap();
         assert!(cfg.allow_default_password_auth);
@@ -478,12 +546,20 @@ spam_score_reject = 20
         assert_eq!(cfg.dnsbls.len(), 2);
         assert_eq!(cfg.spam_score_tag, 4);
         assert_eq!(cfg.spam_score_reject, 20);
+        assert_eq!(cfg.default_quota_mb, 100);
+        assert_eq!(cfg.log_format, "json");
+        assert!(cfg.acme);
+        assert_eq!(cfg.acme_email, "admin@example.com");
+        assert_eq!(cfg.quota_bytes_for("alice"), 512 * 1024 * 1024);
+        assert_eq!(cfg.quota_bytes_for("bob"), 100 * 1024 * 1024);
         // defaults stay permissive when unset
         let def = Config::default();
         assert!(!def.spf_enforce);
         assert!(!def.dmarc_enforce);
         assert!(!def.greylist);
         assert_eq!(def.spam_score_reject, 0);
+        assert_eq!(def.default_quota_mb, 0);
+        assert!(!def.acme);
     }
 
     #[test]

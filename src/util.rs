@@ -1,7 +1,22 @@
 //! Utility helpers: pure std (TLS lives in tls.rs).
 
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 0 = text (default), 1 = json
+static LOG_FORMAT: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_log_format(fmt: &str) {
+    match fmt.to_ascii_lowercase().as_str() {
+        "json" => LOG_FORMAT.store(1, Ordering::Relaxed),
+        _ => LOG_FORMAT.store(0, Ordering::Relaxed),
+    }
+}
+
+pub fn log_format_is_json() -> bool {
+    LOG_FORMAT.load(Ordering::Relaxed) == 1
+}
 
 pub fn now_secs() -> u64 {
     SystemTime::now()
@@ -149,6 +164,82 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+/// Base64url without padding (RFC 4648 §5) — used by JWS/ACME.
+pub fn base64url_encode(input: &[u8]) -> String {
+    let mut s = base64_encode(input);
+    s = s.replace('+', "-").replace('/', "_");
+    while s.ends_with('=') {
+        s.pop();
+    }
+    s
+}
+
+pub fn base64url_decode(input: &str) -> Vec<u8> {
+    let mut s = input.replace('-', "+").replace('_', "/");
+    while s.len() % 4 != 0 {
+        s.push('=');
+    }
+    base64_decode(&s)
+}
+
+/// Escape a string for inclusion in a JSON string value.
+pub fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Emit a structured log line. `fields` is a list of (key, value) pairs for JSON mode.
+pub fn log_structured(level: &str, msg: &str, fields: &[(&str, &str)]) {
+    use std::io::Write;
+    let ts = now_secs();
+    if log_format_is_json() {
+        let mut field_json = String::new();
+        for (i, (k, v)) in fields.iter().enumerate() {
+            if i > 0 {
+                field_json.push(',');
+            }
+            field_json.push_str(&format!(
+                "\"{}\":\"{}\"",
+                json_escape(k),
+                json_escape(v)
+            ));
+        }
+        let _ = writeln!(
+            std::io::stderr(),
+            "{{\"ts\":{},\"level\":\"{}\",\"msg\":\"{}\",\"fields\":{{{}}}}}",
+            ts,
+            json_escape(level),
+            json_escape(msg),
+            field_json
+        );
+    } else {
+        if fields.is_empty() {
+            let _ = writeln!(std::io::stderr(), "[{}] [{}] {}", ts, level, msg);
+        } else {
+            let mut extra = String::new();
+            for (k, v) in fields {
+                extra.push_str(&format!(" {}={}", k, v));
+            }
+            let _ = writeln!(
+                std::io::stderr(),
+                "[{}] [{}] {}{}",
+                ts, level, msg, extra
+            );
+        }
+    }
+}
+
 /// RFC 2822 date string (UTC) for a unix timestamp.
 pub fn rfc2822_date(secs: u64) -> String {
     const WD: &[&str] = &["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
@@ -170,7 +261,7 @@ pub fn rfc2822_date(secs: u64) -> String {
 }
 
 /// Days since Unix epoch → (year, month, day). Howard Hinnant algorithm.
-fn civil_from_days(mut z: i64) -> (i32, u32, u32) {
+pub fn civil_from_days(mut z: i64) -> (i32, u32, u32) {
     z += 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64;
@@ -182,6 +273,22 @@ fn civil_from_days(mut z: i64) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y as i32, m as u32, d as u32)
+}
+
+/// Days since Unix epoch for a calendar date (UTC midnight).
+pub fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let mut y = y as i64;
+    let m = m as i64;
+    let d = d as i64;
+    if m <= 2 {
+        y -= 1;
+    }
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as u64;
+    era * 146097 + doe as i64 - 719468
 }
 
 pub fn parse_email_addr(s: &str) -> (String, String) {
@@ -198,9 +305,35 @@ pub fn parse_email_addr(s: &str) -> (String, String) {
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr(), "[{}] {}", $crate::util::now_secs(), format!($($arg)*));
+        $crate::util::log_structured("info", &format!($($arg)*), &[]);
+    }};
+}
+
+#[macro_export]
+macro_rules! log_warn {
+    ($($arg:tt)*) => {{
+        $crate::util::log_structured("warn", &format!($($arg)*), &[]);
+    }};
+}
+
+#[macro_export]
+macro_rules! log_error {
+    ($($arg:tt)*) => {{
+        $crate::util::log_structured("error", &format!($($arg)*), &[]);
+    }};
+}
+
+/// Structured log with key=value fields (for fail2ban / log processors).
+/// Usage: `log_event!("info", "auth failed", "event" => "auth_fail", "ip" => &ip, "user" => &user);`
+#[macro_export]
+macro_rules! log_event {
+    ($level:expr, $msg:expr $(, $key:expr => $val:expr)* $(,)?) => {{
+        let fields: &[(&str, &str)] = &[$(($key, $val),)*];
+        $crate::util::log_structured($level, $msg, fields);
     }};
 }
 
 pub use log;
+pub use log_error;
+pub use log_event;
+pub use log_warn;

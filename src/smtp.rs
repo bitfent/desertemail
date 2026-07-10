@@ -65,9 +65,15 @@ impl SmtpServer {
                 .map(|a| a.to_string())
                 .unwrap_or_else(|_| "?".into())
         );
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
+        let _ = listener.set_nonblocking(true);
+        loop {
+            if crate::shutdown::is_shutdown() {
+                util::log!("SMTP listener shutting down");
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let ip = limits::peer_ip_from_stream(&stream);
                     let guard = match limits::try_acquire(&ip) {
                         Some(g) => g,
@@ -91,7 +97,16 @@ impl SmtpServer {
                         }
                     });
                 }
-                Err(e) => util::log!("SMTP accept error: {}", e),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(200));
+                }
+                Err(e) => {
+                    if crate::shutdown::is_shutdown() {
+                        break;
+                    }
+                    util::log!("SMTP accept error: {}", e);
+                    thread::sleep(std::time::Duration::from_millis(200));
+                }
             }
         }
     }
@@ -202,6 +217,13 @@ fn handle_client(
             }
             ("AUTH", _) if authenticated_user.is_none() => {
                 if !ratelimit::check_allowed(&peer_ip) {
+                    util::log_event!(
+                        "warn",
+                        "SMTP auth lockout",
+                        "event" => "auth_lockout",
+                        "ip" => &peer_ip,
+                        "proto" => "smtp"
+                    );
                     write_line(
                         reader.get_mut(),
                         "421 Too many failed attempts, try later",
@@ -224,6 +246,15 @@ fn handle_client(
                             write_line(reader.get_mut(), "235 Authentication successful")?;
                         } else {
                             ratelimit::record_failure(&peer_ip);
+                            util::log_event!(
+                                "warn",
+                                "SMTP auth failed",
+                                "event" => "auth_fail",
+                                "ip" => &peer_ip,
+                                "user" => &user,
+                                "proto" => "smtp",
+                                "result" => "fail"
+                            );
                             write_line(reader.get_mut(), "535 Authentication failed")?;
                         }
                     } else {
@@ -241,6 +272,15 @@ fn handle_client(
                                 write_line(reader.get_mut(), "235 Authentication successful")?;
                             } else {
                                 ratelimit::record_failure(&peer_ip);
+                                util::log_event!(
+                                    "warn",
+                                    "SMTP auth failed",
+                                    "event" => "auth_fail",
+                                    "ip" => &peer_ip,
+                                    "user" => &user,
+                                    "proto" => "smtp",
+                                    "result" => "fail"
+                                );
                                 write_line(reader.get_mut(), "535 Authentication failed")?;
                             }
                         } else {
@@ -442,6 +482,15 @@ fn handle_client(
                 match delivered {
                     Ok(n) => {
                         write_line(reader.get_mut(), &format!("250 OK: queued as {} msgs", n))?;
+                    }
+                    Err(e) if e.contains("OVERQUOTA") || e.contains("Mailbox full") => {
+                        util::log_event!(
+                            "warn",
+                            "mailbox full",
+                            "event" => "overquota",
+                            "result" => "reject"
+                        );
+                        write_line(reader.get_mut(), "452 4.2.2 Mailbox full")?;
                     }
                     Err(e) => {
                         util::log!("delivery error: {}", e);
@@ -766,9 +815,11 @@ fn deliver_mail(
     if is_submission {
         if let Some(user) = auth_user {
             if let Some(mb) = cfg.resolve_mailbox(user) {
+                check_quota(cfg, &mb, raw.len() as u64)?;
                 let md = Maildir::open(&cfg.data_dir, &format!("{}/.Sent", mb))
                     .map_err(|e| e.to_string())?;
                 md.deliver(raw, from).map_err(|e| e.to_string())?;
+                Maildir::invalidate_quota_cache(&cfg.data_dir, &mb);
                 count += 1;
             }
         }
@@ -776,8 +827,10 @@ fn deliver_mail(
         let mut remote: Vec<String> = Vec::new();
         for r in rcpts {
             if let Some(mb) = cfg.resolve_mailbox(r) {
+                check_quota(cfg, &mb, raw.len() as u64)?;
                 let md = Maildir::open(&cfg.data_dir, &mb).map_err(|e| e.to_string())?;
                 md.deliver(raw, from).map_err(|e| e.to_string())?;
+                Maildir::invalidate_quota_cache(&cfg.data_dir, &mb);
                 count += 1;
             } else {
                 remote.push(r.clone());
@@ -798,8 +851,10 @@ fn deliver_mail(
     } else {
         for r in rcpts {
             if let Some(mb) = cfg.resolve_mailbox(r) {
+                check_quota(cfg, &mb, raw.len() as u64)?;
                 let md = Maildir::open(&cfg.data_dir, &mb).map_err(|e| e.to_string())?;
                 md.deliver(raw, from).map_err(|e| e.to_string())?;
+                Maildir::invalidate_quota_cache(&cfg.data_dir, &mb);
                 count += 1;
             }
         }
@@ -808,6 +863,18 @@ fn deliver_mail(
         return Err("no recipients accepted".into());
     }
     Ok(count)
+}
+
+fn check_quota(cfg: &Config, mailbox_user: &str, extra: u64) -> Result<(), String> {
+    let quota = cfg.quota_bytes_for(mailbox_user);
+    if quota == 0 {
+        return Ok(());
+    }
+    let cur = Maildir::mailbox_size(&cfg.data_dir, mailbox_user).unwrap_or(0);
+    if Maildir::would_exceed_quota(cur, extra, quota) {
+        return Err("OVERQUOTA Mailbox full".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
