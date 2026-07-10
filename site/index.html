@@ -37,7 +37,8 @@
   * { box-sizing: border-box; }
   html {
     -webkit-text-size-adjust: 100%;
-    overflow-x: hidden;
+    /* No overflow-x here: non-visible overflow on html/body/.wrap turns them
+       into scroll containers, which silently breaks position: sticky (navbar). */
     scroll-behavior: smooth;
   }
   body {
@@ -48,9 +49,11 @@
     font-size: 16px;
     line-height: 1.65;
     image-rendering: pixelated;
-    overflow-x: hidden;
+    /* clip (unlike hidden) does not create a scroll container, so the sticky
+       navbar keeps working while stray shadow bleed is still clipped. */
+    overflow-x: clip;
   }
-  .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; overflow-x: hidden; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; }
 
   /* --- sticky navbar ---------------------------------------------------- */
   .site-nav {

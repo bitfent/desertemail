@@ -37,7 +37,9 @@
   * { box-sizing: border-box; }
   html {
     -webkit-text-size-adjust: 100%;
-    overflow-x: hidden;
+    /* Do NOT use overflow-x: hidden here — any non-visible overflow on html/body
+       makes them a scroll container, so position:sticky descendants (sidebar)
+       stick to that box instead of the viewport and appear broken. */
     scroll-behavior: smooth;
   }
   body {
@@ -48,7 +50,11 @@
     font-size: 16px;
     line-height: 1.65;
     image-rendering: pixelated;
-    overflow-x: hidden;
+    /* overflow-x: clip (unlike hidden) does not create a scroll container in
+       modern browsers, so sticky sidebar/outline still work while we suppress
+       rare horizontal bleed from box-shadows. Content-level guards handle the
+       rest: min-width:0 grid kids, pre wrap, .table-scroll. */
+    overflow-x: clip;
   }
 
   /* --- sticky navbar ---------------------------------------------------- */
@@ -170,8 +176,9 @@
   .wrap {
     max-width: 1100px;
     margin: 0 auto;
+    /* Padding absorbs .pix-panel box-shadows (up to 8px) so they don't force
+       horizontal page scroll. No overflow-x here — that would break sticky. */
     padding: 1.5rem 1rem 4rem;
-    overflow-x: hidden;
   }
   .docs-layout {
     display: grid;
@@ -185,6 +192,8 @@
   .outline-desktop {
     position: sticky;
     top: calc(var(--nav-h) + 12px);
+    z-index: 10;
+    align-self: start;
     background: var(--panel);
     border: 4px solid var(--border);
     box-shadow: 6px 6px 0 0 var(--accent-dark);
@@ -192,6 +201,7 @@
     font-size: 0.82rem;
     max-height: calc(100vh - var(--nav-h) - 24px);
     overflow-y: auto;
+    overscroll-behavior: contain;
   }
   .outline-desktop h2 {
     font-size: 0.72rem;
@@ -237,6 +247,9 @@
     font-size: 0.85rem;
     color: var(--accent);
     list-style: none;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
   }
   .outline-mobile summary::-webkit-details-marker { display: none; }
   .outline-mobile .outline-nav { margin-top: 0.55rem; }
@@ -244,7 +257,30 @@
   @media (max-width: 860px) {
     .docs-layout { grid-template-columns: 1fr; }
     .outline-desktop { display: none; }
-    .outline-mobile { display: block; }
+    /* Sticky "On this page" under the navbar so the outline stays reachable
+       while reading. Own max-height + overflow when open; solid panel bg
+       so scrolled content does not show through. */
+    .outline-mobile {
+      display: block;
+      position: sticky;
+      top: var(--nav-h);
+      z-index: 40;
+      max-height: calc(100vh - var(--nav-h) - 12px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      /* Solid fill so content scrolling underneath does not bleed through */
+      background: var(--panel);
+    }
+    .outline-mobile .outline-nav a {
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      padding: 0.55rem 0.4rem;
+    }
+    /* Nav + closed sticky details summary bar (~52px) so anchors land clear */
+    h2, h3 {
+      scroll-margin-top: calc(var(--nav-h) + 56px);
+    }
   }
 
   /* --- 8-bit chrome ----------------------------------------------------- */
@@ -328,10 +364,16 @@
     border: 4px solid var(--border);
     padding: 0.9rem 1rem;
     margin: 0.7rem 0;
+    max-width: 100%;
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
     font-size: 0.82rem;
     line-height: 1.45;
-    white-space: pre;
+    /* Wrap long lines so pre does not force page-level horizontal scroll;
+       overflow-x still allows internal scroll for unbreakable tokens. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   pre code {
     background: none;
@@ -778,12 +820,18 @@ default_password = "changeme"   # change this!
 
   document.addEventListener("click", function (ev) {
     var t = ev.target;
-    if (t && t.closest && t.closest(".outline-nav a") && nav) {
+    var link = t && t.closest ? t.closest(".outline-nav a") : null;
+    if (link && nav) {
       nav.classList.remove("is-open");
       if (toggle) {
         toggle.setAttribute("aria-expanded", "false");
         toggle.setAttribute("aria-label", "Open menu");
       }
+    }
+    /* Close mobile outline after jump so it does not cover the target section */
+    if (link) {
+      var details = link.closest("details.outline-mobile");
+      if (details) details.removeAttribute("open");
     }
   });
 })();
