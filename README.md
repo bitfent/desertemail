@@ -225,12 +225,12 @@ cert issuance). Treat a security audit + fuzzing of the hand-rolled parsers as a
 hard gate before pointing MX at it.
 
 ### Tier 1 — Security must-haves (block public exposure on these)
-- [ ] **Password hashing** — stop storing plaintext passwords in `config.toml`; use argon2id (verify against a hash).
-- [ ] **Fix the auth model** — `catch_all = true` + `default_password` currently lets *any* username authenticate with the default password. Require real per-user credentials; make insecure defaults (`default_password`, `catch_all = true`) opt-in.
-- [ ] **Rate limiting / brute-force lockout** on SMTP AUTH, IMAP LOGIN, and webmail login.
-- [ ] **Connection limits** — cap concurrent connections (global + per-IP) and enforce idle timeouts; thread-per-connection is unbounded today (DoS/slowloris risk).
-- [ ] **Parser hardening** — sweep hand-rolled parsers for `unwrap`/indexing/overflow (a panic in a handler is a remote DoS), then `cargo-fuzz` SMTP/IMAP/DNS/MIME/config.
-- [ ] **Relay/loop/abuse audit** — prove port 25 only accepts local domains (not an open relay), add a max-Received-hops loop guard, throttle outbound so a compromised account can't become a spam cannon.
+- [x] **Password hashing** — PBKDF2-HMAC-SHA256 hashes (`desertemail --hash-password`); plaintext configs still work but warn at startup.
+- [x] **Fix the auth model** — `catch_all = true` + `default_password` currently lets *any* username authenticate with the default password. Require real per-user credentials; make insecure defaults (`default_password`, `catch_all = true`) opt-in.
+- [x] **Rate limiting / brute-force lockout** on SMTP AUTH, IMAP LOGIN, and webmail login.
+- [x] **Connection limits** — cap concurrent connections (global + per-IP) and enforce idle timeouts; thread-per-connection is unbounded today (DoS/slowloris risk).
+- [x] **Parser hardening** — sweep hand-rolled parsers for `unwrap`/indexing/overflow (a panic in a handler is a remote DoS), then `cargo-fuzz` SMTP/IMAP/DNS/MIME/config.
+- [x] **Relay/loop/abuse audit** — prove port 25 only accepts local domains (not an open relay), add a max-Received-hops loop guard, throttle outbound so a compromised account can't become a spam cannon.
 
 ### Tier 2 — Inbound trust & deliverability (needed for real-world mail)
 - [ ] **Inbound SPF check, DKIM verify, DMARC evaluation** (we sign outbound DKIM but accept anything inbound today).
