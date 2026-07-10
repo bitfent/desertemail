@@ -479,6 +479,110 @@ impl RsaKey {
         rsa_pub.extend_from_slice(&e_bytes);
         der_tlv(0x30, &rsa_pub)
     }
+
+    /// RSASSA-PKCS1-v1_5 verify of a raw message against a signature.
+    pub fn verify_sha256(&self, message: &[u8], signature: &[u8]) -> bool {
+        let hash = sha256(message);
+        self.verify_digest_sha256(&hash, signature)
+    }
+
+    /// Verify a precomputed SHA-256 digest (32 bytes) against a PKCS#1 v1.5 signature.
+    pub fn verify_digest_sha256(&self, hash: &[u8], signature: &[u8]) -> bool {
+        if hash.len() != 32 {
+            return false;
+        }
+        let k = self.k;
+        if signature.len() != k || k < 11 {
+            return false;
+        }
+        let s = BigUint::from_be_bytes(signature);
+        if s.cmp(&self.n) != std::cmp::Ordering::Less {
+            return false;
+        }
+        let m = s.modpow(&self.e, &self.n);
+        let em = m.to_be_bytes_padded(k);
+
+        // EM = 0x00 || 0x01 || PS || 0x00 || DigestInfo
+        if em.get(0).copied() != Some(0x00) || em.get(1).copied() != Some(0x01) {
+            return false;
+        }
+        let mut i = 2usize;
+        while i < em.len() && em.get(i).copied() == Some(0xff) {
+            i += 1;
+        }
+        // PS must be at least 8 octets of 0xff (PKCS#1)
+        if i < 10 {
+            return false;
+        }
+        if em.get(i).copied() != Some(0x00) {
+            return false;
+        }
+        i += 1;
+        let t = em.get(i..).unwrap_or(&[]);
+        if t.len() != SHA256_DIGESTINFO_PREFIX.len() + 32 {
+            return false;
+        }
+        if t.get(..SHA256_DIGESTINFO_PREFIX.len()).unwrap_or(&[]) != SHA256_DIGESTINFO_PREFIX {
+            return false;
+        }
+        t.get(SHA256_DIGESTINFO_PREFIX.len()..).unwrap_or(&[]) == hash
+    }
+}
+
+/// RSA public key only (n, e) for DKIM verification.
+#[derive(Clone, Debug)]
+pub struct RsaPublicKey {
+    pub n: BigUint,
+    pub e: BigUint,
+    pub k: usize,
+}
+
+impl RsaPublicKey {
+    /// Parse DER RSAPublicKey (SEQUENCE { n, e }) or SubjectPublicKeyInfo wrapping it.
+    pub fn from_der(der: &[u8]) -> Result<Self, String> {
+        // Try SPKI first: SEQUENCE { AlgorithmIdentifier, BIT STRING }
+        if let Ok(pk) = parse_spki_rsa(der) {
+            return Ok(pk);
+        }
+        parse_rsa_public_key_der(der)
+    }
+
+    pub fn verify_sha256(&self, message: &[u8], signature: &[u8]) -> bool {
+        let key = RsaKey {
+            n: self.n.clone(),
+            e: self.e.clone(),
+            d: BigUint::zero(),
+            k: self.k,
+        };
+        key.verify_sha256(message, signature)
+    }
+}
+
+fn parse_rsa_public_key_der(der: &[u8]) -> Result<RsaPublicKey, String> {
+    let mut top = DerReader::new(der);
+    let mut seq = top.enter_sequence()?;
+    let n = seq.read_integer()?;
+    let e = seq.read_integer()?;
+    let k = (n.bit_len() + 7) / 8;
+    if k < 64 {
+        return Err(format!("RSA modulus too small ({} bytes)", k));
+    }
+    Ok(RsaPublicKey { n, e, k })
+}
+
+fn parse_spki_rsa(der: &[u8]) -> Result<RsaPublicKey, String> {
+    let mut top = DerReader::new(der);
+    let mut seq = top.enter_sequence()?;
+    // AlgorithmIdentifier SEQUENCE
+    let _alg = seq.expect_tag(0x30)?;
+    // BIT STRING
+    let bits = seq.expect_tag(0x03)?;
+    if bits.is_empty() {
+        return Err("empty BIT STRING".into());
+    }
+    // first byte = number of unused bits
+    let key_der = bits.get(1..).ok_or("BIT STRING truncated")?;
+    parse_rsa_public_key_der(key_der)
 }
 
 fn encode_der_integer(n: &BigUint) -> Vec<u8> {

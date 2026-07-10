@@ -636,6 +636,16 @@ export PATH="$HOME/.desertemail/bin:$PATH"
               <tr><td><code>imaps_listen</code></td><td>string</td><td><code>""</code> (disabled)</td><td>Implicit IMAPS bind (e.g. <code>"0.0.0.0:993"</code>); only bound when TLS loaded and non-empty</td></tr>
               <tr><td><code>web_tls_listen</code></td><td>string</td><td><code>""</code> (disabled)</td><td>HTTPS webmail bind (e.g. <code>"0.0.0.0:8443"</code>); Secure session cookies when used</td></tr>
               <tr><td><code>require_tls_for_auth</code></td><td>bool</td><td><code>false</code></td><td>If true, reject SMTP AUTH on plaintext with <code>538</code></td></tr>
+              <tr><td><code>spf_enforce</code></td><td>bool</td><td><code>false</code></td><td>When true, SPF hard-Fail + DMARC reject policy may 550; otherwise annotate only</td></tr>
+              <tr><td><code>dmarc_enforce</code></td><td>bool</td><td><code>false</code></td><td>When true, honor DMARC <code>p=reject</code> (550) / <code>p=quarantine</code> (tag); default annotate only</td></tr>
+              <tr><td><code>greylist</code></td><td>bool</td><td><code>false</code></td><td>Inbound greylisting: first triplet sight → <code>451</code></td></tr>
+              <tr><td><code>greylist_delay_secs</code></td><td>u64</td><td><code>60</code></td><td>Minimum wait before greylist retry is accepted</td></tr>
+              <tr><td><code>greylist_ttl_secs</code></td><td>u64</td><td><code>2592000</code></td><td>Whitelist TTL after successful retry (30 days)</td></tr>
+              <tr><td><code>dnsbls</code></td><td>list</td><td><code>[]</code></td><td>DNSBL zones (e.g. <code>zen.spamhaus.org</code>)</td></tr>
+              <tr><td><code>dnsbl_reject</code></td><td>bool</td><td><code>false</code></td><td>When true, a DNSBL hit alone causes 550</td></tr>
+              <tr><td><code>spam_score_tag</code></td><td>i32</td><td><code>5</code></td><td>Score ≥ this adds <code>X-Spam-Flag: YES</code></td></tr>
+              <tr><td><code>spam_score_reject</code></td><td>i32</td><td><code>0</code></td><td>Score ≥ this → 550; <code>0</code> disables reject</td></tr>
+              <tr><td><code>spam_check_ptr</code></td><td>bool</td><td><code>true</code></td><td>Include missing/mismatched rDNS in spam score</td></tr>
               <tr><td><code>[users]</code></td><td>map</td><td>empty</td><td><code>"local"</code> or <code>"user@domain"</code> = plaintext password</td></tr>
             </tbody>
           </table>
@@ -689,13 +699,31 @@ default_password = "changeme"   # change this!
         <ol>
           <li><strong>A / AAAA</strong> — hostname of your mail server (e.g. <code>mail.example.com</code>) → public IP (DynDNS is fine for home).</li>
           <li><strong>MX</strong> — <code>example.com</code> → <code>mail.example.com</code> (priority 10 is typical).</li>
-          <li><strong>SPF (TXT)</strong> — e.g. <code>v=spf1 mx a:mail.example.com ~all</code>.</li>
+          <li><strong>SPF (TXT)</strong> — e.g. <code>v=spf1 mx a:mail.example.com ~all</code> on the apex. Required for deliverability; DesertEmail also <em>checks</em> SPF on inbound mail.</li>
           <li><strong>DKIM (TXT)</strong> — generate a key, set <code>dkim_key_file</code> / <code>dkim_selector</code>, then:
             <pre><code>desertemail --dkim-dns example.com --config ~/.desertemail/config.toml</code></pre>
-            Publish the printed TXT at <code>&lt;selector&gt;._domainkey.example.com</code>.
+            Publish the printed TXT at <code>&lt;selector&gt;._domainkey.example.com</code>. Inbound DKIM signatures are verified on arrival.
           </li>
+          <li><strong>DMARC (TXT)</strong> — at <code>_dmarc.example.com</code>, start with
+            <code>v=DMARC1; p=none; rua=mailto:dmarc@example.com</code>, then tighten to <code>p=quarantine</code> / <code>p=reject</code> after reports look clean.
+            Inbound DMARC is evaluated; enforcement is opt-in via <code>dmarc_enforce</code>.</li>
+          <li><strong>rDNS / PTR</strong> — ask your host/VPS to set reverse DNS for your public IP to your mail hostname (e.g. <code>mail.example.com</code>). Many receivers require PTR that forward-confirms (FCrDNS). Home ISPs rarely allow useful PTR.</li>
+          <li><strong>MTA-STS</strong> (optional) — TXT at <code>_mta-sts.example.com</code>:
+            <code>v=STSv1; id=YYYYMMDD01</code>. Also publish a policy file at
+            <code>https://mta-sts.example.com/.well-known/mta-sts.txt</code>.
+            DesertEmail does <strong>not</strong> serve that file — put it on the webmail HTTPS host or any static HTTPS site.</li>
+          <li><strong>TLS-RPT</strong> (optional) — TXT at <code>_smtp._tls.example.com</code>:
+            <code>v=TLSRPTv1; rua=mailto:tlsrpt@example.com</code>.</li>
         </ol>
-        <p><strong>rDNS / PTR:</strong> many receivers check that your sending IP’s reverse DNS matches a sensible hostname. On a VPS, set PTR to your mail hostname when the provider allows it. Home ISPs rarely give you useful PTR.</p>
+        <div class="heading-wrap"><h3 id="spam-checklist">Why my mail goes to spam</h3><a class="anchor" href="#spam-checklist" aria-label="Link to this section">#</a></div>
+        <ul>
+          <li>SPF + DKIM + DMARC published and aligned on the same organizational domain</li>
+          <li>PTR/rDNS set to your mail hostname and forward-confirms</li>
+          <li>Not sending from a residential or previously abused IP (use a VPS or smarthost)</li>
+          <li>TLS on submission; hostname matches cert when possible</li>
+          <li>Warm a new IP slowly; avoid bulk/spammy content</li>
+          <li>Check major DNSBLs before go-live</li>
+        </ul>
         <p class="warn"><strong>Port 25:</strong> residential ISPs often block outbound 25. Receiving may still work with port-forward; for sending use a <strong>smarthost</strong> in config or host on a VPS with open egress on 25.</p>
       </section>
 
@@ -818,7 +846,7 @@ web_tls_listen = "0.0.0.0:8443"</code></pre>
           <li><strong>Catch-all + <code>default_password</code>:</strong> with <code>catch_all = true</code>, any local-part authenticates with the default password. That is convenient for demos and dangerous if left as <code>changeme</code> on the internet.</li>
           <li><strong>Webmail sessions:</strong> cookie is <code>HttpOnly</code>, <code>SameSite=Lax</code>; on HTTPS (<code>web_tls_listen</code>) the cookie also gets <code>Secure</code>. Tokens are derived from OS CSPRNG material (not just timestamp/PID).</li>
           <li><strong>DKIM:</strong> pure-std RSA-SHA256, relaxed/relaxed; signing path verified against <code>dkimpy</code> in project tests.</li>
-          <li><strong>Missing for “real MTA” use:</strong> no spam filter, limited IMAP surface, no rate limiting, no ACME / auto-cert inside the binary.</li>
+          <li><strong>Missing for “real MTA” use:</strong> no full Bayesian/ML spam filter (basic SPF/DKIM/DMARC + greylist/DNSBL score only), limited IMAP surface, no ACME / auto-cert inside the binary.</li>
         </ul>
         <p class="warn">If you need a production mail gateway today, use Postfix/OpenSMTPD/etc. Use DesertEmail when you want ownership, tiny footprint, and a codebase you can actually finish reading.</p>
       </section>

@@ -42,6 +42,21 @@ io_timeout_secs = 120        # socket idle read/write timeout (slowloris)
 max_received_hops = 30                 # drop inbound DATA with more Received: headers
 outbound_max_rcpts_per_hour = 200      # per authenticated user (submission)
 
+# --- Inbound trust & deliverability (Tier 2; all permissive by default) ---
+# Always evaluate SPF/DKIM/DMARC and add Authentication-Results + Received-SPF.
+# Enforcement is opt-in so a misconfigured check never silently blackholes mail.
+spf_enforce = false          # true: SPF Fail + DMARC reject policy => 550
+dmarc_enforce = false        # true: honor p=reject (550) / p=quarantine (tag only)
+greylist = false             # true: 451 first sight of (ip/24, from, rcpt) triplet
+greylist_delay_secs = 60     # wait before accepting retry
+greylist_ttl_secs = 2592000  # whitelist TTL after success (30 days)
+# dnsbls = ["zen.spamhaus.org", "bl.spamcop.net"]
+dnsbls = []
+dnsbl_reject = false         # true: single DNSBL hit => 550 (harsh; keep false)
+spam_score_tag = 5           # score >= this => X-Spam-Flag: YES (0 disables tagging)
+spam_score_reject = 0        # score >= this => 550; 0 = reject disabled
+spam_check_ptr = true        # include missing/mismatched rDNS in spam score
+
 # Optional DKIM signing for outbound mail (rsa-sha256, relaxed/relaxed).
 # Generate a key: openssl genrsa -out dkim.pem 2048
 # Publish DNS:    desertemail --dkim-dns example.com

@@ -11,9 +11,13 @@ use rustls::ServerConfig;
 
 use crate::auth;
 use crate::config::Config;
+use crate::dkim::{self, DkimStatus};
+use crate::dmarc::{self, DmarcPolicy};
 use crate::limits;
 use crate::queue;
 use crate::ratelimit;
+use crate::spamscore::{self, GreylistDecision, SpamScore, SpamScoreInput};
+use crate::spf::{self, SpfResult};
 use crate::storage::Maildir;
 use crate::tls::{self, Conn};
 use crate::util::{self, read_line, write_line};
@@ -131,8 +135,14 @@ fn handle_client(
 
     let mut state = State::Init;
     let mut authenticated_user: Option<String> = None;
+    let mut helo_domain = String::from("unknown");
     let mut data_buf = Vec::new();
     let starttls_available = tls_cfg.is_some();
+    let hostname = cfg
+        .domains
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("desertemail");
 
     loop {
         let line = match read_line(&mut reader)? {
@@ -147,6 +157,7 @@ fn handle_client(
         match (cmd.as_str(), &state) {
             ("EHLO" | "HELO", State::Init | State::Greeted) => {
                 let domain = parts.get(1).copied().unwrap_or("localhost");
+                helo_domain = domain.to_string();
                 write_line(
                     reader.get_mut(),
                     &format!("250-desertemail Hello {}", domain),
@@ -284,6 +295,53 @@ fn handle_client(
                         ratelimit::record_outbound(user, 1);
                     }
                 }
+                // Greylisting (inbound only, first RCPT establishes the triplet).
+                if !is_submission && cfg.greylist {
+                    let mail_from = match &state {
+                        State::MailFrom { from } => from.as_str(),
+                        State::RcptTo { from, .. } => from.as_str(),
+                        _ => "",
+                    };
+                    // Only greylist on the first recipient of the transaction.
+                    let is_first_rcpt = matches!(&state, State::MailFrom { .. });
+                    if is_first_rcpt {
+                        let now = util::now_secs();
+                        // Opportunistic prune of expired greylist files (TTL + 1 day).
+                        spamscore::greylist_prune(
+                            &cfg.data_dir,
+                            cfg.greylist_ttl_secs.saturating_add(86_400),
+                            now,
+                        );
+                        let decision = spamscore::greylist_check(
+                            &cfg.data_dir,
+                            &peer_ip,
+                            mail_from,
+                            &rcpt,
+                            cfg.greylist_delay_secs,
+                            cfg.greylist_ttl_secs,
+                            now,
+                        );
+                        if decision == GreylistDecision::Defer {
+                            util::log!(
+                                "greylist defer ip={} from={} rcpt={}",
+                                peer_ip,
+                                mail_from,
+                                rcpt
+                            );
+                            write_line(
+                                reader.get_mut(),
+                                "451 Greylisted, try again shortly",
+                            )?;
+                            continue;
+                        }
+                        util::log!(
+                            "greylist accept ip={} from={} rcpt={}",
+                            peer_ip,
+                            mail_from,
+                            rcpt
+                        );
+                    }
+                }
                 match state {
                     State::MailFrom { from: ref f } => {
                         state = State::RcptTo {
@@ -309,6 +367,8 @@ fn handle_client(
                 write_line(reader.get_mut(), "250 OK")?;
             }
             ("DATA", State::RcptTo { from, rcpts }) => {
+                let from = from.clone();
+                let rcpts = rcpts.clone();
                 write_line(reader.get_mut(), "354 End data with <CR><LF>.<CR><LF>")?;
                 state = State::Data {
                     from: from.clone(),
@@ -348,8 +408,37 @@ fn handle_client(
                     continue;
                 }
 
-                let delivered =
-                    deliver_mail(&cfg, &state, &data_buf, is_submission, &authenticated_user);
+                // Inbound trust: SPF / DKIM / DMARC / spam score (annotate always;
+                // reject only when config explicitly enables enforcement).
+                let mut deliver_raw = data_buf.clone();
+                if !is_submission {
+                    match inbound_trust_check(
+                        &cfg,
+                        &peer_ip,
+                        &helo_domain,
+                        &from,
+                        &data_buf,
+                        hostname,
+                    ) {
+                        InboundAction::Reject(msg) => {
+                            util::log!("inbound reject: {}", msg);
+                            write_line(reader.get_mut(), &msg)?;
+                            state = State::Greeted;
+                            continue;
+                        }
+                        InboundAction::Accept(annotated) => {
+                            deliver_raw = annotated;
+                        }
+                    }
+                }
+
+                let delivered = deliver_mail(
+                    &cfg,
+                    &state,
+                    &deliver_raw,
+                    is_submission,
+                    &authenticated_user,
+                );
                 match delivered {
                     Ok(n) => {
                         write_line(reader.get_mut(), &format!("250 OK: queued as {} msgs", n))?;
@@ -437,6 +526,228 @@ pub fn extract_angle(line: &str) -> String {
         }
     }
     String::new()
+}
+
+/// Result of inbound SPF/DKIM/DMARC/spam processing.
+enum InboundAction {
+    Accept(Vec<u8>),
+    Reject(String),
+}
+
+/// Run inbound trust checks, prepend Authentication-Results / Received-SPF /
+/// optional X-Spam-* headers. Never rejects on TempError (DNS failure).
+fn inbound_trust_check(
+    cfg: &Config,
+    peer_ip: &str,
+    helo: &str,
+    mail_from: &str,
+    raw: &[u8],
+    hostname: &str,
+) -> InboundAction {
+    let (_local, mail_domain) = util::parse_email_addr(mail_from);
+
+    // --- SPF ---
+    let spf_result = spf::check_spf(peer_ip, helo, &mail_domain);
+    util::log!(
+        "SPF {} client-ip={} helo={} mail_from_domain={}",
+        spf_result.as_str(),
+        peer_ip,
+        helo,
+        mail_domain
+    );
+
+    // --- DKIM ---
+    let dkim_results = dkim::verify(raw, |name| {
+        match crate::dns::resolve_txt(name) {
+            Ok(txts) => {
+                // Prefer a record containing p=
+                for t in txts {
+                    if t.to_ascii_lowercase().contains("p=") {
+                        return Some(t);
+                    }
+                }
+                None
+            }
+            Err(e) => {
+                util::log!("DKIM DNS lookup {} failed: {}", name, e);
+                None
+            }
+        }
+    });
+    for d in &dkim_results {
+        util::log!(
+            "DKIM {} d={} s={} ({})",
+            d.status.as_str(),
+            d.domain,
+            d.selector,
+            d.detail
+        );
+    }
+
+    // --- DMARC ---
+    let from_dom = spamscore::from_header_domain(raw);
+    let from_dom = if from_dom.is_empty() {
+        mail_domain.clone()
+    } else {
+        from_dom
+    };
+    // SPF authenticated domain is the MAIL FROM domain (or HELO if empty).
+    let spf_auth_domain = if mail_domain.is_empty() {
+        helo.trim_end_matches('.').to_lowercase()
+    } else {
+        mail_domain.clone()
+    };
+    let dmarc = dmarc::evaluate(&from_dom, spf_result, &spf_auth_domain, &dkim_results);
+    util::log!(
+        "DMARC {} policy={} disposition={} ({})",
+        dmarc.as_ar_result(),
+        dmarc.policy.as_str(),
+        dmarc.disposition.as_str(),
+        dmarc.detail
+    );
+
+    // --- DNSBL ---
+    let dnsbl_hits = if cfg.dnsbls.is_empty() {
+        0
+    } else {
+        spamscore::dnsbl_hit_count(peer_ip, &cfg.dnsbls)
+    };
+    if dnsbl_hits > 0 {
+        util::log!("DNSBL hits={} ip={}", dnsbl_hits, peer_ip);
+        if cfg.dnsbl_reject {
+            return InboundAction::Reject(format!(
+                "550 5.7.1 Listed on DNSBL ({} hit(s))",
+                dnsbl_hits
+            ));
+        }
+    }
+
+    // --- Spam score ---
+    let score_input = SpamScoreInput {
+        client_ip: peer_ip,
+        helo,
+        spf: spf_result,
+        dkim: &dkim_results,
+        dmarc_pass: if dmarc.record_found {
+            Some(dmarc.pass)
+        } else {
+            None
+        },
+        dmarc_record_found: dmarc.record_found,
+        raw_message: raw,
+        dnsbl_hits,
+        check_ptr: cfg.spam_check_ptr,
+    };
+    let spam = SpamScore::compute(&score_input);
+    util::log!(
+        "spam_score={} reasons={:?}",
+        spam.score,
+        spam.reasons
+    );
+
+    if cfg.spam_score_reject > 0 && spam.score >= cfg.spam_score_reject {
+        return InboundAction::Reject(format!(
+            "550 5.7.1 Message rejected as spam (score {})",
+            spam.score
+        ));
+    }
+
+    // --- Enforcement (conservative; TempError never rejects) ---
+    if cfg.dmarc_enforce && dmarc.record_found && !dmarc.pass {
+        if dmarc.disposition == DmarcPolicy::Reject
+            && spf_result != SpfResult::TempError
+            && !dkim_results.iter().any(|d| d.status == DkimStatus::TempError)
+        {
+            return InboundAction::Reject(
+                "550 5.7.1 DMARC policy reject".into(),
+            );
+        }
+    }
+    if cfg.spf_enforce
+        && spf_result == SpfResult::Fail
+        && dmarc.record_found
+        && dmarc.disposition == DmarcPolicy::Reject
+        && !dmarc.pass
+    {
+        return InboundAction::Reject("550 5.7.1 SPF fail and DMARC reject".into());
+    }
+
+    // Quarantine tag when DMARC says quarantine and enforce is on, or score tags.
+    let mut quarantine = false;
+    if cfg.dmarc_enforce
+        && dmarc.record_found
+        && !dmarc.pass
+        && dmarc.disposition == DmarcPolicy::Quarantine
+    {
+        quarantine = true;
+    }
+    if spam.score >= cfg.spam_score_tag && cfg.spam_score_tag > 0 {
+        quarantine = true;
+    }
+
+    // --- Build annotation headers ---
+    let mut prefix = String::new();
+
+    // Received-SPF
+    let rspf = spf::received_spf_header(spf_result, peer_ip, helo, mail_from);
+    prefix.push_str("Received-SPF: ");
+    prefix.push_str(&rspf);
+    prefix.push_str("\r\n");
+
+    // Authentication-Results (RFC 8601)
+    let mut ar = format!("Authentication-Results: {};", hostname);
+    ar.push_str(&format!(" spf={}", spf_result.as_str()));
+    if !spf_auth_domain.is_empty() {
+        ar.push_str(&format!(" smtp.mailfrom={}", spf_auth_domain));
+    }
+    // DKIM methods
+    let mut any_dkim = false;
+    for d in &dkim_results {
+        if d.status == DkimStatus::None && d.domain.is_empty() {
+            ar.push_str("; dkim=none");
+            any_dkim = true;
+            break;
+        }
+        ar.push_str(&format!(
+            "; dkim={} header.d={} header.s={}",
+            d.status.as_str(),
+            d.domain,
+            d.selector
+        ));
+        any_dkim = true;
+    }
+    if !any_dkim {
+        ar.push_str("; dkim=none");
+    }
+    ar.push_str(&format!(
+        "; dmarc={} header.from={}",
+        dmarc.as_ar_result(),
+        if from_dom.is_empty() { "unknown" } else { &from_dom }
+    ));
+    if dmarc.record_found {
+        ar.push_str(&format!(" policy.dmarc={}", dmarc.policy.as_str()));
+    }
+    prefix.push_str(&ar);
+    prefix.push_str("\r\n");
+
+    if quarantine || spam.score >= cfg.spam_score_tag && cfg.spam_score_tag > 0 {
+        prefix.push_str("X-Spam-Flag: YES\r\n");
+        prefix.push_str(&format!("X-Spam-Score: {}\r\n", spam.score));
+        if !spam.reasons.is_empty() {
+            prefix.push_str(&format!(
+                "X-Spam-Status: Yes, score={} reasons=\"{}\"\r\n",
+                spam.score,
+                spam.reasons.join(", ")
+            ));
+        }
+    } else if spam.score > 0 {
+        prefix.push_str(&format!("X-Spam-Score: {}\r\n", spam.score));
+    }
+
+    let mut out = Vec::with_capacity(prefix.len() + raw.len());
+    out.extend_from_slice(prefix.as_bytes());
+    out.extend_from_slice(raw);
+    InboundAction::Accept(out)
 }
 
 fn deliver_mail(

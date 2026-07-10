@@ -10,8 +10,12 @@ use crate::util;
 
 const DNS_TIMEOUT: Duration = Duration::from_secs(2);
 const QTYPE_A: u16 = 1;
-const QTYPE_AAAA: u16 = 28;
+const QTYPE_NS: u16 = 2;
+const QTYPE_CNAME: u16 = 5;
+const QTYPE_PTR: u16 = 12;
 const QTYPE_MX: u16 = 15;
+const QTYPE_TXT: u16 = 16;
+const QTYPE_AAAA: u16 = 28;
 const QCLASS_IN: u16 = 1;
 
 /// One MX record: preference (lower first) and exchange hostname.
@@ -54,8 +58,9 @@ pub fn resolve_mx(domain: &str) -> io::Result<Vec<MxRecord>> {
     Ok(mxs)
 }
 
-/// Resolve A and AAAA addresses for `host`. Returns socket addrs on port 25 by default
-/// when used for SMTP; here we return IP strings so the caller can pick the port.
+/// Resolve A and AAAA addresses for `host`.
+/// Returns parseable IP strings: dotted IPv4, and bracketed IPv6 for SocketAddr
+/// (e.g. `[2001:db8::1]`). Callers that need `IpAddr` should strip brackets.
 pub fn resolve_a(host: &str) -> io::Result<Vec<String>> {
     let host = host.trim_end_matches('.').to_lowercase();
     if host.is_empty() {
@@ -68,10 +73,11 @@ pub fn resolve_a(host: &str) -> io::Result<Vec<String>> {
     if let Ok(answers) = query(&host, QTYPE_A) {
         for ans in answers {
             if ans.rtype == QTYPE_A && ans.rdata.len() == 4 {
-                ips.push(format!(
-                    "{}.{}.{}.{}",
-                    ans.rdata[0], ans.rdata[1], ans.rdata[2], ans.rdata[3]
-                ));
+                let a = *ans.rdata.get(0).unwrap_or(&0);
+                let b = *ans.rdata.get(1).unwrap_or(&0);
+                let c = *ans.rdata.get(2).unwrap_or(&0);
+                let d = *ans.rdata.get(3).unwrap_or(&0);
+                ips.push(format!("{}.{}.{}.{}", a, b, c, d));
             }
         }
     }
@@ -80,8 +86,11 @@ pub fn resolve_a(host: &str) -> io::Result<Vec<String>> {
             if ans.rtype == QTYPE_AAAA && ans.rdata.len() == 16 {
                 let mut parts = [0u16; 8];
                 for i in 0..8 {
-                    parts[i] = u16::from_be_bytes([ans.rdata[i * 2], ans.rdata[i * 2 + 1]]);
+                    let hi = *ans.rdata.get(i * 2).unwrap_or(&0);
+                    let lo = *ans.rdata.get(i * 2 + 1).unwrap_or(&0);
+                    parts[i] = u16::from_be_bytes([hi, lo]);
                 }
+                // Bracketed so SocketAddr parse works; strip for IpAddr.
                 ips.push(format!(
                     "[{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}]",
                     parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6],
@@ -92,6 +101,143 @@ pub fn resolve_a(host: &str) -> io::Result<Vec<String>> {
     }
 
     Ok(ips)
+}
+
+/// Resolve TXT records for `name` (QTYPE 16).
+/// Character-strings within a single TXT RR are concatenated into one String;
+/// each TXT RR becomes one entry.
+pub fn resolve_txt(name: &str) -> io::Result<Vec<String>> {
+    let name = name.trim_end_matches('.').to_lowercase();
+    if name.is_empty() {
+        return Ok(Vec::new());
+    }
+    let answers = query(&name, QTYPE_TXT)?;
+    let mut out = Vec::new();
+    for ans in answers {
+        if ans.rtype != QTYPE_TXT {
+            continue;
+        }
+        if let Some(s) = decode_txt_rdata(&ans.rdata) {
+            out.push(s);
+        }
+    }
+    Ok(out)
+}
+
+/// Reverse DNS (PTR) for an IP address string.
+/// Accepts dotted IPv4, bare IPv6, or bracketed IPv6.
+pub fn resolve_ptr(ip: &str) -> io::Result<Vec<String>> {
+    let ptr_name = match ptr_name_for_ip(ip) {
+        Some(n) => n,
+        None => return Ok(Vec::new()),
+    };
+    let answers = query(&ptr_name, QTYPE_PTR)?;
+    let mut out = Vec::new();
+    for ans in answers {
+        if ans.rtype != QTYPE_PTR {
+            continue;
+        }
+        if let Some(name) = ans.rdata_name {
+            out.push(name.trim_end_matches('.').to_lowercase());
+        }
+    }
+    Ok(out)
+}
+
+/// Build the reverse-lookup name for an IP (`x.x.x.x.in-addr.arpa` / `ip6.arpa`).
+pub fn ptr_name_for_ip(ip: &str) -> Option<String> {
+    let ip = ip.trim().trim_start_matches('[').trim_end_matches(']');
+    if ip.contains('.') && !ip.contains(':') {
+        // IPv4
+        let parts: Vec<&str> = ip.split('.').collect();
+        if parts.len() != 4 {
+            return None;
+        }
+        for p in &parts {
+            if p.parse::<u8>().is_err() {
+                return None;
+            }
+        }
+        Some(format!(
+            "{}.{}.{}.{}.in-addr.arpa",
+            parts[3], parts[2], parts[1], parts[0]
+        ))
+    } else if ip.contains(':') {
+        // Expand IPv6 to 32 nibbles
+        let full = expand_ipv6(ip)?;
+        let mut nibbles: Vec<char> = full.chars().filter(|c| *c != ':').collect();
+        if nibbles.len() != 32 {
+            return None;
+        }
+        nibbles.reverse();
+        let labels: Vec<String> = nibbles.iter().map(|c| c.to_string()).collect();
+        Some(format!("{}.ip6.arpa", labels.join(".")))
+    } else {
+        None
+    }
+}
+
+/// Expand IPv6 to 8 groups of 4 hex digits joined by ':'.
+fn expand_ipv6(ip: &str) -> Option<String> {
+    let ip = ip.trim().trim_start_matches('[').trim_end_matches(']');
+    let (left, right) = if let Some(idx) = ip.find("::") {
+        let l = &ip[..idx];
+        let r = &ip[idx + 2..];
+        (l, r)
+    } else {
+        (ip, "")
+    };
+    let mut groups: Vec<String> = Vec::new();
+    if !left.is_empty() {
+        for g in left.split(':') {
+            if g.is_empty() {
+                return None;
+            }
+            let n = u16::from_str_radix(g, 16).ok()?;
+            groups.push(format!("{:04x}", n));
+        }
+    }
+    let mut right_groups: Vec<String> = Vec::new();
+    if !right.is_empty() {
+        for g in right.split(':') {
+            if g.is_empty() {
+                return None;
+            }
+            let n = u16::from_str_radix(g, 16).ok()?;
+            right_groups.push(format!("{:04x}", n));
+        }
+    }
+    if ip.contains("::") {
+        let fill = 8usize.saturating_sub(groups.len() + right_groups.len());
+        for _ in 0..fill {
+            groups.push("0000".into());
+        }
+    }
+    groups.extend(right_groups);
+    if groups.len() != 8 {
+        return None;
+    }
+    Some(groups.join(":"))
+}
+
+/// Decode TXT rdata: sequence of length-prefixed character-strings, concatenated.
+fn decode_txt_rdata(rdata: &[u8]) -> Option<String> {
+    if rdata.is_empty() {
+        return Some(String::new());
+    }
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < rdata.len() {
+        let len = *rdata.get(i)? as usize;
+        i = i.saturating_add(1);
+        if i.saturating_add(len) > rdata.len() {
+            return None;
+        }
+        let chunk = rdata.get(i..i + len)?;
+        out.push_str(&String::from_utf8_lossy(chunk));
+        i = i.saturating_add(len);
+    }
+    Some(out)
 }
 
 /// Hosts to try for SMTP delivery of `domain`: MX exchanges sorted by pref,
@@ -225,8 +371,8 @@ fn query_once(
         let rdata_name = if rtype == QTYPE_MX && rdlength >= 3 {
             // preference (2) + name
             parse_name(resp, pos + 2).ok().map(|(n, _)| n)
-        } else if rtype == 5 || rtype == 2 {
-            // CNAME / NS
+        } else if rtype == QTYPE_PTR || rtype == QTYPE_CNAME || rtype == QTYPE_NS {
+            // PTR / CNAME / NS — name is the whole rdata
             parse_name(resp, pos).ok().map(|(n, _)| n)
         } else {
             None
@@ -448,5 +594,35 @@ mod tests {
         let (n2, end2) = parse_name(&msg, 13).unwrap();
         assert_eq!(n2, "example.com");
         assert_eq!(end2, 15);
+    }
+
+    #[test]
+    fn decode_txt_concatenates_strings() {
+        // "v=spf1" + " ~all"
+        let rdata = b"\x06v=spf1\x05 ~all";
+        assert_eq!(decode_txt_rdata(rdata).as_deref(), Some("v=spf1 ~all"));
+    }
+
+    #[test]
+    fn ptr_name_ipv4() {
+        assert_eq!(
+            ptr_name_for_ip("1.2.3.4").as_deref(),
+            Some("4.3.2.1.in-addr.arpa")
+        );
+    }
+
+    #[test]
+    fn ptr_name_ipv6() {
+        let n = ptr_name_for_ip("2001:db8::1").unwrap();
+        assert!(n.ends_with(".ip6.arpa"));
+        assert!(n.starts_with("1.0.0.0."));
+    }
+
+    #[test]
+    fn expand_ipv6_basic() {
+        assert_eq!(
+            expand_ipv6("2001:db8::1").as_deref(),
+            Some("2001:0db8:0000:0000:0000:0000:0000:0001")
+        );
     }
 }

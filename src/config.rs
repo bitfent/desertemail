@@ -63,6 +63,28 @@ pub struct Config {
     pub max_received_hops: usize,
     /// Max recipients per authenticated user per rolling hour (default 200).
     pub outbound_max_rcpts_per_hour: u32,
+
+    // --- Tier 2: inbound trust & deliverability (all off/permissive by default) ---
+    /// When true: SPF hard-Fail + DMARC policy reject may yield 550. Default false.
+    pub spf_enforce: bool,
+    /// When true: honor DMARC p=reject (550) / p=quarantine (tag). Default false (annotate only).
+    pub dmarc_enforce: bool,
+    /// Enable greylisting on inbound. Default false.
+    pub greylist: bool,
+    /// Seconds a triplet must wait before accept (default 60).
+    pub greylist_delay_secs: u64,
+    /// Whitelist TTL after successful retry (default 30 days).
+    pub greylist_ttl_secs: u64,
+    /// DNSBL zones (e.g. zen.spamhaus.org). Default empty.
+    pub dnsbls: Vec<String>,
+    /// When true, a DNSBL hit alone causes 550. Default false.
+    pub dnsbl_reject: bool,
+    /// Score at/above which message is tagged X-Spam-Flag: YES (default 5).
+    pub spam_score_tag: i32,
+    /// Score at/above which message is rejected 550. 0 or negative = disabled (default 0).
+    pub spam_score_reject: i32,
+    /// Include PTR/FCrDNS in spam score (extra DNS). Default true when scoring runs.
+    pub spam_check_ptr: bool,
 }
 
 impl Default for Config {
@@ -99,6 +121,16 @@ impl Default for Config {
             io_timeout_secs: 120,
             max_received_hops: 30,
             outbound_max_rcpts_per_hour: 200,
+            spf_enforce: false,
+            dmarc_enforce: false,
+            greylist: false,
+            greylist_delay_secs: 60,
+            greylist_ttl_secs: 30 * 86400,
+            dnsbls: Vec::new(),
+            dnsbl_reject: false,
+            spam_score_tag: 5,
+            spam_score_reject: 0, // disabled
+            spam_check_ptr: true,
         }
     }
 }
@@ -224,6 +256,24 @@ impl Config {
                     cfg.outbound_max_rcpts_per_hour =
                         parse_u32(&val, cfg.outbound_max_rcpts_per_hour)
                 }
+                ("", "spf_enforce") => cfg.spf_enforce = parse_bool(&val),
+                ("", "dmarc_enforce") => cfg.dmarc_enforce = parse_bool(&val),
+                ("", "greylist") => cfg.greylist = parse_bool(&val),
+                ("", "greylist_delay_secs") => {
+                    cfg.greylist_delay_secs = parse_u64(&val, cfg.greylist_delay_secs)
+                }
+                ("", "greylist_ttl_secs") => {
+                    cfg.greylist_ttl_secs = parse_u64(&val, cfg.greylist_ttl_secs)
+                }
+                ("", "dnsbls") => cfg.dnsbls = parse_list(&val),
+                ("", "dnsbl_reject") => cfg.dnsbl_reject = parse_bool(&val),
+                ("", "spam_score_tag") => {
+                    cfg.spam_score_tag = parse_i32(&val, cfg.spam_score_tag)
+                }
+                ("", "spam_score_reject") => {
+                    cfg.spam_score_reject = parse_i32(&val, cfg.spam_score_reject)
+                }
+                ("", "spam_check_ptr") => cfg.spam_check_ptr = parse_bool(&val),
                 ("users", k) => {
                     cfg.users.insert(k.to_string(), val);
                 }
@@ -351,6 +401,10 @@ fn parse_usize(s: &str, default: usize) -> usize {
     s.parse().unwrap_or(default)
 }
 
+fn parse_i32(s: &str, default: i32) -> i32 {
+    s.parse().unwrap_or(default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +454,14 @@ max_connections_per_ip = 5
 io_timeout_secs = 30
 max_received_hops = 10
 outbound_max_rcpts_per_hour = 50
+spf_enforce = true
+dmarc_enforce = true
+greylist = true
+greylist_delay_secs = 90
+dnsbls = ["zen.spamhaus.org", "bl.spamcop.net"]
+dnsbl_reject = false
+spam_score_tag = 4
+spam_score_reject = 20
 [users]
 "alice" = "pass"
 "#;
@@ -409,6 +471,19 @@ outbound_max_rcpts_per_hour = 50
         assert_eq!(cfg.max_connections, 100);
         assert_eq!(cfg.max_received_hops, 10);
         assert_eq!(cfg.outbound_max_rcpts_per_hour, 50);
+        assert!(cfg.spf_enforce);
+        assert!(cfg.dmarc_enforce);
+        assert!(cfg.greylist);
+        assert_eq!(cfg.greylist_delay_secs, 90);
+        assert_eq!(cfg.dnsbls.len(), 2);
+        assert_eq!(cfg.spam_score_tag, 4);
+        assert_eq!(cfg.spam_score_reject, 20);
+        // defaults stay permissive when unset
+        let def = Config::default();
+        assert!(!def.spf_enforce);
+        assert!(!def.dmarc_enforce);
+        assert!(!def.greylist);
+        assert_eq!(def.spam_score_reject, 0);
     }
 
     #[test]

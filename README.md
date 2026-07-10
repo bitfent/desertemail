@@ -16,7 +16,7 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - **Maildir storage**: Standard, simple, filesystem-based. Easy to backup, rsync, or even mount remotely.
 - **Secure-ish by design**: PBKDF2-HMAC-SHA256 password hashes (`desertemail --hash-password`), AUTH PLAIN, auth lockout, connection limits, basic command validation. Built-in TLS when you supply a cert+key; optional `require_tls_for_auth` rejects AUTH on plaintext (538).
 
-> ⚠️ **This is an educational / personal-use MVP.** Tier 1 hardening is in tree (PBKDF2 password hashes, auth lockout, connection limits, relay/loop guards, fuzz targets) but TLS is optional until you configure cert/key; IMAP is still a subset; no spam filter; no ACME auto-cert. Great starting point to learn email protocols and extend!
+> ⚠️ **This is an educational / personal-use MVP.** Tier 1–2 are in tree (PBKDF2, auth lockout, connection limits, inbound SPF/DKIM/DMARC + greylist/DNSBL/basic spam score — all opt-in for enforcement) but TLS is optional until you configure cert/key; IMAP is still a subset; no full Bayesian/ML spam filter; no ACME auto-cert. Great starting point to learn email protocols and extend!
 
 ## Features (v0.2)
 
@@ -107,6 +107,18 @@ io_timeout_secs = 120
 max_received_hops = 30              # inbound DATA with more Received: => 554
 outbound_max_rcpts_per_hour = 200   # per authenticated submission user
 
+# Inbound trust (Tier 2) — evaluate + annotate always; reject only if enabled
+spf_enforce = false                 # true: SPF Fail + DMARC reject => 550
+dmarc_enforce = false               # true: honor p=reject / p=quarantine
+greylist = false                    # true: 451 first (ip/24,from,rcpt) sight
+greylist_delay_secs = 60
+greylist_ttl_secs = 2592000         # 30 days whitelist after success
+dnsbls = []                         # e.g. ["zen.spamhaus.org"]
+dnsbl_reject = false
+spam_score_tag = 5                  # >= tag => X-Spam-Flag: YES
+spam_score_reject = 0               # 0 = reject disabled
+spam_check_ptr = true
+
 # Optional: smarthost for outbound (e.g. your ISP or free relay).
 # When unset, mail is delivered directly via MX lookup.
 # smarthost = "smtp.example.com:587"
@@ -144,15 +156,31 @@ The parser is hand-written and very simple (key = "value", sections).
 
 1. Point an **A (or AAAA)** record for `mail.example.com` → your public IP (use DynDNS like duckdns.org / freedns if dynamic home IP).
 2. Add **MX** record for `example.com` → `mail.example.com` (priority 10).
-3. (Recommended) SPF: `v=spf1 mx a:mail.example.com ~all` as TXT.
-4. (Recommended) DKIM:
+3. **SPF** (TXT on the apex): e.g. `v=spf1 mx a:mail.example.com ~all`.
+4. **DKIM**:
    ```bash
    openssl genrsa -out dkim.pem 2048
    # set dkim_key_file = "dkim.pem" in config.toml, then:
    ./desertemail --dkim-dns example.com
-   # publishes instructions: TXT at mail._domainkey.example.com
+   # publish the printed TXT at mail._domainkey.example.com
    ```
-5. Open ports 25, 587, 143, and (with TLS configured) 465 / 993 / 8443 as needed in your firewall / router port-forward.
+5. **DMARC** (TXT at `_dmarc.example.com`): start with
+   `v=DMARC1; p=none; rua=mailto:dmarc@example.com` then move to `p=quarantine` / `p=reject` after monitoring.
+6. **rDNS / PTR**: ask your VPS/host to set reverse DNS for your public IP to your mail hostname (e.g. `mail.example.com`). Many receivers require PTR that matches a forward A/AAAA. Home ISPs rarely allow this.
+7. **MTA-STS** (optional): TXT at `_mta-sts.example.com` with `v=STSv1; id=YYYYMMDD01`, plus a policy file at
+   `https://mta-sts.example.com/.well-known/mta-sts.txt`. DesertEmail does **not** serve that policy file — host it on the webmail HTTPS vhost or any static HTTPS host.
+8. **TLS-RPT** (optional): TXT at `_smtp._tls.example.com` —
+   `v=TLSRPTv1; rua=mailto:tlsrpt@example.com`.
+9. Open ports 25, 587, 143, and (with TLS configured) 465 / 993 / 8443 as needed in your firewall / router port-forward.
+
+### Why my mail goes to spam (checklist)
+
+- [ ] SPF, DKIM, and DMARC all published and consistent (same domain alignment)
+- [ ] PTR/rDNS set to your mail hostname and forward-confirms (FCrDNS)
+- [ ] Not sending from a residential/shared IP with bad reputation (use a VPS or smarthost)
+- [ ] TLS on submission; valid cert for the EHLO/hostname when possible
+- [ ] Warm up a new IP gradually; avoid spammy content and purchased lists
+- [ ] Check that your IP is not on major DNSBLs before going live
 
 Test with: `swaks --to you@example.com --server your-ip` or real email from Gmail etc.
 
@@ -183,10 +211,13 @@ src/
 ├── passwd.rs        # PBKDF2-HMAC-SHA256 password hashing (from crypto::sha256)
 ├── ratelimit.rs     # Auth brute-force lockout + outbound rcpt throttle
 ├── limits.rs        # Global/per-IP connection caps + I/O timeouts
-├── dns.rs           # DNS client over UDP: MX/A/AAAA, name compression (pure std)
+├── dns.rs           # DNS client over UDP: MX/A/AAAA/TXT/PTR, name compression (pure std)
 ├── queue.rs         # Outbound queue: disk persistence, retries/backoff, opportunistic STARTTLS
-├── crypto.rs        # SHA-256, bignum RSA (PKCS#1 v1.5), PEM/DER key parsing
-├── dkim.rs          # DKIM signing: relaxed/relaxed canonicalization (RFC 6376)
+├── crypto.rs        # SHA-256, bignum RSA (PKCS#1 v1.5 sign+verify), PEM/DER key parsing
+├── dkim.rs          # DKIM sign + verify: shared relaxed/relaxed canonicalization (RFC 6376)
+├── spf.rs           # Inbound SPF evaluation (RFC 7208 core subset)
+├── dmarc.rs         # DMARC evaluation + alignment (RFC 7489 core)
+├── spamscore.rs     # Greylisting, DNSBL, lightweight additive spam score
 ├── web.rs           # Webmail + admin: HTTP/1.1 (+ optional HTTPS), sessions, HTML
 ├── tls.rs           # rustls: server Conn, client ClientConn, PEM load, webpki-roots
 └── util.rs          # Line reader, base64, random fill, RFC 2822 dates, logging
@@ -233,9 +264,9 @@ hard gate before pointing MX at it.
 - [x] **Relay/loop/abuse audit** — prove port 25 only accepts local domains (not an open relay), add a max-Received-hops loop guard, throttle outbound so a compromised account can't become a spam cannon.
 
 ### Tier 2 — Inbound trust & deliverability (needed for real-world mail)
-- [ ] **Inbound SPF check, DKIM verify, DMARC evaluation** (we sign outbound DKIM but accept anything inbound today).
-- [ ] **Greylisting + blocklist (RBL) lookups**; spam scoring (consider integrating rspamd rather than hand-rolling).
-- [ ] **Deliverability ops** — rDNS/PTR, MTA-STS, TLS-RPT, IP warm-up (SPF/DKIM publishing already supported).
+- [x] **Inbound SPF check, DKIM verify, DMARC evaluation** (we sign outbound DKIM but accept anything inbound today).
+- [x] **Greylisting + blocklist (RBL) lookups**; spam scoring (consider integrating rspamd rather than hand-rolling).
+- [x] **Deliverability ops** — rDNS/PTR, MTA-STS, TLS-RPT, IP warm-up (SPF/DKIM publishing already supported).
 
 ### Tier 3 — Protocol completeness & reliability
 - [ ] **IMAP gaps** — `SEARCH` (currently errors), `IDLE` (push; mobile clients need it), `APPEND`, robust flag/UID persistence.
