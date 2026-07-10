@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use crate::crypto::RsaKey;
 use crate::util;
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,12 @@ pub struct Config {
     pub catch_all: bool,
     pub default_password: String,
     pub users: HashMap<String, String>,
+    /// DKIM selector (default "mail"). DNS: `<selector>._domainkey.<domain>`
+    pub dkim_selector: String,
+    /// Path to PEM RSA private key for DKIM (PKCS#1 or PKCS#8).
+    pub dkim_key_file: Option<String>,
+    /// Loaded at startup; None if missing/unparseable.
+    pub dkim_key: Option<RsaKey>,
 }
 
 impl Default for Config {
@@ -35,6 +42,9 @@ impl Default for Config {
             catch_all: true,
             default_password: "changeme".into(),
             users: HashMap::new(),
+            dkim_selector: "mail".into(),
+            dkim_key_file: None,
+            dkim_key: None,
         }
     }
 }
@@ -89,6 +99,8 @@ impl Config {
                 ("", "smarthost_pass") => cfg.smarthost_pass = Some(val),
                 ("", "catch_all") => cfg.catch_all = parse_bool(&val),
                 ("", "default_password") => cfg.default_password = val,
+                ("", "dkim_selector") => cfg.dkim_selector = val,
+                ("", "dkim_key_file") => cfg.dkim_key_file = Some(val),
                 ("users", k) => {
                     cfg.users.insert(k.to_string(), val);
                 }

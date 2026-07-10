@@ -12,6 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::dkim;
 use crate::dns;
 use crate::storage::Maildir;
 use crate::util::{self, base64_encode, read_line, write_line, write_raw};
@@ -288,8 +289,13 @@ fn try_deliver(cfg: &Config, msg: &QueueMessage) -> DeliverResult {
         return DeliverResult::PermFail("no recipients".into());
     }
 
+    // DKIM: sign once per message (not per recipient domain) when configured
+    // and the sender domain is local. Signature is applied to a local copy of
+    // the raw body used for this delivery attempt.
+    let raw = dkim_raw_for_send(cfg, msg);
+
     if let Some(ref smarthost) = cfg.smarthost {
-        return deliver_via_smarthost(cfg, msg, smarthost);
+        return deliver_via_smarthost(cfg, msg, smarthost, &raw);
     }
 
     // Direct MX: one SMTP session per recipient domain.
@@ -316,7 +322,7 @@ fn try_deliver(cfg: &Config, msg: &QueueMessage) -> DeliverResult {
     }
 
     for (domain, rcpts) in by_domain {
-        match deliver_to_domain(&msg.sender, &rcpts, &msg.raw, &domain, &helo) {
+        match deliver_to_domain(&msg.sender, &rcpts, &raw, &domain, &helo) {
             DeliverResult::Success => any_ok = true,
             DeliverResult::TempFail { reason, .. } => {
                 remaining.extend(rcpts);
@@ -355,7 +361,12 @@ fn try_deliver(cfg: &Config, msg: &QueueMessage) -> DeliverResult {
     )
 }
 
-fn deliver_via_smarthost(cfg: &Config, msg: &QueueMessage, smarthost: &str) -> DeliverResult {
+fn deliver_via_smarthost(
+    cfg: &Config,
+    msg: &QueueMessage,
+    smarthost: &str,
+    raw: &[u8],
+) -> DeliverResult {
     let addr = match resolve_socket_addrs(smarthost) {
         Ok(a) => a,
         Err(e) => {
@@ -368,7 +379,7 @@ fn deliver_via_smarthost(cfg: &Config, msg: &QueueMessage, smarthost: &str) -> D
         &helo_name(cfg),
         &msg.sender,
         &msg.recipients,
-        &msg.raw,
+        raw,
         cfg.smarthost_user.as_deref(),
         cfg.smarthost_pass.as_deref(),
     ) {
@@ -377,6 +388,58 @@ fn deliver_via_smarthost(cfg: &Config, msg: &QueueMessage, smarthost: &str) -> D
         Err(SmtpError::Perm(s)) => DeliverResult::PermFail(s),
         Err(SmtpError::Io(s)) => temp_fail(s, msg.recipients.clone()),
     }
+}
+
+/// If DKIM is configured and the sender is in a local domain, return the raw
+/// message with a DKIM-Signature header prepended. Otherwise return a clone
+/// of the original. Already-signed messages are left unchanged.
+fn dkim_raw_for_send(cfg: &Config, msg: &QueueMessage) -> Vec<u8> {
+    if has_dkim_signature(&msg.raw) {
+        return msg.raw.clone();
+    }
+    let key = match cfg.dkim_key.as_ref() {
+        Some(k) => k,
+        None => return msg.raw.clone(),
+    };
+    let (_, domain) = util::parse_email_addr(&msg.sender);
+    if domain.is_empty() || !cfg.is_our_domain(&domain) {
+        return msg.raw.clone();
+    }
+    match dkim::sign_and_prepend(&msg.raw, &domain, &cfg.dkim_selector, key) {
+        Some(signed) => {
+            util::log!("queue: DKIM-signed {} (d={}, s={})", msg.id, domain, cfg.dkim_selector);
+            signed
+        }
+        None => {
+            util::log!("queue: DKIM sign failed for {}, sending unsigned", msg.id);
+            msg.raw.clone()
+        }
+    }
+}
+
+fn has_dkim_signature(raw: &[u8]) -> bool {
+    // Scan header block only (before blank line)
+    let end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .or_else(|| raw.windows(2).position(|w| w == b"\n\n"))
+        .unwrap_or(raw.len());
+    let hdr = &raw[..end];
+    let mut i = 0;
+    while i + 15 <= hdr.len() {
+        if hdr[i..].len() >= 15
+            && hdr[i..i + 15].eq_ignore_ascii_case(b"DKIM-Signature:")
+        {
+            return true;
+        }
+        // next line
+        if let Some(rel) = hdr[i..].iter().position(|&b| b == b'\n') {
+            i += rel + 1;
+        } else {
+            break;
+        }
+    }
+    false
 }
 
 /// EHLO/HELO name: first configured domain, falling back to a placeholder.

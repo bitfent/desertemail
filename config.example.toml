@@ -23,6 +23,12 @@ catch_all = true
 # Default password for auto-created catch-all mailboxes (change me!)
 default_password = "changeme"
 
+# Optional DKIM signing for outbound mail (rsa-sha256, relaxed/relaxed).
+# Generate a key: openssl genrsa -out dkim.pem 2048
+# Publish DNS:    desertemail --dkim-dns example.com
+# dkim_selector = "mail"
+# dkim_key_file = "dkim.pem"
+
 [users]
 # local-part or full address = "password"
 # Passwords are stored in plain text for simplicity in this zero-dep version.
