@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DesertEmail Docs — install, config, security</title>
+<meta name="description" content="What DesertEmail installs, how to configure it, DNS setup, security notes, and FAQ.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2012%2016'%20shape-rendering='crispEdges'%3E%3Crect%20x='6'%20y='0'%20width='1'%20height='1'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='3'%20height='15'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='1'%20height='15'%20fill='%23FFB03A'/%3E%3Crect%20x='7'%20y='1'%20width='1'%20height='15'%20fill='%23B35E00'/%3E%3Crect%20x='1'%20y='4'%20width='2'%20height='5'%20fill='%23E8850C'/%3E%3Crect%20x='1'%20y='4'%20width='1'%20height='5'%20fill='%23FFB03A'/%3E%3Crect%20x='3'%20y='7'%20width='2'%20height='2'%20fill='%23E8850C'/%3E%3Crect%20x='3'%20y='8'%20width='2'%20height='1'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='2'%20height='6'%20fill='%23E8850C'/%3E%3Crect%20x='10'%20y='5'%20width='1'%20height='6'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='1'%20height='1'%20fill='%23FFB03A'/%3E%3Crect%20x='8'%20y='9'%20width='1'%20height='2'%20fill='%23E8850C'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f5e3c0;
+    --panel: #fdf3dd;
+    --ink: #3a2410;
+    --muted: #7a5c38;
+    --accent: #e8850c;
+    --accent-dark: #b35e00;
+    --accent-light: #ffb03a;
+    --border: #3a2410;
+    --code-bg: #2a1a08;
+    --code-ink: #ffd591;
+    --nav-h: 56px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17110a;
+      --panel: #211809;
+      --ink: #f2e3c8;
+      --muted: #b99a6e;
+      --accent: #e8850c;
+      --accent-dark: #B35E00;
+      --accent-light: #ffb03a;
+      --border: #e8850c;
+      --code-bg: #0d0904;
+      --code-ink: #ffd591;
+    }
+  }
+  * { box-sizing: border-box; }
+  html {
+    -webkit-text-size-adjust: 100%;
+    overflow-x: hidden;
+    scroll-behavior: smooth;
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Courier New", Courier, ui-monospace, monospace;
+    font-size: 16px;
+    line-height: 1.65;
+    image-rendering: pixelated;
+    overflow-x: hidden;
+  }
+
+  /* --- sticky navbar ---------------------------------------------------- */
+  .site-nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--panel);
+    border-bottom: 4px solid var(--border);
+    box-shadow: 0 4px 0 0 var(--accent-dark);
+  }
+  .site-nav-inner {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 1rem;
+    min-height: var(--nav-h);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.85rem;
+    color: var(--ink);
+    border-bottom: none;
+    text-decoration: none;
+  }
+  .nav-brand:hover { background: transparent; color: var(--ink); }
+  .nav-logo { width: 22px; height: 29px; flex: none; display: block; }
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem 1rem;
+    margin-left: auto;
+    list-style: none;
+    padding: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+  }
+  .nav-links li { margin: 0; }
+  .nav-links li::before { content: none; }
+  .nav-links a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0.2rem 0.15rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.78rem;
+    color: var(--ink);
+    border-bottom: 3px solid transparent;
+    text-decoration: none;
+  }
+  .nav-links a:hover,
+  .nav-links a.is-current {
+    background: transparent;
+    color: var(--accent-dark);
+    border-bottom-color: var(--accent);
+  }
+  @media (prefers-color-scheme: dark) {
+    .nav-links a:hover,
+    .nav-links a.is-current { color: var(--accent-light); }
+  }
+  .nav-toggle {
+    display: none;
+    margin-left: auto;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 1.25rem;
+    line-height: 1;
+    color: var(--ink);
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 3px 3px 0 0 var(--accent-dark);
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .nav-toggle:hover { background: var(--accent-light); color: #2a1a08; }
+  .nav-toggle:active { transform: translate(2px, 2px); box-shadow: none; }
+
+  @media (max-width: 700px) {
+    .nav-toggle { display: inline-flex; align-items: center; justify-content: center; }
+    .nav-links {
+      display: none;
+      flex-direction: column;
+      align-items: stretch;
+      width: 100%;
+      margin-left: 0;
+      margin-bottom: 0.6rem;
+      background: var(--panel);
+      border: 4px solid var(--border);
+      box-shadow: 4px 4px 0 0 var(--accent-dark);
+      padding: 0.35rem 0;
+    }
+    .site-nav.is-open .nav-links { display: flex; }
+    .nav-links a {
+      min-height: 44px;
+      padding: 0.55rem 1rem;
+      border-bottom: none;
+      width: 100%;
+    }
+    .nav-links a:hover,
+    .nav-links a.is-current {
+      background: var(--accent);
+      color: #2a1a08;
+    }
+  }
+
+  /* --- layout ----------------------------------------------------------- */
+  .wrap {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 1.5rem 1rem 4rem;
+    overflow-x: hidden;
+  }
+  .docs-layout {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 1.5rem;
+    align-items: start;
+  }
+  .docs-content { max-width: 70ch; min-width: 0; }
+  .docs-content > .pix-panel:first-child { margin-top: 0; }
+
+  .outline-desktop {
+    position: sticky;
+    top: calc(var(--nav-h) + 12px);
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 6px 6px 0 0 var(--accent-dark);
+    padding: 0.9rem 0.85rem 1rem;
+    font-size: 0.82rem;
+    max-height: calc(100vh - var(--nav-h) - 24px);
+    overflow-y: auto;
+  }
+  .outline-desktop h2 {
+    font-size: 0.72rem;
+    margin: 0 0 0.55rem;
+    color: var(--accent);
+  }
+  .outline-nav { list-style: none; padding: 0; margin: 0; }
+  .outline-nav li { margin: 0.2rem 0; }
+  .outline-nav li::before { content: none; }
+  .outline-nav a {
+    display: block;
+    color: var(--ink);
+    border-bottom: none;
+    font-weight: 700;
+    font-size: 0.78rem;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    padding: 0.2rem 0.35rem;
+    line-height: 1.35;
+  }
+  .outline-nav a:hover { background: var(--accent-light); color: #2a1a08; }
+  .outline-nav a.is-active {
+    background: var(--accent);
+    color: #2a1a08;
+  }
+  .outline-nav .ol-h3 { padding-left: 0.85rem; }
+  .outline-nav .ol-h3 a { font-weight: 600; font-size: 0.74rem; color: var(--muted); }
+  .outline-nav .ol-h3 a.is-active { color: #2a1a08; }
+
+  .outline-mobile {
+    display: none;
+    margin: 0 0 1rem;
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 5px 5px 0 0 var(--accent-dark);
+    padding: 0.65rem 0.85rem;
+  }
+  .outline-mobile summary {
+    cursor: pointer;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-size: 0.85rem;
+    color: var(--accent);
+    list-style: none;
+  }
+  .outline-mobile summary::-webkit-details-marker { display: none; }
+  .outline-mobile .outline-nav { margin-top: 0.55rem; }
+
+  @media (max-width: 860px) {
+    .docs-layout { grid-template-columns: 1fr; }
+    .outline-desktop { display: none; }
+    .outline-mobile { display: block; }
+  }
+
+  /* --- 8-bit chrome ----------------------------------------------------- */
+  .pix-panel {
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 8px 8px 0 0 var(--accent-dark);
+    padding: 1.25rem 1.25rem 1.4rem;
+    margin: 2rem 0;
+  }
+  h1, h2, h3 {
+    font-family: "Courier New", Courier, ui-monospace, monospace;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    line-height: 1.25;
+  }
+  h1 {
+    font-size: 1.65rem;
+    margin: 0.2rem 0 0.5rem;
+    text-shadow: 3px 3px 0 var(--accent-dark);
+  }
+  h2 {
+    font-size: 1.05rem;
+    margin: 0 0 0.8rem;
+    color: var(--accent);
+    scroll-margin-top: calc(var(--nav-h) + 16px);
+  }
+  h2::before { content: "▶ "; color: var(--accent-dark); }
+  h3 {
+    font-size: 0.92rem;
+    margin: 1.1rem 0 0.45rem;
+    color: var(--ink);
+    letter-spacing: 0.08em;
+    scroll-margin-top: calc(var(--nav-h) + 16px);
+  }
+  h3::before { content: "■ "; color: var(--accent); font-size: 0.8em; }
+  p { margin: 0.5rem 0; }
+  .lead { color: var(--muted); max-width: 52ch; }
+  .heading-wrap { position: relative; }
+  .heading-wrap .anchor {
+    position: absolute;
+    left: -1.1em;
+    top: 0;
+    opacity: 0;
+    border-bottom: none;
+    color: var(--muted);
+    font-weight: 700;
+    font-size: 0.9em;
+    padding: 0 0.15rem;
+  }
+  .heading-wrap:hover .anchor,
+  .heading-wrap:focus-within .anchor { opacity: 1; }
+  .heading-wrap .anchor:hover { background: var(--accent); color: #2a1a08; }
+
+  ul { padding-left: 1.1rem; margin: 0.4rem 0; list-style: none; }
+  ul li { margin: 0.35rem 0; }
+  ul li::before { content: "■ "; color: var(--accent); }
+  ol { padding-left: 1.4rem; margin: 0.4rem 0; counter-reset: step; list-style: none; }
+  ol li { margin: 0.55rem 0; counter-increment: step; position: relative; }
+  ol li::before {
+    content: "0" counter(step);
+    color: var(--code-bg);
+    background: var(--accent);
+    font-weight: 700;
+    font-size: 0.75rem;
+    padding: 0.05rem 0.3rem;
+    margin-right: 0.55rem;
+    border: 2px solid var(--border);
+  }
+  code {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 0.08rem 0.35rem;
+    font-size: 0.9em;
+    word-break: break-word;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border: 4px solid var(--border);
+    padding: 0.9rem 1rem;
+    margin: 0.7rem 0;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    white-space: pre;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    font-size: inherit;
+    color: inherit;
+  }
+  .hw-table { width: 100%; border-collapse: collapse; margin-top: 0.4rem; font-size: 0.88rem; }
+  .hw-table th, .hw-table td {
+    border: 3px solid var(--border);
+    padding: 0.45rem 0.55rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .hw-table th {
+    background: var(--accent);
+    color: #2a1a08;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.75rem;
+  }
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .note { color: var(--muted); font-size: 0.9rem; }
+  .warn {
+    border-left: 6px solid var(--accent);
+    padding: 0.55rem 0.75rem;
+    margin: 0.75rem 0;
+    background: var(--panel);
+    border-top: 2px solid var(--border);
+    border-right: 2px solid var(--border);
+    border-bottom: 2px solid var(--border);
+  }
+
+  a { color: var(--accent-dark); text-decoration: none; border-bottom: 3px solid var(--accent); font-weight: 700; }
+  @media (prefers-color-scheme: dark) { a { color: var(--accent-light); } }
+  a:hover { background: var(--accent); color: #2a1a08; }
+
+  .faq dt {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.88rem;
+    margin: 1rem 0 0.25rem;
+    color: var(--accent);
+  }
+  .faq dt::before { content: "Q · "; color: var(--accent-dark); }
+  .faq dd { margin: 0 0 0.35rem; padding: 0; }
+  .faq dd::before { content: "A · "; color: var(--muted); font-weight: 700; }
+
+  footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.9rem; }
+
+  @media (max-width: 480px) {
+    h1 {
+      font-size: clamp(1.15rem, 6vw, 1.65rem);
+      letter-spacing: 0.06em;
+      text-shadow: 2px 2px 0 var(--accent-dark);
+    }
+    .pix-panel {
+      box-shadow: 5px 5px 0 0 var(--accent-dark);
+      padding: 1rem;
+    }
+    .heading-wrap .anchor { position: static; opacity: 0.55; margin-left: 0.25rem; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="site-nav" id="site-nav" aria-label="Site">
+  <div class="site-nav-inner">
+    <a class="nav-brand" href="/">
+      <svg class="nav-logo" viewBox="0 0 12 16" shape-rendering="crispEdges" role="img" aria-hidden="true">
+        <rect x="6" y="0" width="1" height="1" fill="#E8850C"/>
+        <rect x="5" y="1" width="3" height="15" fill="#E8850C"/>
+        <rect x="5" y="1" width="1" height="15" fill="#FFB03A"/>
+        <rect x="7" y="1" width="1" height="15" fill="#B35E00"/>
+        <rect x="1" y="4" width="2" height="5" fill="#E8850C"/>
+        <rect x="1" y="4" width="1" height="5" fill="#FFB03A"/>
+        <rect x="3" y="7" width="2" height="2" fill="#E8850C"/>
+        <rect x="3" y="8" width="2" height="1" fill="#B35E00"/>
+        <rect x="9" y="5" width="2" height="6" fill="#E8850C"/>
+        <rect x="10" y="5" width="1" height="6" fill="#B35E00"/>
+        <rect x="9" y="5" width="1" height="1" fill="#FFB03A"/>
+        <rect x="8" y="9" width="1" height="2" fill="#E8850C"/>
+      </svg>
+      <span>DESERTEMAIL</span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-menu" aria-label="Open menu">☰</button>
+    <ul class="nav-links" id="nav-menu">
+      <li><a href="/">Home</a></li>
+      <li><a href="/#install">Install</a></li>
+      <li><a href="/docs.html" class="is-current" aria-current="page">Docs</a></li>
+      <li><a href="https://github.com/bitfent/desertemail">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="wrap">
+  <header>
+    <h1>Docs</h1>
+    <p class="lead">What gets installed, how the server is wired, every config key, and honest security notes — so you know exactly what you are running.</p>
+  </header>
+
+  <div class="docs-layout">
+    <aside class="outline-desktop" aria-label="On this page">
+      <h2>On this page</h2>
+      <nav class="outline-nav" id="outline-nav"></nav>
+    </aside>
+
+    <div class="docs-content">
+      <details class="outline-mobile">
+        <summary>▶ On this page</summary>
+        <nav class="outline-nav" id="outline-nav-mobile"></nav>
+      </details>
+
+      <section class="pix-panel" aria-labelledby="what-is">
+        <div class="heading-wrap"><h2 id="what-is">What is DesertEmail</h2><a class="anchor" href="#what-is" aria-label="Link to this section">#</a></div>
+        <p>DesertEmail is a <strong>one-binary, pure-Rust email server</strong> written from scratch with the standard library only — <strong>zero crates</strong>. A release build lands around <strong>~300–500&nbsp;KB</strong> stripped (the site advertises ~488&nbsp;KB for current prebuilts).</p>
+        <p>It implements SMTP (inbound + authenticated submission), IMAP, webmail/admin over HTTP, DKIM signing, and an outbound MTA with MX lookup and a disk retry queue — all with plain <strong>threads, not async</strong>.</p>
+        <p>Who it is for:</p>
+        <ul>
+          <li>Self-hosters who want a readable, rsync-friendly Maildir stack</li>
+          <li>Tiny hardware: Pi Zero, 128&nbsp;MB VPS, old netbooks, Termux on a phone</li>
+          <li>Learning email protocols by reading a small codebase</li>
+        </ul>
+        <p class="note">It is deliberately minimal. See <a href="#security">Security notes</a> before putting it on the public internet.</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="installed">
+        <div class="heading-wrap"><h2 id="installed">What gets installed on your machine</h2><a class="anchor" href="#installed" aria-label="Link to this section">#</a></div>
+        <p>Default prefix is <code>~/.desertemail</code> (override with <code>DESERTEMAIL_PREFIX</code>). On Windows: <code>%USERPROFILE%\.desertemail</code>.</p>
+        <ul>
+          <li><strong>Binary</strong> — <code>$PREFIX/bin/desertemail</code> (Windows: <code>desertemail.exe</code>)</li>
+          <li><strong>Config</strong> — <code>$PREFIX/config.toml</code> (mode <code>0600</code> when the OS allows)</li>
+          <li><strong>Optional DKIM key</strong> — <code>$PREFIX/dkim.pem</code> if you enable DKIM during the wizard</li>
+          <li><strong>Mail data</strong> — Maildirs under <code>$PREFIX/data</code> by default (or <code>DESERTEMAIL_DATA_DIR</code>)</li>
+          <li><strong>PATH block</strong> — one block appended to your shell rc (zsh/bash/fish/<code>.profile</code>). Markers are literal:</li>
+        </ul>
+        <pre><code># >>> desertemail PATH >>>
+export PATH="$HOME/.desertemail/bin:$PATH"
+# &lt;&lt;&lt; desertemail PATH &lt;&lt;&lt;</code></pre>
+        <p class="note">Fish uses <code>set -gx PATH …</code> between the same markers. Windows adds the bin directory to the <strong>user PATH</strong> via the registry (no shell-rc markers).</p>
+        <ul>
+          <li><strong>Optional systemd unit</strong> — <code>/etc/systemd/system/desertemail.service</code> only if you opt in (Linux with systemd). The installer uses <code>sudo</code> only when installing that unit and you are not root.</li>
+        </ul>
+        <p><strong>Safety guarantees of the installer:</strong></p>
+        <ul>
+          <li>Downloads from this site’s <code>/bin/</code> and verifies <strong>SHA-256</strong> against <code>/bin/SHA256SUMS</code> when present (mismatch aborts; missing sums file warns and continues)</li>
+          <li>Never runs <code>sudo</code> without a reason (systemd unit only) and, interactively, only after you ask for the unit</li>
+          <li>Re-runs <strong>never overwrite</strong> an existing <code>config.toml</code> without asking (non-interactive re-runs keep the existing config)</li>
+        </ul>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="uninstall">
+        <div class="heading-wrap"><h2 id="uninstall">How to uninstall</h2><a class="anchor" href="#uninstall" aria-label="Link to this section">#</a></div>
+        <ol>
+          <li>Stop the process (or <code>systemctl stop desertemail</code> if you installed the unit).</li>
+          <li>Delete the prefix directory: <code>rm -rf ~/.desertemail</code> (or your <code>DESERTEMAIL_PREFIX</code>).</li>
+          <li>Remove the PATH block between the markers in your shell rc (or remove the user PATH entry on Windows).</li>
+          <li>If installed: <code>sudo systemctl disable --now desertemail</code> and <code>sudo rm /etc/systemd/system/desertemail.service</code>, then <code>sudo systemctl daemon-reload</code>.</li>
+        </ol>
+        <p>That is a complete removal. There are no other system packages, launch agents, or hidden services.</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="architecture">
+        <div class="heading-wrap"><h2 id="architecture">Architecture</h2><a class="anchor" href="#architecture" aria-label="Link to this section">#</a></div>
+        <p>One process starts five cooperating pieces (threads, shared config):</p>
+        <ol>
+          <li><strong>SMTP inbound</strong> — default high port <code>0.0.0.0:2525</code> (real-world: 25)</li>
+          <li><strong>SMTP submission</strong> — authenticated clients, default <code>0.0.0.0:2587</code> (real: 587)</li>
+          <li><strong>IMAP</strong> — default <code>0.0.0.0:2143</code> (real: 143)</li>
+          <li><strong>Webmail + admin</strong> — HTTP/1.1 on <code>0.0.0.0:8080</code> (empty <code>web_listen</code> disables it)</li>
+          <li><strong>Outbound queue worker</strong> — disk queue under <code>data_dir/queue</code>, MX/A lookup over UDP (or optional smarthost), exponential backoff <strong>1m → 5m → 15m → 1h → 4h</strong>, bounce after <strong>24h</strong>, optional DKIM signing</li>
+        </ol>
+        <pre><code> Internet / peers          Clients (MUA / browser)
+        |                           |
+        v                           v
+   [ SMTP :25 ]            [ submission :587 ]
+        |                    [ IMAP :143 ]
+        |                    [ web  :8080 ]
+        v                           |
+   +-----------+                    |
+   |  Maildir  | &lt;------------------+
+   |  storage  |
+   +-----------+
+        |
+        v
+   [ queue worker ] --MX/smarthost--&gt; remote MTAs
+        |
+     DKIM sign (optional)</code></pre>
+        <p class="note">Storage is classic Maildir (<code>cur/</code> <code>new/</code> <code>tmp/</code>) per mailbox under <code>data_dir</code>. Easy to back up or rsync.</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="config">
+        <div class="heading-wrap"><h2 id="config">Configuration reference</h2><a class="anchor" href="#config" aria-label="Link to this section">#</a></div>
+        <p>Config is a hand-parsed TOML-like file (<code>key = "value"</code>, simple lists, <code>[users]</code> section). Defaults below match <code>src/config.rs</code> <code>Default</code>.</p>
+        <div class="heading-wrap"><h3 id="config-keys">Keys</h3><a class="anchor" href="#config-keys" aria-label="Link to this section">#</a></div>
+        <div class="table-scroll">
+          <table class="hw-table">
+            <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>domains</code></td><td>list of strings</td><td><code>["localhost"]</code></td><td>Domains this server accepts mail for</td></tr>
+              <tr><td><code>data_dir</code></td><td>string</td><td><code>"./data"</code></td><td>Maildir + queue root (absolute path recommended)</td></tr>
+              <tr><td><code>smtp_listen</code></td><td>string</td><td><code>"0.0.0.0:2525"</code></td><td>Inbound SMTP bind address</td></tr>
+              <tr><td><code>submission_listen</code></td><td>string</td><td><code>"0.0.0.0:2587"</code></td><td>Authenticated submission bind</td></tr>
+              <tr><td><code>imap_listen</code></td><td>string</td><td><code>"0.0.0.0:2143"</code></td><td>IMAP bind address</td></tr>
+              <tr><td><code>web_listen</code></td><td>string</td><td><code>"0.0.0.0:8080"</code></td><td>Webmail/admin HTTP bind; empty string disables</td></tr>
+              <tr><td><code>admin_user</code></td><td>string / unset</td><td>unset</td><td>Login name allowed on <code>/admin</code>; empty/unset disables admin</td></tr>
+              <tr><td><code>smarthost</code></td><td>optional string</td><td>none</td><td>Relay host:port when direct MX/port 25 is unavailable</td></tr>
+              <tr><td><code>smarthost_user</code></td><td>optional string</td><td>none</td><td>AUTH user for smarthost</td></tr>
+              <tr><td><code>smarthost_pass</code></td><td>optional string</td><td>none</td><td>AUTH password for smarthost</td></tr>
+              <tr><td><code>catch_all</code></td><td>bool</td><td><code>true</code></td><td>Accept any local-part@domain and auto-create mailbox</td></tr>
+              <tr><td><code>default_password</code></td><td>string</td><td><code>"changeme"</code></td><td>Password for catch-all / auto-created mailboxes</td></tr>
+              <tr><td><code>dkim_selector</code></td><td>string</td><td><code>"mail"</code></td><td>DKIM selector; DNS name is <code>&lt;selector&gt;._domainkey.&lt;domain&gt;</code></td></tr>
+              <tr><td><code>dkim_key_file</code></td><td>optional string</td><td>none</td><td>Path to PEM RSA private key for signing</td></tr>
+              <tr><td><code>[users]</code></td><td>map</td><td>empty</td><td><code>"local"</code> or <code>"user@domain"</code> = plaintext password</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="heading-wrap"><h3 id="config-example">Annotated example</h3><a class="anchor" href="#config-example" aria-label="Link to this section">#</a></div>
+        <pre><code># Domains this server accepts (MX should point here)
+domains = ["example.com", "mail.example.com"]
+
+data_dir = "/home/you/.desertemail/data"
+
+# High ports = no root. Real mail uses 25/587/143 (+ TLS wrapper).
+smtp_listen = "0.0.0.0:2525"
+submission_listen = "0.0.0.0:2587"
+imap_listen = "0.0.0.0:2143"
+
+web_listen = "0.0.0.0:8080"
+admin_user = "postmaster"
+
+# Optional: when outbound port 25 is blocked
+# smarthost = "smtp.example.com:587"
+# smarthost_user = "you@example.com"
+# smarthost_pass = "app-password"
+
+catch_all = true
+default_password = "changeme"   # change this!
+
+# openssl genrsa -out dkim.pem 2048
+# desertemail --dkim-dns example.com
+# dkim_selector = "mail"
+# dkim_key_file = "dkim.pem"
+
+[users]
+"alice" = "alicepass"
+"bob" = "bobpass"
+"postmaster" = "adminpass"</code></pre>
+        <p class="note">CLI: <code>desertemail --config path/to/config.toml</code> (or <code>-c</code>). Help: <code>--help</code> / <code>-h</code>. DKIM DNS helper: <code>desertemail --dkim-dns &lt;domain&gt; [--config path]</code>.</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="dns">
+        <div class="heading-wrap"><h2 id="dns">DNS setup</h2><a class="anchor" href="#dns" aria-label="Link to this section">#</a></div>
+        <ol>
+          <li><strong>A / AAAA</strong> — hostname of your mail server (e.g. <code>mail.example.com</code>) → public IP (DynDNS is fine for home).</li>
+          <li><strong>MX</strong> — <code>example.com</code> → <code>mail.example.com</code> (priority 10 is typical).</li>
+          <li><strong>SPF (TXT)</strong> — e.g. <code>v=spf1 mx a:mail.example.com ~all</code>.</li>
+          <li><strong>DKIM (TXT)</strong> — generate a key, set <code>dkim_key_file</code> / <code>dkim_selector</code>, then:
+            <pre><code>desertemail --dkim-dns example.com --config ~/.desertemail/config.toml</code></pre>
+            Publish the printed TXT at <code>&lt;selector&gt;._domainkey.example.com</code>.
+          </li>
+        </ol>
+        <p><strong>rDNS / PTR:</strong> many receivers check that your sending IP’s reverse DNS matches a sensible hostname. On a VPS, set PTR to your mail hostname when the provider allows it. Home ISPs rarely give you useful PTR.</p>
+        <p class="warn"><strong>Port 25:</strong> residential ISPs often block outbound 25. Receiving may still work with port-forward; for sending use a <strong>smarthost</strong> in config or host on a VPS with open egress on 25.</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="installers">
+        <div class="heading-wrap"><h2 id="installers">The installers</h2><a class="anchor" href="#installers" aria-label="Link to this section">#</a></div>
+        <p>Platform installers are generated from <code>installers/template.sh</code> (and a PowerShell / build-from-source sibling). There is <strong>no platform auto-detection</strong> and <strong>no GitHub Releases API</strong> in the install path — you pick a button; the script downloads <code>/bin/desertemail-&lt;rust-triple&gt;</code> from this site.</p>
+        <div class="heading-wrap"><h3 id="installers-flow">What each run does</h3><a class="anchor" href="#installers-flow" aria-label="Link to this section">#</a></div>
+        <ol>
+          <li>Download the binary for the fixed target triple baked into that script</li>
+          <li>Verify SHA-256 against <code>/bin/SHA256SUMS</code> when available</li>
+          <li>Install under <code>$PREFIX/bin</code> and append the PATH block (idempotent markers)</li>
+          <li>Run the wizard (or env defaults in non-interactive mode)</li>
+          <li>Write <code>config.toml</code> if missing / if you confirm overwrite</li>
+          <li>Optionally install systemd unit (Linux only)</li>
+          <li>Print start command and DNS/DKIM hints</li>
+        </ol>
+        <div class="heading-wrap"><h3 id="installers-wizard">Wizard questions</h3><a class="anchor" href="#installers-wizard" aria-label="Link to this section">#</a></div>
+        <ul>
+          <li>Primary domain</li>
+          <li>Admin username</li>
+          <li>Admin password (hidden input; Enter generates a random one)</li>
+          <li>Data directory</li>
+          <li>Enable webmail? (Y/N)</li>
+          <li>Port set: high (2525/2587/2143) or privileged (25/587/143)</li>
+          <li>Enable DKIM signing? (needs <code>openssl</code> for keygen)</li>
+          <li>Overwrite existing config? (only if present)</li>
+          <li>Install systemd unit? (Linux with systemd)</li>
+        </ul>
+        <div class="heading-wrap"><h3 id="installers-env">Env vars (headless / CI)</h3><a class="anchor" href="#installers-env" aria-label="Link to this section">#</a></div>
+        <p>Use <code>DESERTEMAIL_NONINTERACTIVE=1</code> with optional overrides:</p>
+        <div class="table-scroll">
+          <table class="hw-table">
+            <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td><code>DESERTEMAIL_NONINTERACTIVE=1</code></td><td>Skip prompts; use defaults / other env vars</td></tr>
+              <tr><td><code>DESERTEMAIL_PREFIX</code></td><td>Install root (default <code>~/.desertemail</code>)</td></tr>
+              <tr><td><code>DESERTEMAIL_DOMAIN</code></td><td>Primary domain (default <code>localhost</code>)</td></tr>
+              <tr><td><code>DESERTEMAIL_ADMIN_USER</code></td><td>Admin / first user (default <code>admin</code>)</td></tr>
+              <tr><td><code>DESERTEMAIL_ADMIN_PASSWORD</code></td><td>Admin password (else random)</td></tr>
+              <tr><td><code>DESERTEMAIL_DATA_DIR</code></td><td>Maildir root (default <code>$PREFIX/data</code>)</td></tr>
+              <tr><td><code>DESERTEMAIL_WEBMAIL</code></td><td><code>1</code>/<code>0</code> — enable web UI (default on)</td></tr>
+              <tr><td><code>DESERTEMAIL_PORTS</code></td><td><code>high</code> or <code>privileged</code></td></tr>
+              <tr><td><code>DESERTEMAIL_DKIM</code></td><td><code>1</code>/<code>0</code> — generate/use DKIM key</td></tr>
+              <tr><td><code>DESERTEMAIL_SYSTEMD</code></td><td><code>1</code>/<code>0</code> — install unit (POSIX only; Windows has no systemd)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>curl -fsSL https://YOUR-SITE/install-linux-x86_64.sh \
+  | DESERTEMAIL_NONINTERACTIVE=1 DESERTEMAIL_DOMAIN=example.com sh</code></pre>
+        <div class="heading-wrap"><h3 id="installers-platforms">Platforms, Windows, Termux, source</h3><a class="anchor" href="#installers-platforms" aria-label="Link to this section">#</a></div>
+        <ul>
+          <li><strong>Linux</strong> x86_64 / arm64 / armv7 / armv6 (musl static) — <code>curl … | sh</code></li>
+          <li><strong>macOS</strong> Apple Silicon &amp; Intel — same curl form</li>
+          <li><strong>Windows</strong> — <code>irm https://YOUR-SITE/install-windows.ps1 | iex</code> (or Bypass if execution policy blocks). Installs <code>desertemail.exe</code>, verifies with <code>Get-FileHash</code>, user PATH entry</li>
+          <li><strong>Android (Termux)</strong> — use the Linux ARM64 installer after <code>pkg install curl openssl</code> (F-Droid Termux). High ports need no root</li>
+          <li><strong>Build from source</strong> — needs <code>git</code> + Rust toolchain (<code>cargo build --release</code>); use when no prebuilt matches your machine</li>
+        </ul>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="security">
+        <div class="heading-wrap"><h2 id="security">Security notes &amp; current limitations</h2><a class="anchor" href="#security" aria-label="Link to this section">#</a></div>
+        <p>DesertEmail is an <strong>educational / personal-use</strong> MVP — not a hardened production MTA. Be explicit about what it does <em>not</em> do yet.</p>
+        <ul>
+          <li><strong>No built-in TLS / STARTTLS.</strong> Put stunnel, Caddy, or socat in front (or only expose high ports on localhost). Example stunnel idea: wrap local <code>2525</code>/<code>2587</code>/<code>2143</code> to public 465/587/993-style endpoints; or terminate TLS on a reverse proxy for webmail on 8080.</li>
+          <li><strong>Passwords are plaintext in <code>config.toml</code>.</strong> Keep the file <code>chmod 600</code> and treat the prefix as secret. Hashing is planned, not present.</li>
+          <li><strong>Catch-all + <code>default_password</code>:</strong> with <code>catch_all = true</code>, any local-part authenticates with the default password. That is convenient for demos and dangerous if left as <code>changeme</code> on the internet.</li>
+          <li><strong>Webmail sessions:</strong> cookie is <code>HttpOnly</code>, <code>SameSite=Lax</code>; tokens are derived from OS CSPRNG material (not just timestamp/PID).</li>
+          <li><strong>DKIM:</strong> pure-std RSA-SHA256, relaxed/relaxed; signing path verified against <code>dkimpy</code> in project tests.</li>
+          <li><strong>Missing for “real MTA” use:</strong> no spam filter, limited IMAP surface, no rate limiting, no Let’s Encrypt automation until TLS lands in-process.</li>
+        </ul>
+        <p class="warn">If you need a production mail gateway today, use Postfix/OpenSMTPD/etc. Use DesertEmail when you want ownership, tiny footprint, and a codebase you can actually finish reading.</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="faq">
+        <div class="heading-wrap"><h2 id="faq">FAQ</h2><a class="anchor" href="#faq" aria-label="Link to this section">#</a></div>
+        <dl class="faq">
+          <dt>Will Gmail accept my mail?</dt>
+          <dd>Maybe. SPF + DKIM + sensible rDNS help a lot. New or residential IPs still have low reputation; expect spam folders or rejects until reputation builds — or send via a smarthost with good standing.</dd>
+          <dt>Can I run it on my phone?</dt>
+          <dd>Yes on Termux (Android): Linux ARM64 musl binary, high ports, no root required for that port set.</dd>
+          <dt>My ISP blocks port 25 — can I still send?</dt>
+          <dd>Set <code>smarthost</code> / <code>smarthost_user</code> / <code>smarthost_pass</code>, or host on a VPS with open egress. Inbound may still work with port-forward if you have a public IP.</dd>
+          <dt>Multiple domains?</dt>
+          <dd>Yes — list them in <code>domains = ["a.com", "b.com"]</code>. Users can be local-parts or full addresses.</dd>
+          <dt>Where is mail stored?</dt>
+          <dd>Maildir trees under <code>data_dir</code> (default <code>~/.desertemail/data</code>). Rsync-friendly; queue lives in <code>data_dir/queue</code>.</dd>
+          <dt>How do I update?</dt>
+          <dd>Re-run the same installer. Binary is replaced; existing config is kept unless you explicitly overwrite.</dd>
+          <dt>Is Windows supported?</dt>
+          <dd>Yes: MSVC <code>.exe</code> + PowerShell installer. Maildir uses NTFS-safe naming (<code>!2,</code> instead of <code>:2,</code> in filenames).</dd>
+          <dt>Does the installer call GitHub?</dt>
+          <dd>No. Binaries and checksums come from this site under <code>/bin/</code>. Source is on GitHub if you want to read or build it.</dd>
+        </dl>
+      </section>
+
+      <footer>
+        <p>Source: <a href="https://github.com/bitfent/desertemail">github.com/bitfent/desertemail</a></p>
+        <p>Binaries are served from this site under <code>/bin/</code>; source lives on GitHub.</p>
+      </footer>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var nav = document.getElementById("site-nav");
+  var toggle = document.getElementById("nav-toggle");
+  if (toggle && nav) {
+    toggle.addEventListener("click", function () {
+      var open = !nav.classList.contains("is-open");
+      nav.classList.toggle("is-open", open);
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      toggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+    });
+  }
+
+  var content = document.querySelector(".docs-content");
+  if (!content) return;
+  var heads = content.querySelectorAll("h2[id], h3[id]");
+  var desktop = document.getElementById("outline-nav");
+  var mobile = document.getElementById("outline-nav-mobile");
+  var items = [];
+  var i, h, li, a, id, label, isH3;
+
+  for (i = 0; i < heads.length; i++) {
+    h = heads[i];
+    id = h.id;
+    label = (h.textContent || "").replace(/^[\u25B6\u25A0]\s*/, "").trim();
+    isH3 = h.tagName === "H3";
+    li = document.createElement("li");
+    if (isH3) li.className = "ol-h3";
+    a = document.createElement("a");
+    a.href = "#" + id;
+    a.textContent = label;
+    a.setAttribute("data-id", id);
+    li.appendChild(a);
+    if (desktop) desktop.appendChild(li);
+    if (mobile) mobile.appendChild(li.cloneNode(true));
+    items.push({ id: id, el: h });
+  }
+
+  function setActive(id) {
+    var links = document.querySelectorAll(".outline-nav a");
+    var j;
+    for (j = 0; j < links.length; j++) {
+      if (links[j].getAttribute("data-id") === id) {
+        links[j].classList.add("is-active");
+      } else {
+        links[j].classList.remove("is-active");
+      }
+    }
+  }
+
+  if (typeof IntersectionObserver === "function" && items.length) {
+    var visible = {};
+    var obs = new IntersectionObserver(function (entries) {
+      var k, best, bestTop, el, rect;
+      for (k = 0; k < entries.length; k++) {
+        if (entries[k].isIntersecting) {
+          visible[entries[k].target.id] = true;
+        } else {
+          delete visible[entries[k].target.id];
+        }
+      }
+      best = null;
+      bestTop = Infinity;
+      for (k = 0; k < items.length; k++) {
+        if (!visible[items[k].id]) continue;
+        el = items[k].el;
+        rect = el.getBoundingClientRect();
+        if (rect.top < bestTop) {
+          bestTop = rect.top;
+          best = items[k].id;
+        }
+      }
+      if (best) setActive(best);
+    }, { rootMargin: "-20% 0px -60% 0px", threshold: [0, 0.25, 0.5, 1] });
+    for (i = 0; i < items.length; i++) obs.observe(items[i].el);
+  }
+
+  document.addEventListener("click", function (ev) {
+    var t = ev.target;
+    if (t && t.closest && t.closest(".outline-nav a") && nav) {
+      nav.classList.remove("is-open");
+      if (toggle) {
+        toggle.setAttribute("aria-expanded", "false");
+        toggle.setAttribute("aria-label", "Open menu");
+      }
+    }
+  });
+})();
+</script>
+</body>
+</html>

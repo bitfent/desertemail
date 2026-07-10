@@ -33,8 +33,13 @@
       --code-ink: #ffd591;
     }
   }
+  :root { --nav-h: 56px; }
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; overflow-x: hidden; }
+  html {
+    -webkit-text-size-adjust: 100%;
+    overflow-x: hidden;
+    scroll-behavior: smooth;
+  }
   body {
     margin: 0;
     background: var(--bg);
@@ -46,6 +51,121 @@
     overflow-x: hidden;
   }
   .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; overflow-x: hidden; }
+
+  /* --- sticky navbar ---------------------------------------------------- */
+  .site-nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--panel);
+    border-bottom: 4px solid var(--border);
+    box-shadow: 0 4px 0 0 var(--accent-dark);
+  }
+  .site-nav-inner {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 0 1rem;
+    min-height: var(--nav-h);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.85rem;
+    color: var(--ink);
+    border-bottom: none;
+    text-decoration: none;
+  }
+  .nav-brand:hover { background: transparent; color: var(--ink); }
+  .nav-logo { width: 22px; height: 29px; flex: none; display: block; }
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem 1rem;
+    margin-left: auto;
+    list-style: none;
+    padding: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+  }
+  .nav-links li { margin: 0; }
+  .nav-links li::before { content: none; }
+  .nav-links a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0.2rem 0.15rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.78rem;
+    color: var(--ink);
+    border-bottom: 3px solid transparent;
+    text-decoration: none;
+  }
+  .nav-links a:hover,
+  .nav-links a.is-current {
+    background: transparent;
+    color: var(--accent-dark);
+    border-bottom-color: var(--accent);
+  }
+  @media (prefers-color-scheme: dark) {
+    .nav-links a:hover,
+    .nav-links a.is-current { color: var(--accent-light); }
+  }
+  .nav-toggle {
+    display: none;
+    margin-left: auto;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 1.25rem;
+    line-height: 1;
+    color: var(--ink);
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 3px 3px 0 0 var(--accent-dark);
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .nav-toggle:hover { background: var(--accent-light); color: #2a1a08; }
+  .nav-toggle:active { transform: translate(2px, 2px); box-shadow: none; }
+
+  @media (max-width: 700px) {
+    .nav-toggle { display: inline-flex; align-items: center; justify-content: center; }
+    .nav-links {
+      display: none;
+      flex-direction: column;
+      align-items: stretch;
+      width: 100%;
+      margin-left: 0;
+      margin-bottom: 0.6rem;
+      background: var(--panel);
+      border: 4px solid var(--border);
+      box-shadow: 4px 4px 0 0 var(--accent-dark);
+      padding: 0.35rem 0;
+    }
+    .site-nav.is-open .nav-links { display: flex; }
+    .nav-links a {
+      min-height: 44px;
+      padding: 0.55rem 1rem;
+      border-bottom: none;
+      width: 100%;
+    }
+    .nav-links a:hover,
+    .nav-links a.is-current {
+      background: var(--accent);
+      color: #2a1a08;
+    }
+  }
 
   /* --- 8-bit chrome --------------------------------------------------- */
   .pix-panel {
@@ -63,8 +183,9 @@
     line-height: 1.25;
   }
   h1 { font-size: 2rem; margin: 0.4rem 0 0.2rem; text-shadow: 3px 3px 0 var(--accent-dark); }
-  h2 { font-size: 1.05rem; margin: 0 0 0.8rem; color: var(--accent); }
+  h2 { font-size: 1.05rem; margin: 0 0 0.8rem; color: var(--accent); scroll-margin-top: calc(var(--nav-h) + 16px); }
   h2::before { content: "▶ "; color: var(--accent-dark); }
+  #install { scroll-margin-top: calc(var(--nav-h) + 12px); }
   p { margin: 0.5rem 0; }
   .tagline { color: var(--muted); max-width: 46ch; }
 
@@ -205,6 +326,36 @@
 </style>
 </head>
 <body>
+
+<nav class="site-nav" id="site-nav" aria-label="Site">
+  <div class="site-nav-inner">
+    <a class="nav-brand" href="/">
+      <svg class="nav-logo" viewBox="0 0 12 16" shape-rendering="crispEdges" role="img" aria-hidden="true">
+        <rect x="6" y="0" width="1" height="1" fill="#E8850C"/>
+        <rect x="5" y="1" width="3" height="15" fill="#E8850C"/>
+        <rect x="5" y="1" width="1" height="15" fill="#FFB03A"/>
+        <rect x="7" y="1" width="1" height="15" fill="#B35E00"/>
+        <rect x="1" y="4" width="2" height="5" fill="#E8850C"/>
+        <rect x="1" y="4" width="1" height="5" fill="#FFB03A"/>
+        <rect x="3" y="7" width="2" height="2" fill="#E8850C"/>
+        <rect x="3" y="8" width="2" height="1" fill="#B35E00"/>
+        <rect x="9" y="5" width="2" height="6" fill="#E8850C"/>
+        <rect x="10" y="5" width="1" height="6" fill="#B35E00"/>
+        <rect x="9" y="5" width="1" height="1" fill="#FFB03A"/>
+        <rect x="8" y="9" width="1" height="2" fill="#E8850C"/>
+      </svg>
+      <span>DESERTEMAIL</span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-menu" aria-label="Open menu">☰</button>
+    <ul class="nav-links" id="nav-menu">
+      <li><a href="/" class="is-current" aria-current="page">Home</a></li>
+      <li><a href="/#install">Install</a></li>
+      <li><a href="/docs.html">Docs</a></li>
+      <li><a href="https://github.com/bitfent/desertemail">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
 <div class="wrap">
 
   <header>
@@ -232,7 +383,7 @@
     </div>
   </header>
 
-  <section class="pix-panel" aria-labelledby="install-h">
+  <section class="pix-panel" id="install" aria-labelledby="install-h">
     <h2 id="install-h">Install (pick your platform)</h2>
     <p class="note">Choose your machine — the installer never auto-detects. Prebuilt binaries download from this site; pick <strong>Build from source</strong> if yours is not listed.</p>
     <div class="picker" role="group" aria-label="Platform">
@@ -288,6 +439,7 @@
       <li>Prints the DNS records to publish (MX, SPF, DKIM) so real mailboxes accept your mail</li>
     </ol>
     <p class="note">The wizard is plain POSIX <code>sh</code> (runs on dash/BusyBox); Windows uses a PowerShell variant (<code>irm … | iex</code>). Piped installs stay interactive via <code>/dev/tty</code>; for CI use <code>DESERTEMAIL_NONINTERACTIVE=1</code> with env-var answers. Re-running never clobbers an existing config without asking. Unsupported machines use <strong>Build from source</strong> (needs <code>git</code> + <code>cargo</code>).</p>
+    <p class="note"><a href="/docs.html">Read the full docs →</a></p>
   </section>
 
   <footer>
@@ -298,6 +450,17 @@
 
 <script>
 (function () {
+  var nav = document.getElementById("site-nav");
+  var toggle = document.getElementById("nav-toggle");
+  if (toggle && nav) {
+    toggle.addEventListener("click", function () {
+      var open = !nav.classList.contains("is-open");
+      nav.classList.toggle("is-open", open);
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      toggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+    });
+  }
+
   var pre = document.getElementById("install-cmd");
   var btn = document.getElementById("copy-btn");
   var hint = document.getElementById("install-hint");
