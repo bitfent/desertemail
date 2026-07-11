@@ -18,6 +18,7 @@ use crate::crypto;
 use crate::invites;
 use crate::limits;
 use crate::metrics;
+use crate::passwd;
 use crate::queue;
 use crate::ratelimit;
 use crate::storage::Maildir;
@@ -888,12 +889,12 @@ fn setup_access_ok(cfg: &Config, req: &Request, peer_ip: &str, form_token: Optio
         return false;
     }
     if let Some(t) = form_token {
-        if t == cfg.setup_token {
+        if passwd::ct_eq_str(t, &cfg.setup_token) {
             return true;
         }
     }
     if let Some(t) = req.query.get("setup_token") {
-        if t == &cfg.setup_token {
+        if passwd::ct_eq_str(t, &cfg.setup_token) {
             return true;
         }
     }
@@ -1078,19 +1079,19 @@ fn metrics_authorized(cfg: &Config, req: &Request) -> bool {
         return true;
     }
     if let Some(q) = req.query.get("token") {
-        if q == &cfg.metrics_token {
+        if passwd::ct_eq_str(q, &cfg.metrics_token) {
             return true;
         }
     }
     if let Some(auth) = req.headers.get("authorization") {
         let prefix = "Bearer ";
         if let Some(rest) = auth.strip_prefix(prefix) {
-            if rest == cfg.metrics_token {
+            if passwd::ct_eq_str(rest, &cfg.metrics_token) {
                 return true;
             }
         }
         // Also accept raw token.
-        if auth == &cfg.metrics_token {
+        if passwd::ct_eq_str(auth, &cfg.metrics_token) {
             return true;
         }
     }

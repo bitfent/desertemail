@@ -1,5 +1,12 @@
-//! Password hashing: PBKDF2-HMAC-SHA256 from scratch on crypto::sha256.
+//! Password hashing: PBKDF2-HMAC-SHA256 via ring.
 //! Stored format: `pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>`
+//!
+//! Format and default iteration count are unchanged so existing config.toml
+//! password hashes keep verifying.
+
+use std::num::NonZeroU32;
+
+use ring::pbkdf2;
 
 use crate::crypto;
 use crate::util;
@@ -12,39 +19,7 @@ const DK_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 
 // ---------------------------------------------------------------------------
-// HMAC-SHA256
-// ---------------------------------------------------------------------------
-
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut k = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        let dig = crypto::sha256(key);
-        k[..32].copy_from_slice(&dig);
-    } else {
-        k[..key.len()].copy_from_slice(key);
-    }
-
-    let mut ipad = [0x36u8; BLOCK];
-    let mut opad = [0x5cu8; BLOCK];
-    for i in 0..BLOCK {
-        ipad[i] ^= k[i];
-        opad[i] ^= k[i];
-    }
-
-    let mut inner = Vec::with_capacity(BLOCK + message.len());
-    inner.extend_from_slice(&ipad);
-    inner.extend_from_slice(message);
-    let ih = crypto::sha256(&inner);
-
-    let mut outer = Vec::with_capacity(BLOCK + 32);
-    outer.extend_from_slice(&opad);
-    outer.extend_from_slice(&ih);
-    crypto::sha256(&outer)
-}
-
-// ---------------------------------------------------------------------------
-// PBKDF2-HMAC-SHA256 (RFC 8018)
+// PBKDF2-HMAC-SHA256 (ring)
 // ---------------------------------------------------------------------------
 
 /// Derive `dk_len` bytes with PBKDF2-HMAC-SHA256.
@@ -52,42 +27,33 @@ pub fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len:
     if iterations == 0 || dk_len == 0 {
         return Vec::new();
     }
-    let hlen = 32usize;
-    let n_blocks = (dk_len + hlen - 1) / hlen;
-    let mut dk = Vec::with_capacity(n_blocks * hlen);
-
-    for i in 1u32..=(n_blocks as u32) {
-        let mut msg = Vec::with_capacity(salt.len() + 4);
-        msg.extend_from_slice(salt);
-        msg.extend_from_slice(&i.to_be_bytes());
-
-        let mut u = hmac_sha256(password, &msg);
-        let mut t = u;
-        for _ in 1..iterations {
-            u = hmac_sha256(password, &u);
-            for j in 0..32 {
-                t[j] ^= u[j];
-            }
-        }
-        dk.extend_from_slice(&t);
-    }
-    dk.truncate(dk_len);
-    dk
+    let iters = match NonZeroU32::new(iterations) {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
+    let mut out = vec![0u8; dk_len];
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        iters,
+        salt,
+        password,
+        &mut out,
+    );
+    out
 }
 
 // ---------------------------------------------------------------------------
-// Constant-time compare
+// Constant-time compare (shared helper for tokens/secrets)
 // ---------------------------------------------------------------------------
 
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+/// Constant-time equality of two byte slices. Length mismatch → false.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    crypto::ct_eq(a, b)
+}
+
+/// Constant-time equality of two strings (compared as UTF-8 bytes).
+pub fn ct_eq_str(a: &str, b: &str) -> bool {
+    ct_eq(a.as_bytes(), b.as_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -131,10 +97,10 @@ fn hash_password_with(pass: &str, salt: &[u8], iterations: u32) -> String {
 /// Verify `pass` against a stored value.
 ///
 /// If `stored` does not start with `pbkdf2_sha256$`, treat it as legacy
-/// plaintext (exact compare). Callers should audit/warn about plaintext at startup.
+/// plaintext (constant-time compare). Callers should audit/warn about plaintext at startup.
 pub fn verify_password(stored: &str, pass: &str) -> bool {
     if !stored.starts_with(HASH_PREFIX) {
-        return stored == pass;
+        return ct_eq_str(stored, pass);
     }
     let rest = &stored[HASH_PREFIX.len()..];
     let mut parts = rest.splitn(3, '$');
@@ -154,13 +120,24 @@ pub fn verify_password(stored: &str, pass: &str) -> bool {
         Ok(n) if n > 0 => n,
         _ => return false,
     };
+    let iters = match NonZeroU32::new(iterations) {
+        Some(n) => n,
+        None => return false,
+    };
     let salt = util::base64_decode(salt_b64);
     let expected = util::base64_decode(hash_b64);
     if expected.is_empty() {
         return false;
     }
-    let derived = pbkdf2_hmac_sha256(pass.as_bytes(), &salt, iterations, expected.len());
-    ct_eq(&derived, &expected)
+    // ring's verify is constant-time and re-derives PBKDF2 internally.
+    pbkdf2::verify(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        iters,
+        &salt,
+        pass.as_bytes(),
+        &expected,
+    )
+    .is_ok()
 }
 
 /// True if the stored credential is a modern hash (not legacy plaintext).
@@ -177,7 +154,6 @@ mod tests {
     use super::*;
 
     // Known PBKDF2-HMAC-SHA256 vectors (password="password", salt="salt"):
-    // Common test vectors (32-byte DK) used by many libraries / RFC-style examples.
     // c=1:
     //   120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
     // c=4096:
@@ -191,6 +167,61 @@ mod tests {
                 u8::from_str_radix(&s[i..end], 16).ok()
             })
             .collect()
+    }
+
+    /// Reference PBKDF2-HMAC-SHA256 (hand-rolled) kept only for cross-compat tests.
+    fn pbkdf2_hmac_sha256_legacy(
+        password: &[u8],
+        salt: &[u8],
+        iterations: u32,
+        dk_len: usize,
+    ) -> Vec<u8> {
+        fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+            const BLOCK: usize = 64;
+            let mut k = [0u8; BLOCK];
+            if key.len() > BLOCK {
+                let dig = crypto::sha256(key);
+                k[..32].copy_from_slice(&dig);
+            } else {
+                k[..key.len()].copy_from_slice(key);
+            }
+            let mut ipad = [0x36u8; BLOCK];
+            let mut opad = [0x5cu8; BLOCK];
+            for i in 0..BLOCK {
+                ipad[i] ^= k[i];
+                opad[i] ^= k[i];
+            }
+            let mut inner = Vec::with_capacity(BLOCK + message.len());
+            inner.extend_from_slice(&ipad);
+            inner.extend_from_slice(message);
+            let ih = crypto::sha256(&inner);
+            let mut outer = Vec::with_capacity(BLOCK + 32);
+            outer.extend_from_slice(&opad);
+            outer.extend_from_slice(&ih);
+            crypto::sha256(&outer)
+        }
+        if iterations == 0 || dk_len == 0 {
+            return Vec::new();
+        }
+        let hlen = 32usize;
+        let n_blocks = (dk_len + hlen - 1) / hlen;
+        let mut dk = Vec::with_capacity(n_blocks * hlen);
+        for i in 1u32..=(n_blocks as u32) {
+            let mut msg = Vec::with_capacity(salt.len() + 4);
+            msg.extend_from_slice(salt);
+            msg.extend_from_slice(&i.to_be_bytes());
+            let mut u = hmac_sha256(password, &msg);
+            let mut t = u;
+            for _ in 1..iterations {
+                u = hmac_sha256(password, &u);
+                for j in 0..32 {
+                    t[j] ^= u[j];
+                }
+            }
+            dk.extend_from_slice(&t);
+        }
+        dk.truncate(dk_len);
+        dk
     }
 
     #[test]
@@ -216,6 +247,66 @@ mod tests {
         assert!(verify_password(&stored, "s3cret!"));
         assert!(!verify_password(&stored, "wrong"));
         assert!(!verify_password(&stored, ""));
+    }
+
+    /// Fixed vector generated with the pre-ring (hand-rolled) PBKDF2 path.
+    /// Must keep verifying under ring so existing config.toml hashes stay valid.
+    #[test]
+    fn fixed_stored_hash_from_legacy_path() {
+        // pbkdf2_sha256$1000$dGVzdHNhbHQxMjM0NTY3OA==$CU3ECAVkv4TOapLOjKpPBf89f2vgg8O7y5H52xU+xE4=
+        // password=s3cret!, salt=testsalt12345678, iters=1000
+        let stored = "pbkdf2_sha256$1000$dGVzdHNhbHQxMjM0NTY3OA==$CU3ECAVkv4TOapLOjKpPBf89f2vgg8O7y5H52xU+xE4=";
+        assert!(verify_password(stored, "s3cret!"));
+        assert!(!verify_password(stored, "wrong"));
+    }
+
+    /// Old (legacy) derive must match ring derive; ring verify must accept legacy dk.
+    #[test]
+    fn ring_and_legacy_pbkdf2_cross_compat() {
+        let password = b"cross-compat-pass";
+        let salt = b"fixed-salt-16b!!";
+        let iters = 2_000u32;
+
+        let legacy_dk = pbkdf2_hmac_sha256_legacy(password, salt, iters, 32);
+        let ring_dk = pbkdf2_hmac_sha256(password, salt, iters, 32);
+        assert_eq!(legacy_dk, ring_dk, "ring and legacy PBKDF2 must match byte-for-byte");
+
+        // Ring verify accepts legacy-derived hash.
+        let iters_nz = NonZeroU32::new(iters).unwrap();
+        assert!(pbkdf2::verify(
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            iters_nz,
+            salt,
+            password,
+            &legacy_dk,
+        )
+        .is_ok());
+
+        // Stored-format built from legacy dk verifies via public API (ring).
+        let stored = format!(
+            "{}{}${}${}",
+            HASH_PREFIX,
+            iters,
+            util::base64_encode(salt),
+            util::base64_encode(&legacy_dk)
+        );
+        assert!(verify_password(
+            &stored,
+            std::str::from_utf8(password).unwrap()
+        ));
+
+        // And a hash built by ring verifies the same password.
+        let stored_ring = hash_password_with(
+            std::str::from_utf8(password).unwrap(),
+            salt,
+            iters,
+        );
+        assert!(verify_password(
+            &stored_ring,
+            std::str::from_utf8(password).unwrap()
+        ));
+        // Same salt+iters → identical stored string.
+        assert_eq!(stored, stored_ring);
     }
 
     #[test]
@@ -246,5 +337,7 @@ mod tests {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));
+        assert!(ct_eq_str("token", "token"));
+        assert!(!ct_eq_str("token", "tokem"));
     }
 }

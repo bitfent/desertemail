@@ -23,6 +23,10 @@ path = "src/main.rs"
 
 [dependencies]
 # Explicit ring provider (rustls 0.23 defaults to aws-lc-rs otherwise).
+# ring 0.17 is already pulled in by rustls (see Cargo.lock); declaring it
+# directly adds zero new supply-chain weight and lets us use its audited
+# SHA-256 / HMAC / PBKDF2 / RSA PKCS#1 v1.5 / constant-time compare APIs.
+ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"

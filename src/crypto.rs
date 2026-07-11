@@ -1,109 +1,34 @@
-//! Pure-std cryptography for DKIM: SHA-256, minimal bignum, RSA PKCS#1 v1.5, PEM/DER.
-//! No external crates. Performance is not critical.
+//! Cryptography for DKIM/ACME: SHA-256 via ring, minimal bignum, RSA PKCS#1 v1.5
+//! (sign/verify via ring when possible; hand-rolled keygen + bignum remain).
+//!
+//! ring 0.17 is already compiled into every binary via rustls's "ring" feature;
+//! using it for attacker-facing primitives adds no new supply-chain weight.
 
 use std::fs;
 use std::path::Path;
 
+use ring::digest;
+use ring::rand::SystemRandom;
+use ring::signature::{self, RsaKeyPair};
+
 use crate::util;
 
 // ---------------------------------------------------------------------------
-// SHA-256 (FIPS 180-4)
+// SHA-256 (ring::digest — audited, constant-time implementation)
 // ---------------------------------------------------------------------------
-
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
-];
 
 /// Compute SHA-256 digest of `data`.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    // padded message: data || 0x80 || zeros || 8-byte length
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let mut a = h[0];
-        let mut b = h[1];
-        let mut c = h[2];
-        let mut d = h[3];
-        let mut e = h[4];
-        let mut f = h[5];
-        let mut g = h[6];
-        let mut hh = h[7];
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let t1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA256_K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
+    let dig = digest::digest(&digest::SHA256, data);
     let mut out = [0u8; 32];
-    for (i, &v) in h.iter().enumerate() {
-        out[i * 4..(i + 1) * 4].copy_from_slice(&v.to_be_bytes());
-    }
+    out.copy_from_slice(dig.as_ref());
     out
+}
+
+/// Constant-time equality of two byte slices (via ring). Length mismatch → false.
+#[allow(deprecated)] // ring re-exports constant_time as deprecated_constant_time; still the public API
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    ring::constant_time::verify_slices_are_equal(a, b).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +423,12 @@ const SHA256_DIGESTINFO_PREFIX: &[u8] = &[
     0x05, 0x00, 0x04, 0x20,
 ];
 
-/// RSA private key (n, e, d only; plain modpow signing).
+/// RSA private key (n, e, d + optional CRT factors for ring signing).
+///
+/// Signing prefers ring's constant-time CRT path (requires full PKCS#1 factors).
+/// Keys loaded from OpenSSL PEM already include p/q; pure keygen fills them;
+/// n/e/d-only keys recover primes on demand. ring only signs ≥2048-bit moduli;
+/// smaller legacy keys fall back to hand-rolled modpow (documented below).
 #[derive(Clone, Debug)]
 pub struct RsaKey {
     pub n: BigUint,
@@ -506,6 +436,18 @@ pub struct RsaKey {
     pub d: BigUint,
     /// Modulus size in bytes (k).
     pub k: usize,
+    /// CRT components when known (p > q, dP, dQ, qInv).
+    crt: Option<RsaCrt>,
+}
+
+/// Chinese Remainder Theorem private factors.
+#[derive(Clone, Debug)]
+struct RsaCrt {
+    p: BigUint,
+    q: BigUint,
+    d_p: BigUint,
+    d_q: BigUint,
+    q_inv: BigUint,
 }
 
 impl RsaKey {
@@ -550,20 +492,63 @@ impl RsaKey {
         out
     }
 
-    /// Minimal PKCS#1 RSAPrivateKey DER (version, n, e, d, zeros for p,q,dP,dQ,qInv).
-    /// Enough for our own parser and for rustls-pemfile when wrapped as PEM.
+    /// PKCS#1 RSAPrivateKey DER (version, n, e, d, p, q, dP, dQ, qInv).
+    /// CRT factors are recovered from n/e/d when not already present.
     pub fn to_der_pkcs1(&self) -> Vec<u8> {
+        let crt = self.ensure_crt().ok();
         let mut body = Vec::new();
         body.extend_from_slice(&encode_der_integer(&BigUint::from_u32(0))); // version
         body.extend_from_slice(&encode_der_integer(&self.n));
         body.extend_from_slice(&encode_der_integer(&self.e));
         body.extend_from_slice(&encode_der_integer(&self.d));
-        // p, q, dP, dQ, qInv — use 0 (optional for pure modpow; some parsers require presence)
-        let zero = encode_der_integer(&BigUint::from_u32(0));
-        for _ in 0..5 {
-            body.extend_from_slice(&zero);
+        if let Some(c) = crt {
+            body.extend_from_slice(&encode_der_integer(&c.p));
+            body.extend_from_slice(&encode_der_integer(&c.q));
+            body.extend_from_slice(&encode_der_integer(&c.d_p));
+            body.extend_from_slice(&encode_der_integer(&c.d_q));
+            body.extend_from_slice(&encode_der_integer(&c.q_inv));
+        } else {
+            // Last-resort zeros (cannot feed ring; modpow path still works).
+            let zero = encode_der_integer(&BigUint::from_u32(0));
+            for _ in 0..5 {
+                body.extend_from_slice(&zero);
+            }
         }
         der_tlv(0x30, &body)
+    }
+
+    /// PKCS#8 PrivateKeyInfo DER wrapping PKCS#1 RSAPrivateKey (for ring::RsaKeyPair::from_pkcs8).
+    pub fn to_der_pkcs8(&self) -> Vec<u8> {
+        // AlgorithmIdentifier: rsaEncryption OID 1.2.840.113549.1.1.1 + NULL
+        let oid_rsa = [
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+        ];
+        let mut alg = Vec::new();
+        alg.extend_from_slice(&oid_rsa);
+        alg.extend_from_slice(&[0x05, 0x00]);
+        let alg_seq = der_tlv(0x30, &alg);
+        let pkcs1 = self.to_der_pkcs1();
+        let oct = der_tlv(0x04, &pkcs1);
+        let mut body = Vec::new();
+        body.extend_from_slice(&encode_der_integer(&BigUint::from_u32(0))); // version
+        body.extend_from_slice(&alg_seq);
+        body.extend_from_slice(&oct);
+        der_tlv(0x30, &body)
+    }
+
+    /// Ensure CRT factors exist (parse-time, keygen, or recover from n/e/d).
+    fn ensure_crt(&self) -> Result<RsaCrt, String> {
+        if let Some(ref c) = self.crt {
+            return Ok(c.clone());
+        }
+        recover_crt(&self.n, &self.e, &self.d)
+    }
+
+    fn with_crt_filled(mut self) -> Self {
+        if self.crt.is_none() {
+            self.crt = recover_crt(&self.n, &self.e, &self.d).ok();
+        }
+        self
     }
 
     /// SubjectPublicKeyInfo DER for RSA (needed by PKCS#10 CSR).
@@ -625,13 +610,46 @@ impl RsaKey {
     }
 
     /// RSASSA-PKCS1-v1_5 sign of a raw message (hash is computed here).
+    ///
+    /// Prefers ring's constant-time CRT signer (PKCS#8 DER). ring only accepts
+    /// moduli in [2048, 4096] bits with e ≥ 65537; smaller legacy DKIM keys
+    /// fall back to hand-rolled modpow (`sign_sha256_modpow`).
     pub fn sign_sha256(&self, message: &[u8]) -> Result<Vec<u8>, String> {
-        let hash = sha256(message);
-        self.sign_digest_sha256(&hash)
+        match self.sign_sha256_ring(message) {
+            Ok(sig) => Ok(sig),
+            Err(ring_err) => {
+                // ring rejects <2048-bit keys; keep legacy path for those only.
+                if self.k * 8 < 2048 {
+                    self.sign_sha256_modpow(message)
+                } else {
+                    Err(ring_err)
+                }
+            }
+        }
     }
 
-    /// Sign a precomputed SHA-256 digest (32 bytes).
-    pub fn sign_digest_sha256(&self, hash: &[u8]) -> Result<Vec<u8>, String> {
+    /// ring-backed PKCS#1 v1.5 SHA-256 signature.
+    fn sign_sha256_ring(&self, message: &[u8]) -> Result<Vec<u8>, String> {
+        let pkcs8 = self.to_der_pkcs8();
+        let key_pair = RsaKeyPair::from_pkcs8(&pkcs8)
+            .map_err(|e| format!("ring RSA key rejected: {}", e))?;
+        let mut sig = vec![0u8; key_pair.public().modulus_len()];
+        let rng = SystemRandom::new();
+        key_pair
+            .sign(&signature::RSA_PKCS1_SHA256, &rng, message, &mut sig)
+            .map_err(|_| "ring RSA sign failed".to_string())?;
+        Ok(sig)
+    }
+
+    /// Hand-rolled RSASSA-PKCS1-v1_5 (modpow). Used as fallback for <2048-bit
+    /// keys and for cross-check tests against ring output.
+    pub fn sign_sha256_modpow(&self, message: &[u8]) -> Result<Vec<u8>, String> {
+        let hash = sha256(message);
+        self.sign_digest_sha256_modpow(&hash)
+    }
+
+    /// Sign a precomputed SHA-256 digest (32 bytes) via hand-rolled modpow.
+    fn sign_digest_sha256_modpow(&self, hash: &[u8]) -> Result<Vec<u8>, String> {
         if hash.len() != 32 {
             return Err("SHA-256 digest must be 32 bytes".into());
         }
@@ -673,50 +691,12 @@ impl RsaKey {
 
     /// RSASSA-PKCS1-v1_5 verify of a raw message against a signature.
     pub fn verify_sha256(&self, message: &[u8], signature: &[u8]) -> bool {
-        let hash = sha256(message);
-        self.verify_digest_sha256(&hash, signature)
-    }
-
-    /// Verify a precomputed SHA-256 digest (32 bytes) against a PKCS#1 v1.5 signature.
-    pub fn verify_digest_sha256(&self, hash: &[u8], signature: &[u8]) -> bool {
-        if hash.len() != 32 {
-            return false;
-        }
-        let k = self.k;
-        if signature.len() != k || k < 11 {
-            return false;
-        }
-        let s = BigUint::from_be_bytes(signature);
-        if s.cmp(&self.n) != std::cmp::Ordering::Less {
-            return false;
-        }
-        let m = s.modpow(&self.e, &self.n);
-        let em = m.to_be_bytes_padded(k);
-
-        // EM = 0x00 || 0x01 || PS || 0x00 || DigestInfo
-        if em.get(0).copied() != Some(0x00) || em.get(1).copied() != Some(0x01) {
-            return false;
-        }
-        let mut i = 2usize;
-        while i < em.len() && em.get(i).copied() == Some(0xff) {
-            i += 1;
-        }
-        // PS must be at least 8 octets of 0xff (PKCS#1)
-        if i < 10 {
-            return false;
-        }
-        if em.get(i).copied() != Some(0x00) {
-            return false;
-        }
-        i += 1;
-        let t = em.get(i..).unwrap_or(&[]);
-        if t.len() != SHA256_DIGESTINFO_PREFIX.len() + 32 {
-            return false;
-        }
-        if t.get(..SHA256_DIGESTINFO_PREFIX.len()).unwrap_or(&[]) != SHA256_DIGESTINFO_PREFIX {
-            return false;
-        }
-        t.get(SHA256_DIGESTINFO_PREFIX.len()..).unwrap_or(&[]) == hash
+        let pub_key = RsaPublicKey {
+            n: self.n.clone(),
+            e: self.e.clone(),
+            k: self.k,
+        };
+        pub_key.verify_sha256(message, signature)
     }
 }
 
@@ -738,14 +718,101 @@ impl RsaPublicKey {
         parse_rsa_public_key_der(der)
     }
 
+    /// Verify PKCS#1 v1.5 SHA-256 signature.
+    ///
+    /// Prefers ring:
+    /// - `RSA_PKCS1_2048_8192_SHA256` for moduli ≥ 2048 bits
+    /// - `RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY` for 1024–2047 bit DKIM keys
+    ///   still seen in the wild
+    /// Hand-rolled modpow verify is kept only for sizes ring rejects (<1024 bits).
     pub fn verify_sha256(&self, message: &[u8], signature: &[u8]) -> bool {
-        let key = RsaKey {
-            n: self.n.clone(),
-            e: self.e.clone(),
-            d: BigUint::zero(),
-            k: self.k,
+        if self.verify_sha256_ring(message, signature) {
+            return true;
+        }
+        // ring returned false — either invalid sig or unsupported size.
+        // Only fall back for sizes ring cannot check (modulus < 1024 bits).
+        if self.k * 8 < 1024 {
+            return self.verify_sha256_modpow(message, signature);
+        }
+        false
+    }
+
+    fn verify_sha256_ring(&self, message: &[u8], signature: &[u8]) -> bool {
+        let n_bytes = self.n.to_be_bytes();
+        let e_bytes = self.e.to_be_bytes();
+        let components = signature::RsaPublicKeyComponents {
+            n: n_bytes.as_slice(),
+            e: e_bytes.as_slice(),
         };
-        key.verify_sha256(message, signature)
+        // Prefer modern 2048+ params; fall through to legacy 1024+ for smaller keys.
+        if self.k >= 256 {
+            if components
+                .verify(&signature::RSA_PKCS1_2048_8192_SHA256, message, signature)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+        if self.k >= 128 {
+            return components
+                .verify(
+                    &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
+                    message,
+                    signature,
+                )
+                .is_ok();
+        }
+        false
+    }
+
+    /// Hand-rolled verify (for <1024-bit moduli ring rejects, and tests).
+    pub fn verify_sha256_modpow(&self, message: &[u8], signature: &[u8]) -> bool {
+        let hash = sha256(message);
+        if hash.len() != 32 {
+            return false;
+        }
+        let k = self.k;
+        if signature.len() != k || k < 11 {
+            return false;
+        }
+        let s = BigUint::from_be_bytes(signature);
+        if s.cmp(&self.n) != std::cmp::Ordering::Less {
+            return false;
+        }
+        let m = s.modpow(&self.e, &self.n);
+        let em = m.to_be_bytes_padded(k);
+
+        if em.get(0).copied() != Some(0x00) || em.get(1).copied() != Some(0x01) {
+            return false;
+        }
+        let mut i = 2usize;
+        while i < em.len() && em.get(i).copied() == Some(0xff) {
+            i += 1;
+        }
+        if i < 10 {
+            return false;
+        }
+        if em.get(i).copied() != Some(0x00) {
+            return false;
+        }
+        i += 1;
+        let t = em.get(i..).unwrap_or(&[]);
+        if t.len() != SHA256_DIGESTINFO_PREFIX.len() + 32 {
+            return false;
+        }
+        if t.get(..SHA256_DIGESTINFO_PREFIX.len()).unwrap_or(&[]) != SHA256_DIGESTINFO_PREFIX {
+            return false;
+        }
+        let digest_ok = t
+            .get(SHA256_DIGESTINFO_PREFIX.len()..)
+            .unwrap_or(&[])
+            .len()
+            == 32
+            && ct_eq(
+                t.get(SHA256_DIGESTINFO_PREFIX.len()..).unwrap_or(&[]),
+                &hash,
+            );
+        digest_ok
     }
 }
 
@@ -881,10 +948,14 @@ fn generate_rsa_pure(bits: usize) -> Result<RsaKey, String> {
         if attempts > 200 {
             return Err("RSA prime generation failed".into());
         }
-        let p = random_prime(prime_bits)?;
-        let q = random_prime(prime_bits)?;
+        let mut p = random_prime(prime_bits)?;
+        let mut q = random_prime(prime_bits)?;
         if p.cmp(&q) == std::cmp::Ordering::Equal {
             continue;
+        }
+        // ring expects 0 < q < p < n
+        if p.cmp(&q) == std::cmp::Ordering::Less {
+            std::mem::swap(&mut p, &mut q);
         }
         let n = p.mul(&q);
         if n.bit_len() < bits - 1 {
@@ -897,9 +968,117 @@ fn generate_rsa_pure(bits: usize) -> Result<RsaKey, String> {
             Some(d) => d,
             None => continue,
         };
+        let d_p = d.rem(&p1);
+        let d_q = d.rem(&q1);
+        let q_inv = match q.mod_inverse(&p) {
+            Some(qi) => qi,
+            None => continue,
+        };
         let k = (n.bit_len() + 7) / 8;
-        return Ok(RsaKey { n, e, d, k });
+        return Ok(RsaKey {
+            n,
+            e,
+            d,
+            k,
+            crt: Some(RsaCrt {
+                p,
+                q,
+                d_p,
+                d_q,
+                q_inv,
+            }),
+        });
     }
+}
+
+/// Euclidean GCD.
+fn gcd(a: &BigUint, b: &BigUint) -> BigUint {
+    let mut a = a.clone();
+    let mut b = b.clone();
+    while !b.is_zero() {
+        let r = a.rem(&b);
+        a = b;
+        b = r;
+    }
+    a
+}
+
+/// Build CRT components from primes p > q and private exponent d.
+fn crt_from_primes(p: BigUint, q: BigUint, d: &BigUint) -> Result<RsaCrt, String> {
+    let (p, q) = if p.cmp(&q) == std::cmp::Ordering::Less {
+        (q, p)
+    } else {
+        (p, q)
+    };
+    let one = BigUint::from_u32(1);
+    let p1 = p.sub(&one).ok_or("p-1")?;
+    let q1 = q.sub(&one).ok_or("q-1")?;
+    let d_p = d.rem(&p1);
+    let d_q = d.rem(&q1);
+    let q_inv = q
+        .mod_inverse(&p)
+        .ok_or_else(|| "qInv not invertible".to_string())?;
+    Ok(RsaCrt {
+        p,
+        q,
+        d_p,
+        d_q,
+        q_inv,
+    })
+}
+
+/// Recover CRT factors from n, e, d (Boneh-style: factor n via ed−1).
+fn recover_crt(n: &BigUint, e: &BigUint, d: &BigUint) -> Result<RsaCrt, String> {
+    let one = BigUint::from_u32(1);
+    let ed = e.mul(d);
+    let ktot = ed.sub(&one).ok_or("ed-1 underflow")?;
+    // ktot = t * 2^s with t odd
+    let mut t = ktot.clone();
+    let mut s = 0u32;
+    while !t.is_zero() && !t.get_bit(0) {
+        t = t.shr1();
+        s += 1;
+    }
+    if s == 0 {
+        return Err("cannot recover primes: ed-1 odd".into());
+    }
+    let n_minus = n.sub(&one).ok_or("n-1")?;
+
+    // Try small odd bases (deterministic, sufficient for RSA moduli we generate).
+    for a_u in (2u32..200).step_by(2) {
+        let a = BigUint::from_u32(a_u);
+        if a.cmp(n) != std::cmp::Ordering::Less {
+            break;
+        }
+        let mut k = t.clone();
+        // Walk k = t, 2t, 4t, ... while k < ktot
+        loop {
+            let cand = a.modpow(&k, n);
+            if cand.cmp(&one) != std::cmp::Ordering::Equal
+                && cand.cmp(&n_minus) != std::cmp::Ordering::Equal
+            {
+                let cand2 = cand.mul(&cand).rem(n);
+                if cand2.cmp(&one) == std::cmp::Ordering::Equal {
+                    let cand_m1 = cand.sub(&one).unwrap_or(BigUint::zero());
+                    let p = gcd(&cand_m1, n);
+                    if p.cmp(&one) == std::cmp::Ordering::Greater && p.cmp(n) == std::cmp::Ordering::Less
+                    {
+                        let q = n.div_rem(&p).0;
+                        if !q.is_zero() && p.mul(&q).cmp(n) == std::cmp::Ordering::Equal {
+                            return crt_from_primes(p, q, d);
+                        }
+                    }
+                }
+            }
+            // k *= 2; stop when k >= ktot
+            let k2 = k.shl(1);
+            if k2.cmp(&ktot) != std::cmp::Ordering::Less {
+                break;
+            }
+            k = k2;
+        }
+    }
+    Err("prime recovery failed".into())
 }
 
 fn random_prime(bits: usize) -> Result<BigUint, String> {
@@ -1132,12 +1311,41 @@ fn parse_pkcs1_rsa_after_version(seq: &mut DerReader<'_>) -> Result<RsaKey, Stri
     let n = seq.read_integer()?;
     let e = seq.read_integer()?;
     let d = seq.read_integer()?;
-    // remaining p, q, etc. ignored
     let k = (n.bit_len() + 7) / 8;
     if k < 64 {
         return Err(format!("RSA modulus too small ({} bytes)", k));
     }
-    Ok(RsaKey { n, e, d, k })
+    // Optional CRT: p, q, dP, dQ, qInv (present in OpenSSL traditional keys).
+    let crt = {
+        let p = seq.read_integer().ok();
+        let q = seq.read_integer().ok();
+        let d_p = seq.read_integer().ok();
+        let d_q = seq.read_integer().ok();
+        let q_inv = seq.read_integer().ok();
+        match (p, q, d_p, d_q, q_inv) {
+            (Some(p), Some(q), Some(d_p), Some(d_q), Some(q_inv))
+                if !p.is_zero() && !q.is_zero() =>
+            {
+                // Prefer recomputed CRT with ordered p > q; fall back to wire values.
+                crt_from_primes(p.clone(), q.clone(), &d).ok().or(Some(RsaCrt {
+                    p,
+                    q,
+                    d_p,
+                    d_q,
+                    q_inv,
+                }))
+            }
+            _ => None,
+        }
+    };
+    let key = RsaKey {
+        n,
+        e,
+        d,
+        k,
+        crt,
+    };
+    Ok(key.with_crt_filled())
 }
 
 #[cfg(test)]
@@ -1234,8 +1442,13 @@ QnKcg6jvEzpc5zxAT1oYERfocK0XNetovfMnrwnC2Tqe\n\
     fn rsa_sign_roundtrip_pkcs1() {
         let key = RsaKey::from_pem(TEST_RSA_PEM).expect("parse key");
         let msg = b"hello dkim signing test";
+        // 1024-bit: production path falls back to modpow (ring needs ≥2048).
         let sig = key.sign_sha256(msg).expect("sign");
         assert_eq!(sig.len(), key.k);
+
+        // Verify via ring legacy path (1024-bit).
+        assert!(key.verify_sha256(msg, &sig));
+        assert!(!key.verify_sha256(b"other", &sig));
 
         // Verify: sig^e mod n should equal PKCS#1 EM
         let s = BigUint::from_be_bytes(&sig);
@@ -1261,6 +1474,80 @@ QnKcg6jvEzpc5zxAT1oYERfocK0XNetovfMnrwnC2Tqe\n\
         let pk = key.public_key_der();
         assert_eq!(pk[0], 0x30);
         assert!(pk.len() > 50);
+    }
+
+    /// 2048-bit PKCS#1 test key (openssl genrsa -traditional 2048).
+    const TEST_RSA_2048_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
+MIIEpAIBAAKCAQEAzP1CkDQ0bHZfqokzpQ0l7EmsQJdphXbmUhapkPwqCZMLAMEF\n\
+yFF3vGKGWo33crlBqT5JdlnTvxnx3K3U8KUmoYpewBbp8jNJjKQNromLzPLvVcgO\n\
+48/mXtP5NW4QimJuPFbA0iSNxM0g/LWTjn8OV+FbSQUsj6VCq64B7J2uWrkzKWwU\n\
+/edcfU4np6Y6XJBzE0J16y9J9rodnK9Y3ihrTPNLJuQRwXwmaaVuI/3QDASIQ/Nm\n\
+R8a1BSLUte37NT/Fn7zhAFegZ7CdPj9/qYVJXran0/XPtgPnHccS22rgDQ03edY4\n\
+s22FyKKlGa3t5p8MC5rfrtRjVL9DdqR0qk1uUwIDAQABAoIBACBSUJQHPzrY4VW0\n\
+43lDXPboWOooVaGPMVrBKwRq1kADOOlqBfzjZ5NDH7cYimtC7aj/YrrwB/SqZRns\n\
+KNa226P9+tmj40hmsNKlrWiXVH1A0t7+N+bQyZyrJLC5hY8kXQhTj3yy+c2NoIVo\n\
+JfeCbiMKLAgT8kZGAwCp47DI3gx8veA1QLbQOT6Vm0IJRpOqRKI2WwrHzJxzRXJX\n\
+w20c4TiHNkoTHVxXeUEPCLvL2HlUuHVPUKgqTxdhbvgWLr4XVe9QLx9LCHkzlJ8R\n\
+AeH5EuNl3jFgWfRgPr2B2CYzHHS+G3VbTZkPsi6uj3qRtpUfYB7VPl6ttpkYsyLv\n\
+ndtkmLkCgYEA6+9J0UzOVHw+kX5HOmVpjinI41u5vcfsnpR3RE2sVcAFF+uQp0c9\n\
+OD1CKC8g+cCvo0OGvDOxHgHHqh9MkQUf9l7vgx1CZXJDtGkyh+ydmvTs2CT2PAQa\n\
+be0ES65zGlAMkGjmLhXY7SjSJXS6JO6Vw33JfqKHwAaM35HzbRrBVDsCgYEA3mw8\n\
+VBDM7Lui0jWx+hVH3Fc8RpzqTyV6cdMpKOtMQAcHn1/oH0pGhWqmSqFsK+umgS/y\n\
+O6yt6uelYUarWnMpAyzhkkWUZmTLcDR54xCOB0PgyWW6j7Nku4dH/seDQeVSATgJ\n\
+X7Euf1IkgKgn3kDvJ0cROoB/sJnvchXZTfFeJMkCgYB+YPn4jBzFspvNUYgT5rio\n\
+9wbtinevCcVcmIheZQDYGfhgfMVKZWWMl3u1jLEsNyOd35DvhPzt5uQt44Ae+lDJ\n\
+psbDQ8wKDS/pFqSDnKI7m9C2Yu4m7ce+dERlybdMM+7W9+m8a+V7++69M452M/qy\n\
+8dEZ7TOsD5YsN8DeA4PlewKBgQDVjf5uiKL5OT8frcZwYzZX7LpG4ipmS4nA+Amw\n\
+7BqN7zH2Z9MrF9mWB8waI9sEYIHB0BM4EJf7zuYO/BdSBPf/wHvkQUI2/dgGp5vP\n\
+0/lKKHYPaMkzZ/7zvvP1QAJapp+R5Ae8BRar0GaT0OBWmOoGQEnebbosCeDJHQlD\n\
+uNe3YQKBgQC2sLcyhreBjix/BLaK3FYqXdMFCLcSoYlqtNnczUDHB9+CNRwcRPtl\n\
+p6xZlYK4ogaJsMKk3xgBHWRt3GQMNZMm7JJWibT/pATArltbu/dzLO6UmA1LqiT2\n\
+uRAQIMqcXXVWXhYZQEb8l0Mc825lcOygXyURYHnRQ3Mygepx4wLv7w==\n\
+-----END RSA PRIVATE KEY-----\n";
+
+    /// ring-signed output must equal hand-rolled modpow for fixed key+message
+    /// (PKCS#1 v1.5 is deterministic; both implement the same padding).
+    #[test]
+    fn ring_sign_matches_modpow_fixed_key() {
+        let key = RsaKey::from_pem(TEST_RSA_2048_PEM).expect("parse 2048 key");
+        assert_eq!(key.k, 256);
+        let msg = b"fixed message for ring vs modpow cross-check";
+        let ring_sig = key.sign_sha256_ring(msg).expect("ring sign");
+        let modpow_sig = key.sign_sha256_modpow(msg).expect("modpow sign");
+        assert_eq!(
+            ring_sig, modpow_sig,
+            "ring and modpow PKCS#1 v1.5 signatures must be identical"
+        );
+        assert!(key.verify_sha256(msg, &ring_sig));
+        assert!(key
+            .public_key_for_test()
+            .verify_sha256_modpow(msg, &ring_sig));
+    }
+
+    #[test]
+    fn generated_key_signs_via_ring() {
+        // Prefer openssl path when available; else pure-Rust (slower).
+        let key = RsaKey::generate(2048).expect("generate");
+        assert!(key.k >= 256);
+        let msg = b"keygen round-trip through ring";
+        let sig = key.sign_sha256(msg).expect("sign via ring");
+        assert!(key.verify_sha256(msg, &sig), "ring verify");
+        assert!(
+            key.public_key_for_test().verify_sha256_modpow(msg, &sig),
+            "modpow verify of ring signature"
+        );
+    }
+}
+
+impl RsaKey {
+    /// Test helper: view as public key.
+    #[cfg(test)]
+    fn public_key_for_test(&self) -> RsaPublicKey {
+        RsaPublicKey {
+            n: self.n.clone(),
+            e: self.e.clone(),
+            k: self.k,
+        }
     }
 }
 

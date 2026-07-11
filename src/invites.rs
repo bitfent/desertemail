@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::crypto;
+use crate::passwd;
 use crate::useredit;
 use crate::util;
 
@@ -195,7 +196,10 @@ pub fn lookup_at(
     let path = invites_path(data_dir.as_ref());
     let mut invites = load_raw(&path)?;
     let pruned = prune_expired(&mut invites, now);
-    let found = invites.iter().find(|i| i.token_hash == th).cloned();
+    let found = invites
+        .iter()
+        .find(|i| passwd::ct_eq_str(&i.token_hash, &th))
+        .cloned();
     if pruned {
         save_raw(&path, &invites)?;
     }
@@ -213,7 +217,7 @@ pub fn revoke_by_hash(data_dir: impl AsRef<Path>, token_hash: &str) -> Result<bo
     let mut invites = load_raw(&path)?;
     prune_expired(&mut invites, now);
     let before = invites.len();
-    invites.retain(|i| i.token_hash != token_hash);
+    invites.retain(|i| !passwd::ct_eq_str(&i.token_hash, token_hash));
     let removed = invites.len() != before;
     if removed {
         save_raw(&path, &invites)?;
@@ -239,7 +243,9 @@ pub fn redeem_at(
     let path = invites_path(data_dir.as_ref());
     let mut invites = load_raw(&path)?;
     prune_expired(&mut invites, now);
-    let pos = invites.iter().position(|i| i.token_hash == th);
+    let pos = invites
+        .iter()
+        .position(|i| passwd::ct_eq_str(&i.token_hash, &th));
     match pos {
         Some(i) => {
             let inv = invites.remove(i);
@@ -276,7 +282,9 @@ pub fn regenerate_at(
     let path = invites_path(data_dir.as_ref());
     let mut invites = load_raw(&path)?;
     prune_expired(&mut invites, now);
-    let pos = invites.iter().position(|i| i.token_hash == token_hash);
+    let pos = invites
+        .iter()
+        .position(|i| passwd::ct_eq_str(&i.token_hash, token_hash));
     let Some(i) = pos else {
         return Ok(None);
     };
