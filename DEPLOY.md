@@ -154,6 +154,22 @@ There is **no** platform auto-detection and **no** GitHub Releases/API in the
 install path. Users choose their installer; binaries and `SHA256SUMS` come from
 this site under `/bin/`.
 
+### Verify with doctor
+
+After install and DNS (MX/SPF/DKIM/DMARC/rDNS), **before announcing the address**,
+run the readiness probe:
+
+```bash
+desertemail doctor
+# or:
+desertemail doctor --config /etc/desertemail/config.toml --domain example.com
+```
+
+Exit code = number of Fail blockers (`0` = ready). Doctor checks config sanity,
+DNS (including DKIM published `p=` vs local key), outbound/inbound ports, and
+TLS cert expiry/SAN. PTR/rDNS is set in the hosting provider panel, not domain
+DNS. See README and the site docs section “Readiness check (doctor)”.
+
 ## Local-dev loop
 
 ```bash

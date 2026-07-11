@@ -505,7 +505,7 @@
       <li><a href="/">Home</a></li>
       <li><a href="/#install">Install</a></li>
       <li><a href="/docs.html" class="is-current" aria-current="page">Docs</a></li>
-      <li><a href="https://t.me/bitfent">Telegram</a></li>
+      <li><a href="https://github.com/bitfent/desertemail">GitHub</a></li>
     </ul>
   </div>
 </nav>
@@ -801,6 +801,66 @@ sudo systemctl restart desertemail
           <li>Check major DNSBLs before go-live</li>
         </ul>
         <p class="warn"><strong>Port 25:</strong> residential ISPs often block outbound 25. Receiving may still work with port-forward; for sending use a <strong>smarthost</strong> in config or host on a VPS with open egress on 25.</p>
+        <p class="note"><code>desertemail doctor</code> automates most of the spam checklist above — run it after publishing DNS and before go-live. See <a href="#doctor">Readiness check (doctor)</a>.</p>
+      </section>
+
+      <section class="pix-panel" aria-labelledby="doctor">
+        <div class="heading-wrap"><h2 id="doctor">Readiness check (doctor)</h2><a class="anchor" href="#doctor" aria-label="Link to this section">#</a></div>
+        <p>The installer configures the <strong>software</strong>. <code>desertemail doctor</code> probes the <strong>environment</strong> against the outside world so mail actually flows. Exit code = number of <strong>blockers</strong> (Fail checks); <code>0</code> means ready (warnings are allowed).</p>
+        <pre><code>desertemail doctor
+desertemail doctor --domain example.com --host mail.example.com
+desertemail doctor --public-ip 203.0.113.10 --json
+desertemail doctor --no-net   # DNS-only (skip TCP probes)</code></pre>
+
+        <div class="heading-wrap"><h3 id="doctor-checks">What it checks</h3><a class="anchor" href="#doctor-checks" aria-label="Link to this section">#</a></div>
+        <div class="table-scroll">
+          <table class="hw-table">
+            <thead><tr><th>Group</th><th>Checks</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Config</strong></td><td>domains list; plaintext vs hashed passwords; factory <code>default_password</code> / <code>allow_default_password_auth</code>; <code>require_tls_for_auth</code></td></tr>
+              <tr><td><strong>DNS</strong></td><td>MX; A/AAAA of mail host; SPF; <strong>DKIM published <code>p=</code> vs local key</strong>; DMARC; rDNS / FCrDNS; IP detection notes</td></tr>
+              <tr><td><strong>Network</strong></td><td>outbound port 25 (to a real MX); inbound :25 / :587 / :143 banners; port 80 when ACME or no TLS files yet (HTTP-01). Skipped with <code>--no-net</code></td></tr>
+              <tr><td><strong>TLS</strong></td><td>cert load; expiry; SAN/CN covers mail host (and configured domains when present)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="warn"><strong>Headline check — DKIM match:</strong> doctor compares the TXT at <code>&lt;selector&gt;._domainkey.&lt;domain&gt;</code> to the public key from <code>dkim_key_file</code>. A <code>p=</code> mismatch is the #1 silent deliverability failure (record published, but not the key you sign with).</p>
+        <p class="note"><strong>PTR / rDNS</strong> is set in your <strong>hosting provider’s</strong> control panel (DigitalOcean, Hetzner, AWS, etc.) — not at your domain registrar. Doctor’s fix lines call this out explicitly.</p>
+
+        <div class="heading-wrap"><h3 id="doctor-sample">Sample output</h3><a class="anchor" href="#doctor-sample" aria-label="Link to this section">#</a></div>
+        <pre>DesertEmail doctor — deployment readiness
+  host=mail.example.com  public_ip=203.0.113.10  egress=203.0.113.10
+
+── DNS ──
+  ✓ MX example.com — top=mail.example.com pref=10; A includes 203.0.113.10
+  ✓ SPF example.com — v=spf1 mx a -all (policy -all (hard fail))
+  ✗ DKIM example.com (s=mail) — p= mismatch at mail._domainkey.example.com
+      → fix: Update TXT at mail._domainkey.example.com to exactly:
+  ⚠ DMARC example.com — no v=DMARC1 TXT at _dmarc.example.com
+      → fix: Publish TXT at _dmarc.example.com: v=DMARC1; p=none; ...
+── Network ──
+  ✓ outbound port 25 — connected to 142.251.x.x:25 (via gmail-smtp-in.l.google.com)
+── TLS ──
+  ⚠ TLS certificate — plaintext only — fine for LAN, not for public internet
+
+VERDICT: 1 blocker(s), 2 warning(s)
+Not ready: fix the red items</pre>
+
+        <div class="heading-wrap"><h3 id="doctor-flags">Flags</h3><a class="anchor" href="#doctor-flags" aria-label="Link to this section">#</a></div>
+        <div class="table-scroll">
+          <table class="hw-table">
+            <thead><tr><th>Flag</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>--config</code> / <code>-c</code></td><td>Config path (same global flag as the server; default <code>config.toml</code>)</td></tr>
+              <tr><td><code>--domain &lt;d&gt;</code></td><td>Domain(s) to check (repeatable); default = all <code>domains</code> from config</td></tr>
+              <tr><td><code>--host &lt;name&gt;</code></td><td>Public mail hostname (default: MX target, else first domain)</td></tr>
+              <tr><td><code>--public-ip &lt;ip&gt;</code></td><td>Expected public IP override (needed for PTR + inbound port probes when auto-detect fails)</td></tr>
+              <tr><td><code>--json</code></td><td>Machine-readable JSON array of checks</td></tr>
+              <tr><td><code>--no-net</code></td><td>DNS-only — skip TCP reachability probes</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Human output is green ✓ / yellow ⚠ / red ✗ on a TTY (or <code>ok</code> / <code>warn</code> / <code>FAIL</code> when not a terminal or <code>NO_COLOR</code> is set). Failed and warned lines may include <code>→ fix:</code> hints. Final line: <code>VERDICT: N blocker(s), M warning(s)</code>.</p>
       </section>
 
       <section class="pix-panel" aria-labelledby="tls">
@@ -946,15 +1006,17 @@ web_tls_listen = "0.0.0.0:8443"</code></pre>
           <dd>Re-run the same installer. Binary is replaced; existing config is kept unless you explicitly overwrite.</dd>
           <dt>Is Windows supported?</dt>
           <dd>Yes: MSVC <code>.exe</code> + PowerShell installer. Maildir uses NTFS-safe naming (<code>!2,</code> instead of <code>:2,</code> in filenames).</dd>
+          <dt>How do I know my server is set up correctly?</dt>
+          <dd>Run <code>desertemail doctor</code> (optionally <code>--domain yourdomain.com</code>). It probes DNS (MX/SPF/DKIM-match/DMARC/rDNS), ports, TLS, and config, prints a green/red report with <code>→ fix:</code> lines, and exits with the number of blockers. See <a href="#doctor">Readiness check (doctor)</a>.</dd>
           <dt>Does the installer call GitHub?</dt>
-          <dd>No. Binaries and checksums come from this site under <code>/bin/</code>. The source is open source by request — text <a href="https://t.me/bitfent">@bitfent</a> on Telegram.</dd>
+          <dd>No. Binaries and checksums come from this site under <code>/bin/</code>. The source is public on <a href="https://github.com/bitfent/desertemail">github.com/bitfent/desertemail</a>.</dd>
           <dt>Is it still “zero dependencies”?</dt>
           <dd>No. Mail/IMAP/webmail/DKIM/DNS/HTTP remain pure <code>std</code> (no async runtime). The only crates are <code>rustls</code> (ring), <code>rustls-pemfile</code>, and <code>webpki-roots</code> for TLS — the one thing you should never hand-roll. Binary size is ~1.2&nbsp;MB with TLS.</dd>
         </dl>
       </section>
 
       <footer>
-        <p>Open source by request — text <a href="https://t.me/bitfent">@bitfent</a> on Telegram for more info.</p>
+        <p>Open source — <a href="https://github.com/bitfent/desertemail">github.com/bitfent/desertemail</a>. Questions? <a href="https://t.me/bitfent">@bitfent on Telegram</a>.</p>
         <p>Binaries are served from this site under <code>/bin/</code>.</p>
       </footer>
 

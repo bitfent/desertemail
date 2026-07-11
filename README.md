@@ -6,6 +6,8 @@ Designed to run on the tiniest computers: Raspberry Pi Zero, old netbooks, VPS w
 
 Anyone can deploy it, configure DNS (or use simple auto-routing), and have their own private email.
 
+**Installer vs doctor:** the installer (or a manual `config.toml`) sets up the **software**. `desertemail doctor` verifies the **environment** — DNS, ports, rDNS, TLS, and config sanity — so mail actually delivers. Run doctor after DNS setup and before you announce the address.
+
 ## Why DesertEmail?
 
 - **From scratch**: SMTP (receive + submit), IMAP, webmail, DKIM, DNS, and HTTP are hand-rolled pure `std`. No lettre, no mail-parser crates, no async runtime (no tokio).
@@ -35,6 +37,7 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 - [x] **ACME / Let's Encrypt** (optional `acme = true`): HTTP-01 via webmail, RS256 JWS, background renew when &lt;30d remain — needs public domain + port 80
 - [x] **Quotas**, **structured JSON logs** (fail2ban filter in `deploy/`), **graceful SIGTERM/SIGINT**
 - [x] **Ops**: `user` CLI + admin CRUD (live user map reload), `/healthz` + Prometheus `/metrics`, `deploy/backup.sh`, loadtest script
+- [x] **`desertemail doctor`**: deployment readiness probe (DNS MX/A/SPF/DKIM/DMARC/rDNS, outbound :25, inbound :25/:587/:143, port 80 for ACME, TLS expiry/SAN, config sanity). **Headline check: DKIM published TXT `p=` vs local key** — catches the #1 silent deliverability failure (wrong or stale DKIM record)
 
 ## Quick Start (Raspberry Pi / any Linux)
 
@@ -43,7 +46,7 @@ Anyone can deploy it, configure DNS (or use simple auto-routing), and have their
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # 2. Clone & build (optimized for size)
-git clone https://github.com/yourusername/desertemail
+git clone https://github.com/bitfent/desertemail
 cd desertemail
 cargo build --release
 
@@ -66,6 +69,43 @@ sudo ./target/release/desertemail --config config.toml
 ```
 
 Without `tls_cert_file` + `tls_key_file`, the server runs plaintext (fine for localhost/LAN/VPN). With both set, STARTTLS is advertised on the plaintext SMTP/IMAP ports and optional implicit-TLS listeners bind when non-empty.
+
+### Verify your setup (`desertemail doctor`)
+
+After config + DNS (MX/SPF/DKIM/DMARC/rDNS) and before you go live, run the readiness probe:
+
+```bash
+desertemail doctor
+# or, if config/domain need overriding:
+desertemail doctor --config config.toml --domain example.com
+desertemail doctor --host mail.example.com --public-ip 203.0.113.10
+```
+
+Doctor prints a green/red report grouped as **Config / DNS / Network / TLS**. Each failed or warned check can include a `→ fix:` line. The process exits with code = number of **blockers** (Fail checks); `0` means ready (warnings are allowed). Flags: `--config`, `--domain`, `--host`, `--public-ip`, `--json`, `--no-net` (DNS-only, skip TCP probes).
+
+Sample (trimmed):
+
+```text
+DesertEmail doctor — deployment readiness
+  host=mail.example.com  public_ip=203.0.113.10  egress=203.0.113.10
+
+── DNS ──
+  ✓ MX example.com — top=mail.example.com pref=10; A includes 203.0.113.10
+  ✓ SPF example.com — v=spf1 mx a -all (policy -all (hard fail))
+  ✗ DKIM example.com (s=mail) — p= mismatch at mail._domainkey.example.com
+      → fix: Update TXT at mail._domainkey.example.com to exactly:
+  ⚠ DMARC example.com — no v=DMARC1 TXT at _dmarc.example.com
+      → fix: Publish TXT at _dmarc.example.com: v=DMARC1; p=none; ...
+── Network ──
+  ✓ outbound port 25 — connected to 142.251.x.x:25 (via gmail-smtp-in.l.google.com)
+── TLS ──
+  ⚠ TLS certificate — plaintext only — fine for LAN, not for public internet
+
+VERDICT: 1 blocker(s), 2 warning(s)
+Not ready: fix the red items
+```
+
+The DKIM check compares the published `p=` at `<selector>._domainkey.<domain>` to the local key from `dkim_key_file` — that mismatch is the classic “everything looks published but receivers still fail DKIM” bug. PTR/rDNS is set in your **hosting provider’s** panel (not domain DNS).
 
 ### Systemd service example
 
@@ -240,8 +280,11 @@ See the script header for restore notes and the live-rsync consistency caveat.
 8. **TLS-RPT** (optional): TXT at `_smtp._tls.example.com` —
    `v=TLSRPTv1; rua=mailto:tlsrpt@example.com`.
 9. Open ports 25, 587, 143, and (with TLS configured) 465 / 993 / 8443 as needed in your firewall / router port-forward.
+10. **Verify**: `desertemail doctor` (or `desertemail doctor --domain example.com`) — green/red report; exit code = blocker count. See [Verify your setup](#verify-your-setup-desertemail-doctor).
 
 ### Why my mail goes to spam (checklist)
+
+`desertemail doctor` automates most of these checks (MX/A/SPF/DKIM-match/DMARC/rDNS/FCrDNS, outbound :25, inbound ports, TLS expiry/SAN, config sanity). Fix its blockers first, then:
 
 - [ ] SPF, DKIM, and DMARC all published and consistent (same domain alignment)
 - [ ] PTR/rDNS set to your mail hostname and forward-confirms (FCrDNS)
@@ -292,6 +335,7 @@ src/
 ├── useredit.rs      # Safe in-place [users]/[quotas] config editor
 ├── metrics.rs       # Prometheus text counters
 ├── tls.rs           # rustls: server Conn, client ClientConn, PEM load, webpki-roots
+├── doctor.rs        # `desertemail doctor` — DNS/ports/rDNS/TLS/config readiness probe
 └── util.rs          # Line reader, base64url, structured logging (text/json)
 ```
 
