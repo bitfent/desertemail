@@ -1110,6 +1110,13 @@ print_summary() {
 
   if [ -n "${WEB_LISTEN:-}" ]; then
     info "Configure DNS in your browser: http://127.0.0.1:8080/dns"
+    case "${DOMAIN:-localhost}" in
+      localhost|local|127.0.0.1|"")
+        ;;
+      *)
+        info "After DNS, enable TLS on the DNS page (Security / Let's Encrypt)."
+        ;;
+    esac
   elif [ -n "${DKIM_KEY:-}" ] && [ -f "${DKIM_KEY}" ]; then
     info "DNS: publish MX + A/AAAA + SPF + DKIM for domain '${DOMAIN}'."
     info "DKIM TXT (from binary --dkim-dns):"

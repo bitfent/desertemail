@@ -218,6 +218,166 @@ pub fn set_dkim_paths(content: &str, selector: &str, key_file: &str) -> Result<S
     Ok(out)
 }
 
+/// Set or replace a top-level boolean key (`key = true|false`).
+pub fn set_top_level_bool(content: &str, key: &str, value: bool) -> String {
+    let key_l = key.to_lowercase();
+    let mut out = String::with_capacity(content.len() + 32);
+    let mut section = String::new();
+    let mut replaced = false;
+    let new_line = format!("{} = {}\n", key, if value { "true" } else { "false" });
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() >= 2 {
+            if !replaced && section.is_empty() {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&new_line);
+                replaced = true;
+            }
+            section = trimmed[1..trimmed.len() - 1].trim().to_lowercase();
+            out.push_str(raw_line);
+            out.push('\n');
+            continue;
+        }
+        if section.is_empty() && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some(eq) = trimmed.find('=') {
+                let k = trimmed[..eq]
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_lowercase();
+                if k == key_l {
+                    out.push_str(&new_line);
+                    replaced = true;
+                    continue;
+                }
+            }
+        }
+        out.push_str(raw_line);
+        out.push('\n');
+    }
+    if !replaced {
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&new_line);
+    }
+    out
+}
+
+/// Set top-level string-array key: `key = ["a", "b"]`.
+pub fn set_top_level_string_list(content: &str, key: &str, values: &[&str]) -> String {
+    let key_l = key.to_lowercase();
+    let mut out = String::with_capacity(content.len() + 64);
+    let mut section = String::new();
+    let mut replaced = false;
+    let items: Vec<String> = values
+        .iter()
+        .map(|v| format!("\"{}\"", escape_toml_str(v)))
+        .collect();
+    let new_line = format!("{} = [{}]\n", key, items.join(", "));
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() >= 2 {
+            if !replaced && section.is_empty() {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&new_line);
+                replaced = true;
+            }
+            section = trimmed[1..trimmed.len() - 1].trim().to_lowercase();
+            out.push_str(raw_line);
+            out.push('\n');
+            continue;
+        }
+        if section.is_empty() && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some(eq) = trimmed.find('=') {
+                let k = trimmed[..eq]
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_lowercase();
+                if k == key_l {
+                    out.push_str(&new_line);
+                    replaced = true;
+                    continue;
+                }
+            }
+        }
+        out.push_str(raw_line);
+        out.push('\n');
+    }
+    if !replaced {
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&new_line);
+    }
+    out
+}
+
+/// Enable ACME in config.toml: `acme=true`, email, domains, and cert/key paths.
+///
+/// Also sets `web_tls_listen` when empty so a restart can bind HTTPS after issuance.
+pub fn enable_acme(
+    content: &str,
+    email: &str,
+    domain: &str,
+    cert_file: &str,
+    key_file: &str,
+    web_tls_listen: &str,
+) -> Result<String, String> {
+    let email = email.trim();
+    if email.is_empty() || !email.contains('@') {
+        return Err("valid ACME contact email required".into());
+    }
+    if email.contains(|c: char| c.is_control() || c == '"' || c == '[' || c == ']') {
+        return Err("invalid email characters".into());
+    }
+    let domain = domain.trim().trim_end_matches('.').to_lowercase();
+    if domain.is_empty() {
+        return Err("domain required".into());
+    }
+    if domain.contains(|c: char| c.is_control() || c == '"' || c == '[' || c == ']') {
+        return Err("invalid domain characters".into());
+    }
+    let cert_file = cert_file.trim();
+    let key_file = key_file.trim();
+    if cert_file.is_empty() || key_file.is_empty() {
+        return Err("tls cert and key paths required".into());
+    }
+    let mut out = set_top_level_bool(content, "acme", true);
+    out = set_top_level_string(&out, "acme_email", email);
+    out = set_top_level_string_list(&out, "acme_domains", &[domain.as_str()]);
+    out = set_top_level_string(&out, "tls_cert_file", cert_file);
+    out = set_top_level_string(&out, "tls_key_file", key_file);
+    if !web_tls_listen.trim().is_empty() {
+        // Only write web_tls_listen when provided (caller decides default).
+        let current = content.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("web_tls_listen") && t.contains('=')
+        });
+        if !current {
+            out = set_top_level_string(&out, "web_tls_listen", web_tls_listen.trim());
+        } else {
+            // Keep existing non-empty listen; if empty string on disk, set it.
+            let empty_listen = content.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with("web_tls_listen")
+                    && (t.contains("\"\"") || t.ends_with("= ") || t.ends_with('='))
+            });
+            if empty_listen {
+                out = set_top_level_string(&out, "web_tls_listen", web_tls_listen.trim());
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Write config atomically (temp file in same directory + rename).
 pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -501,5 +661,34 @@ web_listen = "0.0.0.0:8080"
         assert!(passwd::verify_password(stored, "password1"));
         // short password rejected
         assert!(complete_setup(base, "a", "short", "x.com").is_err());
+    }
+
+    #[test]
+    fn enable_acme_writes_keys_atomically() {
+        let base = r#"# gen
+domains = ["example.com"]
+data_dir = "./data"
+web_listen = "0.0.0.0:8080"
+acme = false
+
+[users]
+"admin" = "x"
+"#;
+        let out = enable_acme(
+            base,
+            "admin@example.com",
+            "mail.example.com",
+            "/tmp/tls.crt",
+            "/tmp/tls.key",
+            "0.0.0.0:8443",
+        )
+        .unwrap();
+        assert!(out.contains("acme = true"));
+        assert!(out.contains("acme_email = \"admin@example.com\""));
+        assert!(out.contains("acme_domains = [\"mail.example.com\"]"));
+        assert!(out.contains("tls_cert_file = \"/tmp/tls.crt\""));
+        assert!(out.contains("tls_key_file = \"/tmp/tls.key\""));
+        assert!(out.contains("web_tls_listen = \"0.0.0.0:8443\""));
+        assert!(enable_acme(base, "not-an-email", "x.com", "c", "k", "").is_err());
     }
 }

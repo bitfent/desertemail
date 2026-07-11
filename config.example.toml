@@ -88,6 +88,11 @@ web_listen = "0.0.0.0:8080"
 # smtps_listen = "0.0.0.0:465"      # SMTP submission over TLS
 # imaps_listen = "0.0.0.0:993"      # IMAP over TLS
 # web_tls_listen = "0.0.0.0:8443"   # HTTPS webmail
+# When true, honour X-Forwarded-Proto: https from a reverse proxy for "is TLS?"
+# detection (warning banner / Secure cookies). Default false — do not enable
+# unless desertemail is only reachable via a trusted proxy that strips client
+# spoofed X-Forwarded-Proto.
+# trust_proxy_headers = false
 # If true, AUTH on plaintext SMTP is rejected with 538 (default false).
 # require_tls_for_auth = false
 

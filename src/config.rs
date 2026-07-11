@@ -59,6 +59,11 @@ pub struct Config {
     pub imaps_listen: String,
     /// HTTPS webmail listen. Empty = disabled.
     pub web_tls_listen: String,
+    /// When true, honour `X-Forwarded-Proto` (and only that header) for "is this
+    /// request HTTPS?" detection — for reverse-proxy deployments that terminate
+    /// TLS in front of desertemail. Default **false** (ignore proxy headers so
+    /// clients cannot spoof HTTPS and suppress the cleartext warning).
+    pub trust_proxy_headers: bool,
     /// If true, reject AUTH on plaintext SMTP (reply 538). Default false.
     pub require_tls_for_auth: bool,
     /// Failed auth attempts before lockout (default 10).
@@ -156,6 +161,7 @@ impl Default for Config {
             smtps_listen: String::new(),
             imaps_listen: String::new(),
             web_tls_listen: String::new(),
+            trust_proxy_headers: false,
             require_tls_for_auth: false,
             auth_max_failures: 10,
             auth_window_secs: 300,
@@ -299,6 +305,7 @@ impl Config {
                 ("", "smtps_listen") => cfg.smtps_listen = val,
                 ("", "imaps_listen") => cfg.imaps_listen = val,
                 ("", "web_tls_listen") => cfg.web_tls_listen = val,
+                ("", "trust_proxy_headers") => cfg.trust_proxy_headers = parse_bool(&val),
                 ("", "require_tls_for_auth") => cfg.require_tls_for_auth = parse_bool(&val),
                 ("", "auth_max_failures") => {
                     cfg.auth_max_failures = parse_u32(&val, cfg.auth_max_failures)

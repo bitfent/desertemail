@@ -47,10 +47,31 @@ pub fn get_http01(token: &str) -> Option<String> {
     http01_tokens().lock().ok()?.get(token).cloned()
 }
 
+/// Whether the long-running ACME renewal loop has already been spawned.
+fn acme_loop_started() -> &'static std::sync::atomic::AtomicBool {
+    static S: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+    S.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+}
+
 /// Spawn background ACME issuance/renewal if `cfg.acme` is true.
 /// Does not block startup. Re-checks every 12 hours; renews when cert expires in <30 days.
+///
+/// Safe to call at runtime (e.g. after enabling ACME from the web UI). The first call
+/// starts the 12h renewal loop; later calls trigger a one-shot `ensure_certificate`
+/// with the provided config snapshot so newly written email/domains take effect.
 pub fn start_background(cfg: Arc<Config>) {
     if !cfg.acme {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    if acme_loop_started().swap(true, Ordering::SeqCst) {
+        // Loop already running — still attempt issuance with this snapshot.
+        thread::spawn(move || {
+            match ensure_certificate(&cfg) {
+                Ok(msg) => util::log!("ACME: {}", msg),
+                Err(e) => util::log_error!("ACME: issuance/renewal failed: {}", e),
+            }
+        });
         return;
     }
     thread::spawn(move || {
@@ -73,6 +94,14 @@ pub fn start_background(cfg: Arc<Config>) {
             }
         }
     });
+}
+
+/// Human-readable cert notAfter if openssl can parse the PEM (for the web TLS panel).
+pub fn cert_expiry_label(cert_path: &str) -> Option<String> {
+    let secs = cert_not_after_secs(Path::new(cert_path))?;
+    let days = (secs / 86400) as i64;
+    let (y, m, d) = util::civil_from_days(days);
+    Some(format!("{:04}-{:02}-{:02}", y, m, d))
 }
 
 /// Run issuance if cert missing or expiring within 30 days.

@@ -94,6 +94,286 @@ fn clear_session(token: Option<&str>) {
 }
 
 // ---------------------------------------------------------------------------
+// CSRF (synchronizer token derived from session — no extra server state)
+// ---------------------------------------------------------------------------
+
+/// Per-session CSRF token: SHA-256(session_seed || "csrf:" || session_token).
+/// Stable for the life of the session; regenerates when the session cookie changes.
+fn csrf_token_for(session_token: &str) -> String {
+    let mut material = Vec::with_capacity(32 + 5 + session_token.len());
+    material.extend_from_slice(session_seed());
+    material.extend_from_slice(b"csrf:");
+    material.extend_from_slice(session_token.as_bytes());
+    hex_encode(&crypto::sha256(&material))
+}
+
+/// Hidden input for authenticated mutating forms.
+fn csrf_field(session_token: &str) -> String {
+    if session_token.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<input type=\"hidden\" name=\"csrf\" value=\"{}\">",
+        esc(&csrf_token_for(session_token))
+    )
+}
+
+/// Extract `csrf` form field from urlencoded or multipart body.
+fn form_csrf_token(req: &Request) -> Option<String> {
+    let ct = req
+        .headers
+        .get("content-type")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    if ct.to_lowercase().contains("multipart/form-data") {
+        let (fields, _) = parse_multipart_form(req);
+        return fields.get("csrf").cloned();
+    }
+    form_body(req).get("csrf").cloned()
+}
+
+/// Primary CSRF check for authenticated POSTs (session cookie + form token).
+fn csrf_ok(req: &Request) -> bool {
+    let sess = match cookie_value(req, "session") {
+        Some(t) if !t.is_empty() => t,
+        _ => return false,
+    };
+    let expected = csrf_token_for(&sess);
+    match form_csrf_token(req) {
+        Some(provided) => passwd::ct_eq_str(&provided, &expected),
+        None => false,
+    }
+}
+
+fn csrf_fail_page(user: &str) -> Response {
+    let body = "<h1>Form expired</h1>\
+         <p>Please go back and try again. This can happen if you left a page open too long \
+         or submitted a form from another site.</p>\
+         <p><a href=\"/\">Return to inbox</a></p>";
+    Response::html(
+        403,
+        "Forbidden",
+        page_shell_app("Form expired", user, "", 0, None, body),
+    )
+}
+
+/// Origin + synchronizer-token check for every authenticated mutating POST.
+fn require_auth_post(req: &Request, user: &str) -> Option<Response> {
+    if !same_origin_ok(req) || !csrf_ok(req) {
+        Some(csrf_fail_page(user))
+    } else {
+        None
+    }
+}
+
+/// Inject `csrf` hidden fields into every POST form in an HTML fragment.
+fn inject_csrf_into_forms(html: &str, session_token: &str) -> String {
+    if session_token.is_empty() || html.is_empty() {
+        return html.to_string();
+    }
+    let field = csrf_field(session_token);
+    if field.is_empty() {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len() + field.len() * 8);
+    let mut rest = html;
+    while let Some(idx) = rest.find("<form") {
+        out.push_str(&rest[..idx]);
+        let after = &rest[idx..];
+        if let Some(end) = after.find('>') {
+            let open = &after[..=end];
+            let open_l = open.to_ascii_lowercase();
+            out.push_str(open);
+            // Only mutating forms (method=post). Forms without method default to GET.
+            if open_l.contains("method=\"post\"") || open_l.contains("method='post'") {
+                // Avoid double-injection if already present right after open tag.
+                let tail = &after[end + 1..];
+                if !tail.trim_start().starts_with(&field)
+                    && !tail
+                        .get(..200)
+                        .unwrap_or(tail)
+                        .contains("name=\"csrf\"")
+                {
+                    out.push_str(&field);
+                }
+            }
+            rest = &after[end + 1..];
+        } else {
+            out.push_str(after);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// TLS UX: warning banner, proxy-aware HTTPS detection, redirect + HSTS
+// ---------------------------------------------------------------------------
+
+/// True once `start_tls` has successfully bound the HTTPS web listener.
+fn web_tls_listener_active() -> &'static std::sync::atomic::AtomicBool {
+    static A: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+    A.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+}
+
+fn mark_web_tls_listener_active() {
+    web_tls_listener_active().store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Decision matrix for TLS UX (unit-tested).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TlsUxAction {
+    /// Serve as-is (loopback plaintext escape hatch, or already secure).
+    None,
+    /// Show cleartext warning banner (non-loopback HTTP, no trusted HTTPS signal).
+    WarnCleartext,
+    /// 301 redirect to https:// equivalent (TLS listener active, non-loopback HTTP).
+    RedirectHttps,
+}
+
+/// Pure decision function: peer loopback × tls-active × trust_proxy × X-Forwarded-Proto.
+fn tls_ux_decision(
+    peer_loopback: bool,
+    connection_secure: bool,
+    tls_listener_active: bool,
+    trust_proxy_headers: bool,
+    x_forwarded_proto: Option<&str>,
+) -> TlsUxAction {
+    let behind_tls = connection_is_https(connection_secure, trust_proxy_headers, x_forwarded_proto);
+    if behind_tls {
+        return TlsUxAction::None;
+    }
+    if peer_loopback {
+        return TlsUxAction::None;
+    }
+    if tls_listener_active {
+        return TlsUxAction::RedirectHttps;
+    }
+    TlsUxAction::WarnCleartext
+}
+
+/// Direct TLS listener, or (when trust_proxy_headers) X-Forwarded-Proto: https.
+fn connection_is_https(
+    connection_secure: bool,
+    trust_proxy_headers: bool,
+    x_forwarded_proto: Option<&str>,
+) -> bool {
+    if connection_secure {
+        return true;
+    }
+    if !trust_proxy_headers {
+        return false;
+    }
+    let Some(proto) = x_forwarded_proto else {
+        return false;
+    };
+    // First value if comma-separated chain.
+    let first = proto.split(',').next().unwrap_or("").trim();
+    first.eq_ignore_ascii_case("https")
+}
+
+fn request_x_forwarded_proto(req: &Request) -> Option<&str> {
+    req.headers.get("x-forwarded-proto").map(|s| s.as_str())
+}
+
+fn should_add_hsts(connection_secure: bool) -> bool {
+    connection_secure
+}
+
+/// Build https:// Location for HTTP→HTTPS redirect (preserve host/path/query; tls port when ≠443).
+fn https_redirect_location(req: &Request, cfg: &Config) -> String {
+    let host_hdr = req
+        .headers
+        .get("host")
+        .map(|s| s.as_str())
+        .filter(|h| !h.is_empty())
+        .unwrap_or("localhost");
+    // Strip any existing port from Host; re-attach TLS port when non-443.
+    let hostname = host_hdr.split(':').next().unwrap_or(host_hdr);
+    let tls_port: Option<u16> = cfg
+        .web_tls_listen
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok());
+    let authority = match tls_port {
+        Some(443) | None => hostname.to_string(),
+        Some(p) => format!("{}:{}", hostname, p),
+    };
+    let path = if req.path.is_empty() {
+        "/"
+    } else {
+        req.path.as_str()
+    };
+    // Reconstruct query string from parsed map (order not critical for redirect).
+    let mut qparts: Vec<String> = req
+        .query
+        .iter()
+        .map(|(k, v)| {
+            if v.is_empty() {
+                urlencode_component(k)
+            } else {
+                format!("{}={}", urlencode_component(k), urlencode_component(v))
+            }
+        })
+        .collect();
+    qparts.sort();
+    let query = if qparts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", qparts.join("&"))
+    };
+    format!("https://{}{}{}", authority, path, query)
+}
+
+// Per-request context for page renderers (thread-per-connection server).
+thread_local! {
+    static REQ_SESSION: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+    static REQ_TLS_WARN: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+fn with_request_render_ctx<R>(session: &str, tls_warn: bool, f: impl FnOnce() -> R) -> R {
+    REQ_SESSION.with(|c| *c.borrow_mut() = session.to_string());
+    REQ_TLS_WARN.with(|c| c.set(tls_warn));
+    let r = f();
+    REQ_SESSION.with(|c| c.borrow_mut().clear());
+    REQ_TLS_WARN.with(|c| c.set(false));
+    r
+}
+
+fn current_session_token() -> String {
+    REQ_SESSION.with(|c| c.borrow().clone())
+}
+
+fn current_tls_warn() -> bool {
+    REQ_TLS_WARN.with(|c| c.get())
+}
+
+fn tls_warning_banner_html() -> String {
+    if !current_tls_warn() {
+        return String::new();
+    }
+    "<div class=\"banner tls-warn\" role=\"alert\">\
+     <a class=\"dismiss\" href=\"?dismiss_tls_warn=1\">dismiss</a>\
+     Connection is not encrypted — enable TLS in \
+     <a href=\"/dns\">Security settings</a>.\
+     </div>"
+        .to_string()
+}
+
+fn tls_warn_dismissed(req: &Request) -> bool {
+    cookie_value(req, "dismiss_tls_warn").as_deref() == Some("1")
+        || req.query.get("dismiss_tls_warn").map(|s| s.as_str()) == Some("1")
+}
+
+fn maybe_dismiss_tls_cookie(req: &Request, mut resp: Response) -> Response {
+    if req.query.get("dismiss_tls_warn").map(|s| s.as_str()) == Some("1") {
+        resp = resp.with_cookie("dismiss_tls_warn=1; Path=/; SameSite=Lax; Max-Age=86400");
+    }
+    resp
+}
+
+// ---------------------------------------------------------------------------
 // HTTP primitives
 // ---------------------------------------------------------------------------
 
@@ -544,6 +824,19 @@ impl Response {
         }
     }
 
+    fn redirect_permanent(location: &str) -> Self {
+        Self {
+            status: 301,
+            reason: "Moved Permanently",
+            headers: vec![
+                ("Location".into(), location.to_string()),
+                ("Content-Length".into(), "0".into()),
+                ("Connection".into(), "close".into()),
+            ],
+            body: Vec::new(),
+        }
+    }
+
     fn with_cookie(mut self, cookie: &str) -> Self {
         self.headers
             .push(("Set-Cookie".into(), cookie.to_string()));
@@ -668,6 +961,9 @@ fn start_listener(
                 return;
             }
         };
+        if secure {
+            mark_web_tls_listener_active();
+        }
         util::log!(
             "web{}: listening on {}",
             if secure { "s" } else { "" },
@@ -762,7 +1058,10 @@ fn handle_connection(
         req.path
     );
 
-    let resp = route(cfg, &req, secure, &peer_ip);
+    let mut resp = route(cfg, &req, secure, &peer_ip);
+    if should_add_hsts(secure) {
+        resp = resp.with_header("Strict-Transport-Security", "max-age=15552000");
+    }
     resp.write_to(reader.get_mut())
 }
 
@@ -787,6 +1086,7 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
 
     // ACME HTTP-01 challenge (no auth) — required for Let's Encrypt when acme=true.
     // Must be reachable on port 80 (or a reverse-proxy path to this server).
+    // Never HTTP→HTTPS redirect this path (Let's Encrypt validates over plain HTTP).
     if req.method == "GET" && req.path.starts_with("/.well-known/acme-challenge/") {
         let token = req
             .path
@@ -798,6 +1098,36 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
         return Response::plain(404, "not found");
     }
 
+    // HTTP→HTTPS redirect when the TLS web listener is active (non-loopback only).
+    let xfp = request_x_forwarded_proto(req);
+    let tls_active = web_tls_listener_active().load(std::sync::atomic::Ordering::SeqCst);
+    let ux = tls_ux_decision(
+        is_loopback_peer(peer_ip),
+        secure,
+        tls_active,
+        cfg.trust_proxy_headers,
+        xfp,
+    );
+    if ux == TlsUxAction::RedirectHttps {
+        return Response::redirect_permanent(&https_redirect_location(req, cfg));
+    }
+    let show_tls_warn = ux == TlsUxAction::WarnCleartext && !tls_warn_dismissed(req);
+    let sess = token.as_deref().unwrap_or("");
+
+    with_request_render_ctx(sess, show_tls_warn, || {
+    let resp = route_inner(cfg, req, secure, peer_ip, token.as_deref(), user);
+    maybe_dismiss_tls_cookie(req, resp)
+    })
+}
+
+fn route_inner(
+    cfg: &Config,
+    req: &Request,
+    secure: bool,
+    peer_ip: &str,
+    token: Option<&str>,
+    user: Option<String>,
+) -> Response {
     // First-run setup: empty [users] → everything goes to /setup (except healthz/metrics/acme).
     let pending = cfg.setup_pending();
     if pending {
@@ -818,7 +1148,7 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
         ("GET", "/invite") => page_invite(cfg, req, None, 200),
         ("POST", "/invite") => handle_invite_redeem(cfg, req, secure, peer_ip),
         ("GET", "/logout") => {
-            clear_session(token.as_deref());
+            clear_session(token);
             Response::redirect("/login").with_cookie(&clear_session_cookie(secure))
         }
         _ => {
@@ -847,6 +1177,7 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
                 ("POST", "/dns/check") => handle_dns_check(cfg, &user, req, peer_ip),
                 ("POST", "/dns/dkim/generate") => handle_dns_dkim_generate(cfg, &user, req),
                 ("POST", "/dns/settings") => handle_dns_settings(cfg, &user, req),
+                ("POST", "/dns/acme/enable") => handle_dns_acme_enable(cfg, &user, req),
                 ("GET", "/admin") => page_admin(cfg, &user, None, None),
                 ("GET", "/admin/backup") => handle_admin_backup(cfg, &user),
                 ("POST", "/admin") => handle_admin_post(cfg, &user, req),
@@ -974,6 +1305,7 @@ fn page_setup(
          <label>Primary domain</label>\
          <input type=\"text\" name=\"domain\" value=\"{}\" required autocomplete=\"off\">\
          <p class=\"muted\">Used for your email addresses (e.g. admin@domain). You can change DNS later.</p>\
+         <p class=\"muted\">After DNS, enable TLS on the DNS page (Security) so passwords are never sent in cleartext.</p>\
          <p><button type=\"submit\">Create admin account</button></p></form></div></div>",
         CACTUS_SVG,
         err,
@@ -1211,6 +1543,13 @@ code{background:var(--code-bg);color:var(--code-ink);padding:.1rem .35rem;font-s
 .banner{
   background:var(--panel);border:4px solid var(--border);
   box-shadow:4px 4px 0 0 var(--accent-dark);padding:.75rem 1rem;margin:0 0 1rem;
+}
+.banner.tls-warn{
+  border-color:#b00000;background:#fde8e8;color:#3a2410;
+  box-shadow:4px 4px 0 0 #7a0000;
+}
+@media (prefers-color-scheme: dark){
+  .banner.tls-warn{background:#3a1515;color:#ffc9c9;border-color:#ff8a80}
 }
 .banner a.dismiss{float:right;border-bottom:none;font-size:.85rem}
 .dns-table{width:100%;border-collapse:collapse;font-size:.88rem}
@@ -1585,14 +1924,16 @@ fn page_shell_nav(title: &str, user: &str, active: &str, body: &str) -> String {
              </div></nav>",
             CACTUS_SVG
         );
+        let warn = tls_warning_banner_html();
         return format!(
             "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-             <title>{}</title>{}<style>{}</style></head><body>{}<div class=\"wrap\">{}</div></body></html>",
+             <title>{}</title>{}<style>{}</style></head><body>{}<div class=\"wrap\">{}{}</div></body></html>",
             esc(title),
             FAVICON_LINK,
             STYLE,
             nav,
+            warn,
             body
         );
     }
@@ -1717,6 +2058,14 @@ var t=ev.target;if(t.closest("input,button,form,a,label"))return;
 location.href=row.getAttribute("data-href");
 })});
 })();</script>"##;
+    let sess = current_session_token();
+    let body = inject_csrf_into_forms(body, &sess);
+    let warn = tls_warning_banner_html();
+    let content = if warn.is_empty() {
+        body
+    } else {
+        format!("{}{}", warn, body)
+    };
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -1727,7 +2076,7 @@ location.href=row.getAttribute("data-href");
         STYLE,
         sidebar,
         topbar,
-        body,
+        content,
         script
     )
 }
@@ -2408,8 +2757,8 @@ fn find_message_in_folder(
 }
 
 fn handle_star(cfg: &Config, user: &str, req: &Request) -> Response {
-    if !same_origin_ok(req) {
-        return Response::redirect("/");
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let id: u32 = form.get("id").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2434,8 +2783,8 @@ fn handle_star(cfg: &Config, user: &str, req: &Request) -> Response {
 }
 
 fn handle_bulk(cfg: &Config, user: &str, req: &Request) -> Response {
-    if !same_origin_ok(req) {
-        return Response::redirect("/");
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let action = form.get("action").map(|s| s.as_str()).unwrap_or("");
@@ -2539,8 +2888,8 @@ fn collect_form_ids(req: &Request) -> Vec<u32> {
 }
 
 fn handle_empty_trash(cfg: &Config, user: &str, req: &Request) -> Response {
-    if !same_origin_ok(req) {
-        return Response::redirect("/trash");
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let mb = mailbox_name(cfg, user);
     if let Ok(md) = Maildir::open(&cfg.data_dir, &format!("{}/.Trash", mb)) {
@@ -2554,8 +2903,8 @@ fn handle_empty_trash(cfg: &Config, user: &str, req: &Request) -> Response {
 }
 
 fn handle_empty_spam(cfg: &Config, user: &str, req: &Request) -> Response {
-    if !same_origin_ok(req) {
-        return Response::redirect("/spam");
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let mb = mailbox_name(cfg, user);
     if let Ok(md) = Maildir::open(&cfg.data_dir, &format!("{}/.Junk", mb)) {
@@ -2746,6 +3095,8 @@ fn page_dns(
             .to_string()
     };
 
+    let tls_panel = tls_security_panel_html(cfg, &mailhost);
+
     let body = format!(
         "<h1>DNS</h1>{}\
          <p>Add these records at your DNS provider (Cloudflare, Namecheap, Route&nbsp;53, …). \
@@ -2761,6 +3112,7 @@ fn page_dns(
          <button type=\"submit\">Check DNS</button></form>\
          </div>\
          <div class=\"pix-panel\"><h2>DKIM key</h2>{}</div>\
+         <div class=\"pix-panel\"><h2>Security / TLS</h2>{}</div>\
          <div class=\"pix-panel\"><h2>Mail host &amp; domain</h2>\
          <form method=\"post\" action=\"/dns/settings\">\
          <label>Public mail hostname (MX target)</label>\
@@ -2793,6 +3145,7 @@ fn page_dns(
         ip_hint,
         rows,
         dkim_panel,
+        tls_panel,
         esc(&mailhost),
         esc(&primary)
     );
@@ -2864,8 +3217,8 @@ fn handle_dns_check(cfg: &Config, user: &str, req: &Request, peer_ip: &str) -> R
     if !is_admin(cfg, user) {
         return page_dns(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_dns(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     if !ratelimit::check_allowed(peer_ip) {
         return page_dns(
@@ -2893,8 +3246,8 @@ fn handle_dns_dkim_generate(cfg: &Config, user: &str, req: &Request) -> Response
     if !is_admin(cfg, user) {
         return page_dns(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_dns(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let confirm = form.get("confirm").map(|s| s.as_str()) == Some("1");
@@ -2997,12 +3350,226 @@ fn dkim_key_path_for_config(cfg: &Config) -> Result<std::path::PathBuf, String> 
     Ok(dir.join("dkim.pem"))
 }
 
+/// Default PEM paths next to config.toml for ACME-written certs.
+fn default_tls_paths(cfg: &Config) -> (String, String) {
+    let dir = cfg
+        .config_path
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let cert = cfg
+        .tls_cert_file
+        .clone()
+        .unwrap_or_else(|| dir.join("tls.crt").to_string_lossy().into_owned());
+    let key = cfg
+        .tls_key_file
+        .clone()
+        .unwrap_or_else(|| dir.join("tls.key").to_string_lossy().into_owned());
+    (cert, key)
+}
+
+/// Live + on-disk snapshot of ACME / TLS state for the Security panel.
+fn tls_state_from_disk(cfg: &Config) -> (bool, String, Vec<String>, Option<String>, Option<String>) {
+    // Prefer re-reading config so UI reflects post-enable writes without restart.
+    if let Some(path) = cfg.config_path.as_ref() {
+        if let Ok(fresh) = Config::load(path) {
+            return (
+                fresh.acme,
+                fresh.acme_email,
+                fresh.acme_domains,
+                fresh.tls_cert_file,
+                fresh.tls_key_file,
+            );
+        }
+    }
+    (
+        cfg.acme,
+        cfg.acme_email.clone(),
+        cfg.acme_domains.clone(),
+        cfg.tls_cert_file.clone(),
+        cfg.tls_key_file.clone(),
+    )
+}
+
+fn tls_security_panel_html(cfg: &Config, mailhost: &str) -> String {
+    let (acme_on, acme_email, acme_domains, cert_path, _key_path) = tls_state_from_disk(cfg);
+    let cert_exists = cert_path
+        .as_ref()
+        .map(|p| std::path::Path::new(p).is_file())
+        .unwrap_or(false);
+    let expiry = cert_path
+        .as_ref()
+        .filter(|_| cert_exists)
+        .and_then(|p| acme::cert_expiry_label(p));
+    let tls_listen_active =
+        web_tls_listener_active().load(std::sync::atomic::Ordering::SeqCst);
+    let state_line = if acme_on && cert_exists {
+        let exp = expiry
+            .as_ref()
+            .map(|e| format!(" (expires {})", esc(e)))
+            .unwrap_or_default();
+        format!(
+            "<p class=\"ok\">ACME active — certificate at <code>{}</code>{}.</p>",
+            esc(cert_path.as_deref().unwrap_or("")),
+            exp
+        )
+    } else if acme_on {
+        "<p class=\"warn\">ACME enabled in config — waiting for certificate issuance \
+         (HTTP-01 needs your domain’s A/AAAA pointing here and port <strong>80</strong> \
+         reachable for <code>/.well-known/acme-challenge/</code>).</p>"
+            .to_string()
+    } else if cert_exists {
+        let exp = expiry
+            .as_ref()
+            .map(|e| format!(" (expires {})", esc(e)))
+            .unwrap_or_default();
+        format!(
+            "<p class=\"ok\">TLS certificate file present: <code>{}</code>{}.</p>",
+            esc(cert_path.as_deref().unwrap_or("")),
+            exp
+        )
+    } else {
+        "<p class=\"warn\">No TLS — webmail is plain HTTP. Enable ACME below or set \
+         <code>tls_cert_file</code> / <code>tls_key_file</code> in config.</p>"
+            .to_string()
+    };
+    let listener_line = if tls_listen_active {
+        format!(
+            "<p class=\"ok\">HTTPS listener active on <code>{}</code>.</p>",
+            esc(&cfg.web_tls_listen)
+        )
+    } else if !cfg.web_tls_listen.is_empty() {
+        format!(
+            "<p class=\"muted\">Configured <code>web_tls_listen = {}</code> but HTTPS is not \
+             bound yet (needs cert + restart after first issuance).</p>",
+            esc(&cfg.web_tls_listen)
+        )
+    } else {
+        "<p class=\"muted\">No <code>web_tls_listen</code> yet — enabling ACME will set \
+         <code>0.0.0.0:8443</code> (restart after the cert arrives to serve HTTPS).</p>"
+            .to_string()
+    };
+    let domains_disp = if acme_domains.is_empty() {
+        mailhost.to_string()
+    } else {
+        acme_domains.join(", ")
+    };
+    let email_prefill = if acme_email.is_empty() {
+        cfg.admin_user_name().unwrap_or_default()
+    } else {
+        acme_email
+    };
+    let form = if acme_on {
+        format!(
+            "<p class=\"muted\">ACME domains: <code>{}</code> · contact <code>{}</code>. \
+             Background renewal runs every 12h when &lt;30 days remain.</p>",
+            esc(&domains_disp),
+            esc(&email_prefill)
+        )
+    } else {
+        format!(
+            "<p>One-click Let’s Encrypt (ACME HTTP-01). Requirements:</p>\
+             <ul>\
+             <li>A/AAAA for <code>{}</code> pointing at this host</li>\
+             <li>Port <strong>80</strong> reachable from the internet (challenge path \
+             <code>/.well-known/acme-challenge/…</code> on <code>web_listen</code>)</li>\
+             <li>After the cert is written, <strong>restart desertemail</strong> so the \
+             HTTPS listener loads it (and binds <code>web_tls_listen</code>)</li>\
+             </ul>\
+             <form method=\"post\" action=\"/dns/acme/enable\">\
+             <label>Contact email (Let’s Encrypt account)</label>\
+             <input type=\"email\" name=\"email\" value=\"{}\" required autocomplete=\"email\">\
+             <p class=\"muted\">Certificate domain: <code>{}</code> (mail host). \
+             Writes <code>acme=true</code>, <code>acme_email</code>, \
+             <code>acme_domains</code>, and default cert paths atomically.</p>\
+             <p><button type=\"submit\">Enable ACME / Let’s Encrypt</button></p></form>",
+            esc(mailhost),
+            esc(&email_prefill),
+            esc(mailhost)
+        )
+    };
+    format!("{}{}{}", state_line, listener_line, form)
+}
+
+fn handle_dns_acme_enable(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_dns(cfg, user, Some("error: access denied"), None);
+    }
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
+    }
+    let form = form_body(req);
+    let email = form.get("email").map(|s| s.trim()).unwrap_or("");
+    if email.is_empty() {
+        return page_dns(cfg, user, Some("error: contact email required"), None);
+    }
+    let mailhost = crate::doctor::mail_host_for_ui(cfg);
+    let domain = mailhost.trim().trim_end_matches('.').to_lowercase();
+    if domain.is_empty() || domain == "localhost" {
+        return page_dns(
+            cfg,
+            user,
+            Some("error: set a real public mail hostname before enabling ACME"),
+            None,
+        );
+    }
+    let (cert_path, key_path) = default_tls_paths(cfg);
+    let web_tls = if cfg.web_tls_listen.is_empty() {
+        "0.0.0.0:8443"
+    } else {
+        ""
+    };
+    let email_owned = email.to_string();
+    let domain_owned = domain.clone();
+    let cert_owned = cert_path.clone();
+    let key_owned = key_path.clone();
+    let web_tls_owned = web_tls.to_string();
+    match persist_and_reload(cfg, |c| {
+        useredit::enable_acme(
+            c,
+            &email_owned,
+            &domain_owned,
+            &cert_owned,
+            &key_owned,
+            &web_tls_owned,
+        )
+    }) {
+        Ok(()) => {
+            // On-demand ACME: snapshot with written paths and start issuance thread.
+            let mut snap = if let Some(path) = cfg.config_path.as_ref() {
+                Config::load(path).unwrap_or_else(|_| cfg.clone())
+            } else {
+                cfg.clone()
+            };
+            snap.acme = true;
+            snap.acme_email = email_owned.clone();
+            snap.acme_domains = vec![domain_owned.clone()];
+            snap.tls_cert_file = Some(cert_path.clone());
+            snap.tls_key_file = Some(key_path.clone());
+            snap.data_dir = cfg.data_dir.clone();
+            snap.config_path = cfg.config_path.clone();
+            acme::start_background(std::sync::Arc::new(snap));
+            page_dns(
+                cfg,
+                user,
+                Some(
+                    "ACME enabled — certificate request started in the background. \
+                     Ensure port 80 and DNS A/AAAA are ready. Restart desertemail after \
+                     the cert is written so HTTPS (web_tls_listen) can load it.",
+                ),
+                None,
+            )
+        }
+        Err(e) => page_dns(cfg, user, Some(&format!("error: {}", e)), None),
+    }
+}
+
 fn handle_dns_settings(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
         return page_dns(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_dns(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let public_host = form
@@ -3940,8 +4507,8 @@ fn page_compose(
 }
 
 fn handle_send(cfg: &Config, user: &str, req: &Request) -> Response {
-    if !same_origin_ok(req) {
-        return page_compose(cfg, user, req, Some("cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let (form, files) = if req
         .headers
@@ -4017,8 +4584,8 @@ fn handle_send(cfg: &Config, user: &str, req: &Request) -> Response {
 }
 
 fn handle_save_draft(cfg: &Config, user: &str, req: &Request) -> Response {
-    if !same_origin_ok(req) {
-        return page_compose(cfg, user, req, Some("cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let (form, files) = if req
         .headers
@@ -4601,8 +5168,8 @@ fn handle_admin_user_add(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
         return page_admin(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let email = form.get("email").map(|s| s.trim()).unwrap_or("");
@@ -4627,8 +5194,8 @@ fn handle_admin_user_remove(cfg: &Config, user: &str, req: &Request) -> Response
     if !is_admin(cfg, user) {
         return page_admin(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let email = form.get("email").map(|s| s.trim()).unwrap_or("");
@@ -4654,8 +5221,8 @@ fn handle_admin_user_quota(cfg: &Config, user: &str, req: &Request) -> Response 
     if !is_admin(cfg, user) {
         return page_admin(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let email = form.get("email").map(|s| s.trim()).unwrap_or("");
@@ -4839,8 +5406,8 @@ fn handle_queue_delete(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
         return page_admin(cfg, user, None, None);
     }
-    if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let id = form.get("id").map(|s| s.as_str()).unwrap_or("");
@@ -4855,8 +5422,8 @@ fn handle_admin_invite(cfg: &Config, user: &str, req: &Request, secure: bool) ->
     if !is_admin(cfg, user) {
         return page_admin(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let email_raw = form.get("email").map(|s| s.trim()).unwrap_or("");
@@ -4961,8 +5528,8 @@ fn handle_admin_invite_revoke(cfg: &Config, user: &str, req: &Request) -> Respon
     if !is_admin(cfg, user) {
         return page_admin(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let token_hash = form.get("token_hash").map(|s| s.as_str()).unwrap_or("");
@@ -4982,8 +5549,8 @@ fn handle_admin_invite_regenerate(
     if !is_admin(cfg, user) {
         return page_admin(cfg, user, Some("error: access denied"), None);
     }
-    if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
     }
     let form = form_body(req);
     let token_hash = form.get("token_hash").map(|s| s.as_str()).unwrap_or("");
@@ -5233,6 +5800,90 @@ mod tests {
         assert!(is_loopback_peer("::ffff:127.0.0.1"));
         assert!(!is_loopback_peer("192.168.1.1"));
         assert!(!is_loopback_peer("10.0.0.2"));
+    }
+
+    #[test]
+    fn csrf_token_stable_per_session_and_rejects_wrong() {
+        let sess_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let sess_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let t1 = csrf_token_for(sess_a);
+        let t2 = csrf_token_for(sess_a);
+        assert_eq!(t1, t2, "same session must derive the same CSRF token");
+        assert_ne!(t1, csrf_token_for(sess_b), "different sessions must differ");
+        assert_eq!(t1.len(), 64);
+        assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
+        // Constant-time helper rejects wrong token
+        assert!(!passwd::ct_eq_str(&t1, &csrf_token_for(sess_b)));
+        assert!(passwd::ct_eq_str(&t1, &csrf_token_for(sess_a)));
+        // csrf_field embeds the token
+        let field = csrf_field(sess_a);
+        assert!(field.contains("name=\"csrf\""));
+        assert!(field.contains(&t1));
+        // inject into forms
+        let html = r#"<form method="post" action="/send"><input name="to"></form>
+<form method="get" action="/search"><input name="q"></form>"#;
+        let out = inject_csrf_into_forms(html, sess_a);
+        assert_eq!(out.matches("name=\"csrf\"").count(), 1);
+        assert!(out.contains(&t1));
+        // GET form must not get a token
+        assert!(out.contains("method=\"get\""));
+        let get_part = out.split("method=\"get\"").nth(1).unwrap();
+        assert!(!get_part.contains("name=\"csrf\""));
+    }
+
+    #[test]
+    fn tls_ux_decision_matrix() {
+        // peer_loopback × connection_secure × tls_listener_active × trust_proxy × xfp
+        // Loopback plaintext: no banner, no redirect
+        assert_eq!(
+            tls_ux_decision(true, false, false, false, Option::<&str>::None),
+            TlsUxAction::None
+        );
+        assert_eq!(
+            tls_ux_decision(true, false, true, false, Option::<&str>::None),
+            TlsUxAction::None
+        );
+        // Non-loopback plaintext, no TLS listener: warn
+        assert_eq!(
+            tls_ux_decision(false, false, false, false, Option::<&str>::None),
+            TlsUxAction::WarnCleartext
+        );
+        // Non-loopback plaintext, TLS listener active: redirect
+        assert_eq!(
+            tls_ux_decision(false, false, true, false, Option::<&str>::None),
+            TlsUxAction::RedirectHttps
+        );
+        // Direct TLS: no warn/redirect
+        assert_eq!(
+            tls_ux_decision(false, true, true, false, Option::<&str>::None),
+            TlsUxAction::None
+        );
+        // Proxy headers ignored by default (even if X-Forwarded-Proto: https)
+        assert_eq!(
+            tls_ux_decision(false, false, false, false, Some("https")),
+            TlsUxAction::WarnCleartext
+        );
+        // trust_proxy_headers + X-Forwarded-Proto: https → treat as secure
+        assert_eq!(
+            tls_ux_decision(false, false, false, true, Some("https")),
+            TlsUxAction::None
+        );
+        assert_eq!(
+            tls_ux_decision(false, false, true, true, Some("https")),
+            TlsUxAction::None
+        );
+        // trust_proxy but http forwarded still cleartext
+        assert_eq!(
+            tls_ux_decision(false, false, false, true, Some("http")),
+            TlsUxAction::WarnCleartext
+        );
+        // HSTS only when connection is actually TLS
+        assert!(should_add_hsts(true));
+        assert!(!should_add_hsts(false));
+        assert!(connection_is_https(true, false, Option::<&str>::None));
+        assert!(!connection_is_https(false, false, Some("https")));
+        assert!(connection_is_https(false, true, Some("https")));
+        assert!(connection_is_https(false, true, Some("HTTPS, http")));
     }
 
     #[test]
