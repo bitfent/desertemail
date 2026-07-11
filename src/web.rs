@@ -685,36 +685,307 @@ fn origin_matches_host(origin_or_referer: &str, host: &str) -> bool {
 // HTML helpers
 // ---------------------------------------------------------------------------
 
-const STYLE: &str = "\
-body{font-family:system-ui,sans-serif;max-width:900px;margin:1.5rem auto;padding:0 1rem;color:#222}\
-a{color:#06c}nav a{margin-right:1rem}\
-table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #ddd;padding:.4rem .5rem;text-align:left}\
-tr.unread td{font-weight:600}\
-pre{background:#f6f6f6;padding:.75rem;overflow:auto;white-space:pre-wrap;word-break:break-word}\
-.msg-body{white-space:pre-wrap;word-break:break-word;border:1px solid #eee;padding:.75rem}\
-form label{display:block;margin:.5rem 0 .2rem}input[type=text],input[type=password],textarea{width:100%;box-sizing:border-box;padding:.4rem}\
-textarea{min-height:12rem}button,.btn{padding:.4rem .8rem;cursor:pointer}\
-.err{color:#a00}.ok{color:#060}h1{font-size:1.4rem}";
+/// Pixel cactus favicon (same data-URI as site/index.html).
+const FAVICON_LINK: &str = "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2012%2016'%20shape-rendering='crispEdges'%3E%3Crect%20x='6'%20y='0'%20width='1'%20height='1'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='3'%20height='15'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='1'%20height='15'%20fill='%23FFB03A'/%3E%3Crect%20x='7'%20y='1'%20width='1'%20height='15'%20fill='%23B35E00'/%3E%3Crect%20x='1'%20y='4'%20width='2'%20height='5'%20fill='%23E8850C'/%3E%3Crect%20x='1'%20y='4'%20width='1'%20height='5'%20fill='%23FFB03A'/%3E%3Crect%20x='3'%20y='7'%20width='2'%20height='2'%20fill='%23E8850C'/%3E%3Crect%20x='3'%20y='8'%20width='2'%20height='1'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='2'%20height='6'%20fill='%23E8850C'/%3E%3Crect%20x='10'%20y='5'%20width='1'%20height='6'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='1'%20height='1'%20fill='%23FFB03A'/%3E%3Crect%20x='8'%20y='9'%20width='1'%20height='2'%20fill='%23E8850C'/%3E%3C/svg%3E\">";
+
+/// Inline cactus SVG for nav brand / login card (same pixel art as site).
+const CACTUS_SVG: &str = "<svg class=\"nav-logo\" viewBox=\"0 0 12 16\" shape-rendering=\"crispEdges\" role=\"img\" aria-hidden=\"true\">\
+<rect x=\"6\" y=\"0\" width=\"1\" height=\"1\" fill=\"#E8850C\"/>\
+<rect x=\"5\" y=\"1\" width=\"3\" height=\"15\" fill=\"#E8850C\"/>\
+<rect x=\"5\" y=\"1\" width=\"1\" height=\"15\" fill=\"#FFB03A\"/>\
+<rect x=\"7\" y=\"1\" width=\"1\" height=\"15\" fill=\"#B35E00\"/>\
+<rect x=\"1\" y=\"4\" width=\"2\" height=\"5\" fill=\"#E8850C\"/>\
+<rect x=\"1\" y=\"4\" width=\"1\" height=\"5\" fill=\"#FFB03A\"/>\
+<rect x=\"3\" y=\"7\" width=\"2\" height=\"2\" fill=\"#E8850C\"/>\
+<rect x=\"3\" y=\"8\" width=\"2\" height=\"1\" fill=\"#B35E00\"/>\
+<rect x=\"9\" y=\"5\" width=\"2\" height=\"6\" fill=\"#E8850C\"/>\
+<rect x=\"10\" y=\"5\" width=\"1\" height=\"6\" fill=\"#B35E00\"/>\
+<rect x=\"9\" y=\"5\" width=\"1\" height=\"1\" fill=\"#FFB03A\"/>\
+<rect x=\"8\" y=\"9\" width=\"1\" height=\"2\" fill=\"#E8850C\"/></svg>";
+
+const STYLE: &str = r#"
+:root{
+  --bg:#f5e3c0;--panel:#fdf3dd;--ink:#3a2410;--muted:#7a5c38;
+  --accent:#e8850c;--accent-dark:#b35e00;--accent-light:#ffb03a;
+  --border:#3a2410;--code-bg:#2a1a08;--code-ink:#ffd591;
+  --nav-h:56px;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#17110a;--panel:#211809;--ink:#f2e3c8;--muted:#b99a6e;
+    --accent:#e8850c;--accent-dark:#B35E00;--accent-light:#ffb03a;
+    --border:#e8850c;--code-bg:#0d0904;--code-ink:#ffd591;
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Courier New",Courier,ui-monospace,monospace;
+  font-size:16px;line-height:1.55;image-rendering:pixelated;
+  overflow-x:clip;
+}
+.wrap{max-width:900px;margin:0 auto;padding:1.25rem 1rem 3rem}
+a{color:var(--accent-dark);text-decoration:none;border-bottom:2px solid var(--accent);font-weight:700}
+@media (prefers-color-scheme: dark){a{color:var(--accent-light)}}
+a:hover{background:var(--accent);color:#2a1a08}
+h1,h2,h3{
+  font-family:"Courier New",Courier,ui-monospace,monospace;
+  font-weight:700;text-transform:uppercase;letter-spacing:.12em;line-height:1.3;
+}
+h1{font-size:1.35rem;margin:.4rem 0 .8rem;text-shadow:2px 2px 0 var(--accent-dark)}
+h2{font-size:1.05rem;margin:1.4rem 0 .7rem;color:var(--accent)}
+h2::before{content:"▶ ";color:var(--accent-dark)}
+h3{font-size:.95rem;margin:1.1rem 0 .5rem;color:var(--accent)}
+h3::before{content:"▶ ";color:var(--accent-dark)}
+p{margin:.5rem 0}
+ul{list-style:none;padding:0;margin:.4rem 0}
+ul li{margin:.35rem 0;padding-left:.1rem}
+ul li::before{content:"■ ";color:var(--accent)}
+code{background:var(--code-bg);color:var(--code-ink);padding:.1rem .35rem;font-size:.9em}
+.err{color:#b00000;font-weight:700}
+.ok{color:#2d6a1e;font-weight:700}
+@media (prefers-color-scheme: dark){
+  .err{color:#ff8a80}.ok{color:#81c784}
+}
+
+/* --- sticky 8-bit navbar --- */
+.site-nav{
+  position:sticky;top:0;z-index:100;
+  background:var(--panel);
+  border-bottom:4px solid var(--border);
+  box-shadow:0 4px 0 0 var(--accent-dark);
+}
+.site-nav-inner{
+  max-width:900px;margin:0 auto;padding:0 1rem;
+  min-height:var(--nav-h);display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;
+}
+.nav-brand{
+  display:flex;align-items:center;gap:.5rem;
+  font-weight:700;text-transform:uppercase;letter-spacing:.12em;font-size:.85rem;
+  color:var(--ink);border-bottom:none;text-decoration:none;
+}
+.nav-brand:hover{background:transparent;color:var(--ink)}
+.nav-logo{width:22px;height:29px;flex:none;display:block}
+.nav-user{color:var(--muted);font-size:.78rem;margin-left:.25rem;letter-spacing:0;text-transform:none;font-weight:600}
+.nav-links{
+  display:flex;align-items:center;gap:.15rem 1rem;margin-left:auto;
+  list-style:none;padding:0;margin-top:0;margin-bottom:0;
+}
+.nav-links li{margin:0}
+.nav-links li::before{content:none}
+.nav-links a{
+  display:inline-flex;align-items:center;min-height:44px;padding:.2rem .15rem;
+  font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:.78rem;
+  color:var(--ink);border-bottom:3px solid transparent;text-decoration:none;
+}
+.nav-links a:hover{background:transparent;color:var(--accent-dark);border-bottom-color:var(--accent)}
+@media (prefers-color-scheme: dark){
+  .nav-links a:hover{color:var(--accent-light)}
+}
+.nav-toggle{
+  display:none;margin-left:auto;font-family:inherit;font-weight:700;font-size:1.25rem;line-height:1;
+  color:var(--ink);background:var(--panel);border:4px solid var(--border);
+  box-shadow:3px 3px 0 0 var(--accent-dark);width:44px;height:44px;padding:0;cursor:pointer;
+}
+.nav-toggle:hover{background:var(--accent-light);color:#2a1a08}
+.nav-toggle:active{transform:translate(2px,2px);box-shadow:none}
+@media (max-width:640px){
+  .nav-toggle{display:inline-flex;align-items:center;justify-content:center}
+  .nav-links{
+    display:none;flex-direction:column;align-items:stretch;width:100%;
+    margin-left:0;margin-bottom:.6rem;background:var(--panel);
+    border:4px solid var(--border);box-shadow:4px 4px 0 0 var(--accent-dark);padding:.35rem 0;
+  }
+  .site-nav.is-open .nav-links{display:flex}
+  .nav-links a{min-height:44px;padding:.55rem 1rem;border-bottom:none;width:100%}
+  .nav-links a:hover{background:var(--accent);color:#2a1a08}
+  .nav-user{display:block;padding:.35rem 1rem;color:var(--muted);font-size:.85rem}
+}
+
+/* --- 8-bit panels / buttons / forms --- */
+.pix-panel{
+  background:var(--panel);border:4px solid var(--border);
+  box-shadow:6px 6px 0 0 var(--accent-dark);padding:1.1rem 1.15rem 1.25rem;margin:1.1rem 0;
+}
+button,.btn,input[type=submit]{
+  font-family:inherit;font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:.9rem;
+  color:#2a1a08;background:var(--accent);border:4px solid var(--border);
+  box-shadow:4px 4px 0 0 var(--accent-dark);padding:.55rem 1.1rem;cursor:pointer;
+  min-height:44px;display:inline-flex;align-items:center;justify-content:center;
+}
+button:hover,.btn:hover,input[type=submit]:hover{background:var(--accent-light)}
+button:active,.btn:active,input[type=submit]:active{transform:translate(4px,4px);box-shadow:none}
+button.btn-primary{font-size:1rem;padding:.7rem 1.5rem;min-width:8rem}
+form label{display:block;margin:.65rem 0 .25rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-size:.85rem;color:var(--muted)}
+input[type=text],input[type=password],textarea{
+  width:100%;box-sizing:border-box;font-family:inherit;font-size:16px;line-height:1.4;
+  color:var(--ink);background:var(--bg);border:4px solid var(--border);
+  padding:.55rem .65rem;box-shadow:3px 3px 0 0 var(--accent-dark);
+}
+textarea{min-height:12rem;resize:vertical}
+input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
+
+/* --- tables (desktop chrome) --- */
+table{border-collapse:collapse;width:100%;background:var(--panel)}
+th,td{border-bottom:2px solid var(--border);padding:.55rem .6rem;text-align:left;vertical-align:top}
+th{
+  background:var(--accent);color:#2a1a08;text-transform:uppercase;letter-spacing:.08em;
+  font-size:.8rem;border-bottom:4px solid var(--border);
+}
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:.5rem 0}
+
+/* --- message list: table → stacked cards on phone --- */
+.msg-list{border:4px solid var(--border);box-shadow:6px 6px 0 0 var(--accent-dark)}
+.msg-list th{border-bottom:4px solid var(--border)}
+.msg-list td{border-bottom:2px solid var(--border)}
+.msg-list tr.msg-row:last-child td{border-bottom:none}
+.msg-list tr.unread td{font-weight:700}
+.msg-list tr.unread .msg-subject::before{content:"■ ";color:var(--accent)}
+.msg-list .msg-subject a{
+  display:block;min-height:44px;padding:.35rem 0;border-bottom:none;
+  color:var(--ink);font-weight:inherit;
+}
+.msg-list .msg-subject a:hover{background:var(--accent-light);color:#2a1a08}
+.msg-list .msg-from,.msg-list .msg-date{color:var(--muted);font-size:.92rem;font-weight:500}
+.msg-list .msg-status{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.msg-list tr.unread .msg-status{color:var(--accent-dark);font-weight:700}
+.msg-list tr.empty td{color:var(--muted);padding:1rem;text-align:center}
+@media (max-width:640px){
+  .msg-list,.msg-list thead,.msg-list tbody,.msg-list th,.msg-list td,.msg-list tr{display:block;width:100%}
+  .msg-list{border:none;box-shadow:none;background:transparent}
+  .msg-list thead{display:none}
+  .msg-list tr.msg-row{
+    display:block;background:var(--panel);border:4px solid var(--border);
+    box-shadow:5px 5px 0 0 var(--accent-dark);margin:0 0 .85rem;padding:.15rem 0;
+  }
+  .msg-list tr.msg-row td{border:none;padding:.15rem .9rem}
+  .msg-list tr.msg-row .msg-subject{padding-top:.65rem}
+  .msg-list tr.msg-row .msg-subject a{min-height:44px;padding:.4rem 0;font-size:1.02rem}
+  .msg-list tr.msg-row .msg-from,.msg-list tr.msg-row .msg-date{
+    display:inline;padding:0 .15rem .2rem 0;font-size:.88rem;
+  }
+  .msg-list tr.msg-row .msg-from::after{content:" · "}
+  .msg-list tr.msg-row .msg-status{padding-bottom:.65rem;font-size:.75rem}
+  .msg-list tr.empty{
+    background:var(--panel);border:4px solid var(--border);
+    box-shadow:5px 5px 0 0 var(--accent-dark);padding:.5rem 0;
+  }
+}
+
+/* --- message view: readable body, themed chrome --- */
+.back-link{margin:0 0 .75rem}
+.back-link a{display:inline-flex;align-items:center;min-height:44px}
+.msg-headers p{margin:.35rem 0;color:var(--muted);font-size:.95rem}
+.msg-headers strong{color:var(--ink);text-transform:uppercase;letter-spacing:.05em;font-size:.82rem}
+.msg-headers h1{
+  text-transform:none;letter-spacing:0;font-size:1.2rem;text-shadow:none;
+  margin:0 0 .75rem;line-height:1.35;word-break:break-word;
+}
+.msg-body{
+  white-space:pre-wrap;word-break:break-word;
+  font-size:1rem;line-height:1.65;color:var(--ink);
+  text-transform:none;letter-spacing:0;font-weight:400;
+}
+pre,.code,pre.code{
+  background:var(--code-bg);color:var(--code-ink);border:4px solid var(--border);
+  padding:.85rem 1rem;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  font-family:"Courier New",Courier,ui-monospace,monospace;font-size:.9rem;line-height:1.45;
+  box-shadow:4px 4px 0 0 var(--accent-dark);
+}
+.raw-toggle{margin:1rem 0}
+.raw-toggle a{display:inline-flex;align-items:center;min-height:44px}
+
+/* --- login card --- */
+.login-wrap{display:flex;justify-content:center;padding:1.5rem 0 2rem}
+.login-card{max-width:22rem;width:100%;margin:0}
+.login-brand{
+  display:flex;align-items:center;justify-content:center;gap:.55rem;
+  margin:0 0 1rem;font-weight:700;text-transform:uppercase;letter-spacing:.14em;font-size:.9rem;
+}
+.login-brand .nav-logo{width:28px;height:37px}
+.login-card h1{text-align:center}
+.login-card button{width:100%;margin-top:.85rem}
+
+/* --- compose --- */
+.compose-panel button[type=submit]{margin-top:.5rem;width:100%;max-width:16rem}
+@media (max-width:640px){
+  .compose-panel button[type=submit]{max-width:none}
+  .pix-panel{box-shadow:5px 5px 0 0 var(--accent-dark);padding:1rem}
+  h1{font-size:1.15rem}
+  .wrap{padding:1rem .75rem 2.5rem}
+}
+
+/* --- admin queue cards on narrow --- */
+.queue-list tr form{margin:0}
+@media (max-width:640px){
+  .queue-list,.queue-list thead,.queue-list tbody,.queue-list th,.queue-list td,.queue-list tr{display:block;width:100%}
+  .queue-list{border:none;box-shadow:none;background:transparent}
+  .queue-list thead{display:none}
+  .queue-list tr{
+    background:var(--panel);border:4px solid var(--border);
+    box-shadow:5px 5px 0 0 var(--accent-dark);margin:0 0 .85rem;padding:.5rem .75rem;
+  }
+  .queue-list td{border:none;padding:.2rem 0;word-break:break-word}
+  .queue-list td::before{
+    content:attr(data-label);display:block;font-weight:700;text-transform:uppercase;
+    letter-spacing:.06em;font-size:.72rem;color:var(--muted);margin-bottom:.1rem;
+  }
+  .queue-list td:last-child::before{content:none}
+  .admin-ops{font-size:.85rem;color:var(--muted)}
+}
+
+.user-row form{display:inline}
+.user-row button{min-height:36px;padding:.35rem .7rem;font-size:.8rem;margin-left:.35rem}
+"#;
 
 fn page_shell(title: &str, user: &str, body: &str) -> String {
     let nav = if user.is_empty() {
-        String::new()
+        format!(
+            "<nav class=\"site-nav\" id=\"site-nav\" aria-label=\"Site\">\
+             <div class=\"site-nav-inner\">\
+             <a class=\"nav-brand\" href=\"/login\">{}<span>DESERTEMAIL</span></a>\
+             </div></nav>",
+            CACTUS_SVG
+        )
     } else {
         format!(
-            "<nav><a href=\"/\">Inbox</a><a href=\"/compose\">Compose</a>\
-             <a href=\"/sent\">Sent</a><a href=\"/admin\">Admin</a>\
-             <a href=\"/logout\">Logout</a> \
-             <span style=\"float:right;color:#666\">{}</span></nav><hr>",
+            "<nav class=\"site-nav\" id=\"site-nav\" aria-label=\"Site\">\
+             <div class=\"site-nav-inner\">\
+             <a class=\"nav-brand\" href=\"/\">{}<span>DESERTEMAIL</span></a>\
+             <button type=\"button\" class=\"nav-toggle\" id=\"nav-toggle\" \
+             aria-expanded=\"false\" aria-controls=\"nav-menu\" aria-label=\"Open menu\">☰</button>\
+             <ul class=\"nav-links\" id=\"nav-menu\">\
+             <li><a href=\"/\">Inbox</a></li>\
+             <li><a href=\"/compose\">Compose</a></li>\
+             <li><a href=\"/sent\">Sent</a></li>\
+             <li><a href=\"/admin\">Admin</a></li>\
+             <li><a href=\"/logout\">Logout</a></li>\
+             <li class=\"nav-user\">{}</li>\
+             </ul></div></nav>",
+            CACTUS_SVG,
             esc(user)
         )
     };
+    let script = if user.is_empty() {
+        String::new()
+    } else {
+        "<script>(function(){var n=document.getElementById(\"site-nav\"),t=document.getElementById(\"nav-toggle\");\
+         if(t&&n){t.addEventListener(\"click\",function(){var o=!n.classList.contains(\"is-open\");\
+         n.classList.toggle(\"is-open\",o);t.setAttribute(\"aria-expanded\",o?\"true\":\"false\");\
+         t.setAttribute(\"aria-label\",o?\"Close menu\":\"Open menu\")})}})();</script>"
+            .to_string()
+    };
     format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title>\
-         <style>{}</style></head><body>{}{}</body></html>",
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>{}</title>{}<style>{}</style></head><body>{}<div class=\"wrap\">{}</div>{}</body></html>",
         esc(title),
+        FAVICON_LINK,
         STYLE,
         nav,
-        body
+        body,
+        script
     )
 }
 
@@ -723,10 +994,13 @@ fn page_login(error: Option<&str>, status: u16) -> Response {
         .map(|e| format!("<p class=\"err\">{}</p>", esc(e)))
         .unwrap_or_default();
     let body = format!(
-        "<h1>Login</h1>{}<form method=\"post\" action=\"/login\">\
-         <label>Username</label><input type=\"text\" name=\"username\" autofocus required>\
-         <label>Password</label><input type=\"password\" name=\"password\" required>\
-         <p><button type=\"submit\">Sign in</button></p></form>",
+        "<div class=\"login-wrap\"><div class=\"pix-panel login-card\">\
+         <div class=\"login-brand\">{}<span>DESERTEMAIL</span></div>\
+         <h1>Login</h1>{}<form method=\"post\" action=\"/login\">\
+         <label>Username</label><input type=\"text\" name=\"username\" autofocus required autocomplete=\"username\">\
+         <label>Password</label><input type=\"password\" name=\"password\" required autocomplete=\"current-password\">\
+         <p><button type=\"submit\">Sign in</button></p></form></div></div>",
+        CACTUS_SVG,
         err
     );
     let reason = if status == 429 {
@@ -825,7 +1099,7 @@ fn list_folder_page(cfg: &Config, user: &str, title: &str, sent: bool) -> Respon
 
     let mut rows = String::new();
     if msgs.is_empty() {
-        rows.push_str("<tr><td colspan=\"4\">No messages</td></tr>");
+        rows.push_str("<tr class=\"empty\"><td colspan=\"4\">No messages</td></tr>");
     } else {
         for m in &msgs {
             let raw = md.read_message(&m.path).unwrap_or_default();
@@ -834,7 +1108,11 @@ fn list_folder_page(cfg: &Config, user: &str, title: &str, sent: bool) -> Respon
             let from = headers.get("from").map(|s| s.as_str()).unwrap_or("");
             let date = headers.get("date").map(|s| s.as_str()).unwrap_or("");
             let unread = m.in_new || !m.flags.contains('S');
-            let cls = if unread { " class=\"unread\"" } else { "" };
+            let cls = if unread {
+                " class=\"msg-row unread\""
+            } else {
+                " class=\"msg-row\""
+            };
             let status = if unread { "unread" } else { "read" };
             let link = if sent {
                 format!("/msg?id={}&folder=sent", m.uid)
@@ -842,7 +1120,9 @@ fn list_folder_page(cfg: &Config, user: &str, title: &str, sent: bool) -> Respon
                 format!("/msg?id={}", m.uid)
             };
             rows.push_str(&format!(
-                "<tr{}><td><a href=\"{}\">{}</a></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr{}><td class=\"msg-subject\"><a href=\"{}\">{}</a></td>\
+                 <td class=\"msg-from\">{}</td><td class=\"msg-date\">{}</td>\
+                 <td class=\"msg-status\">{}</td></tr>",
                 cls,
                 link,
                 esc(subject),
@@ -854,7 +1134,8 @@ fn list_folder_page(cfg: &Config, user: &str, title: &str, sent: bool) -> Respon
     }
 
     let body = format!(
-        "<h1>{}</h1><table><thead><tr><th>Subject</th><th>From</th><th>Date</th><th>Status</th></tr></thead>\
+        "<h1>{}</h1><table class=\"msg-list\"><thead><tr>\
+         <th>Subject</th><th>From</th><th>Date</th><th>Status</th></tr></thead>\
          <tbody>{}</tbody></table>",
         esc(title),
         rows
@@ -952,27 +1233,30 @@ fn page_message(cfg: &Config, user: &str, req: &Request) -> Response {
 
     let raw_section = if show_raw {
         format!(
-            "<h2>Raw source</h2><pre>{}</pre>\
-             <p><a href=\"/msg?id={}{}\">Hide raw</a></p>",
+            "<div class=\"raw-toggle\"><h2>Raw source</h2>\
+             <pre class=\"code\">{}</pre>\
+             <p><a href=\"/msg?id={}{}\">Hide raw</a></p></div>",
             esc(&String::from_utf8_lossy(&raw)),
             id,
             folder_q
         )
     } else {
         format!(
-            "<p><a href=\"/msg?id={}&raw=1{}\">Show raw source</a></p>",
+            "<p class=\"raw-toggle\"><a href=\"/msg?id={}&raw=1{}\">Show raw source</a></p>",
             id, folder_q
         )
     };
 
     let back = if folder_sent { "/sent" } else { "/" };
     let body = format!(
-        "<p><a href=\"{}\">&larr; Back</a></p>\
+        "<p class=\"back-link\"><a href=\"{}\">&larr; Back</a></p>\
+         <div class=\"pix-panel msg-headers\">\
          <h1>{}</h1>\
-         <p><strong>From:</strong> {}<br>\
-         <strong>To:</strong> {}<br>\
-         <strong>Date:</strong> {}</p>\
-         <div class=\"msg-body\">{}</div>\
+         <p><strong>From:</strong> {}</p>\
+         <p><strong>To:</strong> {}</p>\
+         <p><strong>Date:</strong> {}</p>\
+         </div>\
+         <div class=\"pix-panel msg-body\">{}</div>\
          {}",
         back,
         esc(subject),
@@ -1143,11 +1427,12 @@ fn page_compose_for(user: &str, error: Option<&str>, notice: Option<&str>) -> Re
         .map(|e| format!("<p class=\"ok\">{}</p>", esc(e)))
         .unwrap_or_default();
     let body = format!(
-        "<h1>Compose</h1>{}{}<form method=\"post\" action=\"/send\">\
-         <label>To</label><input type=\"text\" name=\"to\" required>\
+        "<div class=\"pix-panel compose-panel\"><h1>Compose</h1>{}{}\
+         <form method=\"post\" action=\"/send\">\
+         <label>To</label><input type=\"text\" name=\"to\" required autocomplete=\"email\">\
          <label>Subject</label><input type=\"text\" name=\"subject\">\
          <label>Body</label><textarea name=\"body\"></textarea>\
-         <p><button type=\"submit\">Send</button></p></form>",
+         <p><button type=\"submit\" class=\"btn-primary\">Send</button></p></form></div>",
         err, ok
     );
     Response::html(200, "OK", page_shell("Compose", user, &body))
@@ -1333,7 +1618,7 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
     let mut users_html = String::new();
     for n in &names {
         users_html.push_str(&format!(
-            "<li>{} \
+            "<li class=\"user-row\">{} \
              <form method=\"post\" action=\"/admin/user/remove\" style=\"display:inline\">\
              <input type=\"hidden\" name=\"email\" value=\"{}\">\
              <button type=\"submit\">remove</button></form></li>",
@@ -1348,12 +1633,17 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
     let queue_rows = match queue::list_queue(&cfg.data_dir) {
         Ok(msgs) => {
             if msgs.is_empty() {
-                "<tr><td colspan=\"6\">Queue empty</td></tr>".to_string()
+                "<tr class=\"empty\"><td colspan=\"6\">Queue empty</td></tr>".to_string()
             } else {
                 let mut rows = String::new();
                 for m in msgs {
                     rows.push_str(&format!(
-                        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                        "<tr>\
+                         <td data-label=\"ID\">{}</td>\
+                         <td data-label=\"Sender\">{}</td>\
+                         <td data-label=\"Recipients\">{}</td>\
+                         <td data-label=\"Retries\">{}</td>\
+                         <td data-label=\"Next attempt\">{}</td>\
                          <td><form method=\"post\" action=\"/admin/queue/delete\" style=\"display:inline\">\
                          <input type=\"hidden\" name=\"id\" value=\"{}\">\
                          <button type=\"submit\">delete</button></form></td></tr>",
@@ -1385,8 +1675,9 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
         .unwrap_or_default();
 
     let body = format!(
-        "<h1>Admin</h1>{}<h2>Domains</h2><ul>{}</ul>\
-         <h2>Users</h2><ul>{}</ul>\
+        "<h1>Admin</h1>{}\
+         <div class=\"pix-panel\"><h2>Domains</h2><ul>{}</ul></div>\
+         <div class=\"pix-panel\"><h2>Users</h2><ul>{}</ul>\
          <h3>Add user</h3>\
          <form method=\"post\" action=\"/admin/user/add\">\
          <label>Email / username</label><input type=\"text\" name=\"email\" required>\
@@ -1397,12 +1688,13 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
          <label>Username</label><input type=\"text\" name=\"email\" required>\
          <label>Quota MiB (0 = remove override)</label>\
          <input type=\"text\" name=\"quota_mb\" value=\"512\">\
-         <p><button type=\"submit\">Set quota</button></p></form>\
-         <h2>Outbound queue</h2>\
-         <table><thead><tr><th>ID</th><th>Sender</th><th>Recipients</th>\
+         <p><button type=\"submit\">Set quota</button></p></form></div>\
+         <div class=\"pix-panel\"><h2>Outbound queue</h2>\
+         <div class=\"table-scroll\">\
+         <table class=\"queue-list\"><thead><tr><th>ID</th><th>Sender</th><th>Recipients</th>\
          <th>Retries</th><th>Next attempt</th><th></th></tr></thead>\
-         <tbody>{}</tbody></table>\
-         <p style=\"color:#666;font-size:.9rem\">Ops: <code>/healthz</code> · <code>/metrics</code></p>",
+         <tbody>{}</tbody></table></div></div>\
+         <p class=\"admin-ops\">Ops: <code>/healthz</code> · <code>/metrics</code></p>",
         flash_html, domains, users_html, queue_rows
     );
     Response::html(200, "OK", page_shell("Admin", user, &body))
