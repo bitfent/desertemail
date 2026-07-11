@@ -9,8 +9,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::config::Config;
 use crate::passwd;
 
 /// Parse a config string and return usernames from `[users]` (no passwords).
@@ -198,6 +199,19 @@ pub fn set_primary_domain(content: &str, domain: &str) -> Result<String, String>
         return Err("invalid domain characters".into());
     }
     Ok(set_domains_primary(content, &domain))
+}
+
+/// Set `public_url` in config.toml (e.g. https://mail.example.com).
+/// Empty string clears the override (back to auto-detection).
+pub fn set_public_url(content: &str, url: &str) -> Result<String, String> {
+    let url = url.trim().trim_end_matches('/').to_string();
+    if url.contains(|c: char| c.is_control() || c == '"' || c == '[' || c == ']' || c == ' ') {
+        return Err("invalid public_url characters".into());
+    }
+    if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("public_url must start with http:// or https://".into());
+    }
+    Ok(set_top_level_string(content, "public_url", &url))
 }
 
 /// Set DKIM selector + key file paths in config.toml.
@@ -411,6 +425,64 @@ where
     let new = edit(&content)?;
     write_atomic(path, &new)?;
     Ok(new)
+}
+
+/// DKIM private-key path: existing config value, else `dkim.pem` next to config.toml.
+pub fn dkim_key_path_for_config(cfg: &Config) -> Result<PathBuf, String> {
+    if let Some(p) = cfg.dkim_key_file_path() {
+        return Ok(PathBuf::from(p));
+    }
+    let config_path = cfg
+        .config_path
+        .as_ref()
+        .ok_or_else(|| "config_path not set".to_string())?;
+    let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(dir.join("dkim.pem"))
+}
+
+/// Default PEM paths next to config.toml for ACME-written certs.
+pub fn default_tls_paths(cfg: &Config) -> (String, String) {
+    let dir = cfg
+        .config_path
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let cert = cfg
+        .tls_cert_file
+        .clone()
+        .unwrap_or_else(|| dir.join("tls.crt").to_string_lossy().into_owned());
+    let key = cfg
+        .tls_key_file
+        .clone()
+        .unwrap_or_else(|| dir.join("tls.key").to_string_lossy().into_owned());
+    (cert, key)
+}
+
+/// Normalize a pasted HTTPS domain (strip scheme/path/trailing dot, lowercase).
+/// Rejects localhost, bare labels, and invalid characters.
+pub fn normalize_https_domain(raw: &str) -> Result<String, String> {
+    let domain = raw
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('.')
+        .to_lowercase();
+    if domain.is_empty() {
+        return Err("enter the domain you purchased".into());
+    }
+    if domain == "localhost"
+        || !domain.contains('.')
+        || domain.contains(|c: char| {
+            c.is_control() || c == '"' || c == '[' || c == ']' || c == ' ' || c == ':'
+        })
+    {
+        return Err("enter a real public domain name (e.g. mail.example.com)".into());
+    }
+    Ok(domain)
 }
 
 fn normalize_user(email: &str) -> Result<String, String> {
@@ -664,6 +736,19 @@ web_listen = "0.0.0.0:8080"
     }
 
     #[test]
+    fn set_public_url_validates_and_writes() {
+        let out = set_public_url(SAMPLE, "https://mail.example.com/").unwrap();
+        assert!(out.contains("public_url = \"https://mail.example.com\""));
+        assert!(out.contains("domains = [\"example.com\"]"));
+        // Clearing is allowed
+        let cleared = set_public_url(&out, "").unwrap();
+        assert!(cleared.contains("public_url = \"\""));
+        // Must be a URL
+        assert!(set_public_url(SAMPLE, "mail.example.com").is_err());
+        assert!(set_public_url(SAMPLE, "https://bad domain").is_err());
+    }
+
+    #[test]
     fn enable_acme_writes_keys_atomically() {
         let base = r#"# gen
 domains = ["example.com"]
@@ -690,5 +775,26 @@ acme = false
         assert!(out.contains("tls_key_file = \"/tmp/tls.key\""));
         assert!(out.contains("web_tls_listen = \"0.0.0.0:8443\""));
         assert!(enable_acme(base, "not-an-email", "x.com", "c", "k", "").is_err());
+    }
+
+    #[test]
+    fn normalize_https_domain_strips_and_validates() {
+        assert_eq!(
+            normalize_https_domain("https://Mail.Example.com/path").unwrap(),
+            "mail.example.com"
+        );
+        assert_eq!(
+            normalize_https_domain("http://mail.example.com.").unwrap(),
+            "mail.example.com"
+        );
+        assert_eq!(
+            normalize_https_domain("  MAIL.EXAMPLE.COM  ").unwrap(),
+            "mail.example.com"
+        );
+        assert!(normalize_https_domain("").is_err());
+        assert!(normalize_https_domain("localhost").is_err());
+        assert!(normalize_https_domain("nodot").is_err());
+        assert!(normalize_https_domain("bad domain.com").is_err());
+        assert!(normalize_https_domain("mail.example.com:443").is_err());
     }
 }

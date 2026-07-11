@@ -253,6 +253,45 @@ The running server also reloads users/quotas live when you use the admin web UI
 (forms on `/admin` for `admin_user`). Admins can also **invite** users (one-time
 `/invite` link; invitee sets their own password) without choosing a password.
 
+### Domain & HTTPS setup (from SSH)
+
+Same edits as the `/dns` web UI, without a browser — useful when you are SSH'd into the box.
+Start with the status screen; it shows what is configured and prints the exact commands still
+needed (with your config path), in order:
+
+```bash
+desertemail setup -c /etc/desertemail/config.toml
+```
+
+```text
+DesertEmail setup — status & next steps
+
+  [x] config file:  /etc/desertemail/config.toml
+  [ ] domain:       not set (still "localhost")
+  [ ] users:        none yet
+  [ ] DKIM key:     not generated
+  [ ] HTTPS:        not configured (plain HTTP)
+
+Next steps (in order):
+  1. desertemail setup domain example.com --host mail.example.com -c /etc/desertemail/config.toml
+  ...
+```
+
+```bash
+desertemail setup domain example.com --host mail.example.com -c /etc/desertemail/config.toml
+desertemail setup dkim -c /etc/desertemail/config.toml
+# prints the TXT to publish at <selector>._domainkey.<domain>
+desertemail setup https mail.example.com --email you@example.com -c /etc/desertemail/config.toml
+# optional: --check-only (probe A/AAAA + port 80, exit = Fail count)
+#           --yes (write ACME settings even if checks fail)
+```
+
+`setup domain` writes `domains` / optional `public_host`. `setup dkim` generates a 2048-bit key
+(`dkim.pem` next to config unless already configured), chmod 600, updates `dkim_*` paths, and
+prints the DNS TXT. `setup https` runs the same HTTPS readiness checks as the web UI, then
+enables ACME + `public_url` in config — restart desertemail so the server's ACME worker can
+request the cert (the CLI does not start that thread itself).
+
 ### Health & metrics
 
 - `GET /healthz` — liveness (`200 ok`, no auth)

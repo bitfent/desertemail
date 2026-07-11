@@ -5,3 +5,4 @@ site/install-*.sh
 site/install-windows.ps1
 site/uninstall.sh
 site/bin/
+data/

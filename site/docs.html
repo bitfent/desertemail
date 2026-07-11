@@ -723,7 +723,7 @@ log_format = "text"
 "postmaster" = "adminpass"
 # [quotas]
 # "alice" = 512</code></pre>
-        <p class="note">CLI: <code>desertemail --config path/to/config.toml</code> (or <code>-c</code>). Help: <code>--help</code> / <code>-h</code>. DKIM DNS helper: <code>desertemail --dkim-dns &lt;domain&gt; [--config path]</code>. User management: <code>desertemail user add|remove|list|passwd</code> (see <a href="#operations">Operations</a>).</p>
+        <p class="note">CLI: <code>desertemail --config path/to/config.toml</code> (or <code>-c</code>). Help: <code>--help</code> / <code>-h</code>. DKIM DNS helper: <code>desertemail --dkim-dns &lt;domain&gt; [--config path]</code>. User management: <code>desertemail user add|remove|list|passwd</code>. Domain/HTTPS from SSH: <code>desertemail setup domain|dkim|https</code> (see <a href="#ops-setup">Domain &amp; HTTPS setup</a> and <a href="#operations">Operations</a>).</p>
       </section>
 
       <section class="pix-panel" aria-labelledby="operations">
@@ -738,6 +738,21 @@ desertemail --config /etc/desertemail/config.toml user list
 desertemail --config /etc/desertemail/config.toml user passwd alice
 desertemail --config /etc/desertemail/config.toml user remove bob</code></pre>
         <p>On the webmail <strong>Admin</strong> page (<code>admin_user</code> only): add user (email + password), remove user, set quota (MiB). Mutations require a session cookie and a same-origin check when <code>Origin</code>/<code>Referer</code> is present. The running process reloads the users/quotas map <strong>live</strong> (no full restart).</p>
+
+        <div class="heading-wrap"><h3 id="ops-setup">Domain &amp; HTTPS setup (CLI)</h3><a class="anchor" href="#ops-setup" aria-label="Link to this section">#</a></div>
+        <p>From an SSH session you can do everything the <code>/dns</code> web page does — set the domain, generate a DKIM key, and enable HTTPS via Let's Encrypt — by editing <code>config.toml</code> in place (same atomic writers as the UI).</p>
+        <p>Not sure where you are? Run bare <code>desertemail setup</code> first: it prints a checklist of what is already configured (domain, users, DKIM, HTTPS) and the exact commands still needed — with your <code>--config</code> path filled in — in order.</p>
+        <pre><code>desertemail setup -c /etc/desertemail/config.toml   # status + guided next steps
+desertemail setup domain example.com --host mail.example.com -c /etc/desertemail/config.toml
+desertemail setup dkim -c /etc/desertemail/config.toml
+desertemail setup https mail.example.com --email you@example.com -c /etc/desertemail/config.toml
+# probe only:  … setup https mail.example.com --email you@example.com --check-only
+# force write: … setup https mail.example.com --email you@example.com --yes</code></pre>
+        <ul>
+          <li><strong>setup domain</strong> — writes <code>domains</code> and optional <code>public_host</code>.</li>
+          <li><strong>setup dkim</strong> — generates a 2048-bit RSA key (<code>dkim.pem</code> next to config unless already configured), <code>chmod 600</code>, updates <code>dkim_selector</code> / <code>dkim_key_file</code>, prints the TXT to publish. Refuses to overwrite an existing key unless <code>--force</code> (you must re-publish the TXT).</li>
+          <li><strong>setup https</strong> — normalizes the domain, runs A/AAAA + port-80 checks (same as the web UI), then writes <code>acme=true</code>, contact email, cert/key paths, <code>web_tls_listen</code> (default <code>0.0.0.0:8443</code> when empty), and <code>public_url</code>. The CLI does <strong>not</strong> start the ACME thread — restart desertemail so the server requests the certificate at startup.</li>
+        </ul>
 
         <div class="heading-wrap"><h3 id="ops-invites">Inviting users</h3><a class="anchor" href="#ops-invites" aria-label="Link to this section">#</a></div>
         <p>When you do not want to choose a password for someone, use <strong>Invite user</strong> on Admin. Enter <code>user@</code> one of your configured domains; the server stores a one-time token hash under <code>&lt;data_dir&gt;/invites.json</code> (7-day expiry) and shows a copyable <code>/invite?token=…</code> link once. Hand the link over any channel, or optionally email it to an <em>external</em> address they already read — not their new mailbox (they cannot log in until they set a password). They open the branded invite page, choose a password (≥8 characters), and land in their inbox. Pending invites can be regenerated (new link) or revoked; used links cannot be reused.</p>
@@ -799,7 +814,7 @@ sudo systemctl restart desertemail
         <div class="heading-wrap"><h2 id="dns">DNS setup</h2><a class="anchor" href="#dns" aria-label="Link to this section">#</a></div>
         <div class="heading-wrap"><h3 id="dns-web-ui">DNS via the web UI</h3><a class="anchor" href="#dns-web-ui" aria-label="Link to this section">#</a></div>
         <p>After first-run setup (or anytime as admin), open <strong><code>http://127.0.0.1:8080/dns</code></strong>. The page shows exactly which MX, A, SPF, DKIM, and DMARC records to publish at your registrar, with copy buttons. Generate a DKIM key in-browser (writes <code>dkim.pem</code> next to your config), then click <strong>Check DNS</strong> to verify live lookups. DesertEmail cannot create records at Cloudflare/Namecheap for you — it prepares and verifies them.</p>
-        <p class="note">Installer summary points here too: <code>Configure DNS in your browser: http://127.0.0.1:8080/dns</code>. CLI still works: <code>desertemail --dkim-dns example.com</code> and <code>desertemail doctor</code>.</p>
+        <p class="note">Installer summary points here too: <code>Configure DNS in your browser: http://127.0.0.1:8080/dns</code>. CLI: <code>desertemail setup domain|dkim|https</code> (see <a href="#ops-setup">Domain &amp; HTTPS setup</a>), <code>desertemail --dkim-dns example.com</code>, and <code>desertemail doctor</code>.</p>
         <ol>
           <li><strong>A / AAAA</strong> — hostname of your mail server (e.g. <code>mail.example.com</code>) → public IP (DynDNS is fine for home).</li>
           <li><strong>MX</strong> — <code>example.com</code> → <code>mail.example.com</code> (priority 10 is typical).</li>

@@ -174,6 +174,33 @@ pub fn run_dns_checks_ui(cfg: &Config, host: &str, public_ip: Option<&str>) -> V
     checks
 }
 
+/// Web-UI checks for serving HTTPS on a purchased domain: A/AAAA record for
+/// the host, plus port 80 reachability (needed for the ACME HTTP-01 challenge).
+pub fn run_https_checks_ui(cfg: &Config, host: &str) -> Vec<Check> {
+    let host = host.trim().trim_end_matches('.').to_lowercase();
+    let public_ip = suggest_public_ip(cfg);
+    let mut checks = Vec::new();
+    checks.push(check_a_host(&host, public_ip.as_deref()));
+    // Probe port 80 at the address the domain actually resolves to (what
+    // Let's Encrypt will contact), falling back to the detected public IP.
+    let probe_ip = dns::resolve_a(&host)
+        .ok()
+        .and_then(|ips| first_v4(&ips))
+        .or(public_ip);
+    match probe_ip {
+        Some(ip) => checks.push(check_port_80(&ip, true)),
+        None => checks.push(Check::warn(
+            "port 80 (ACME HTTP-01)",
+            "no address to probe — publish the A record first",
+            format!(
+                "Create an A record for {} pointing at this server's public IP",
+                host
+            ),
+        )),
+    }
+    checks
+}
+
 /// Run all readiness checks. Returns the number of Fail blockers (exit code).
 pub fn run(cfg: &Config, opts: &DoctorOpts) -> i32 {
     let cfg = cfg.clone();

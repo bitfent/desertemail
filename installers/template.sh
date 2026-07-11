@@ -1218,6 +1218,7 @@ print_summary() {
 
   if [ -n "${WEB_LISTEN:-}" ]; then
     info "Configure DNS in your browser: http://127.0.0.1:8080/dns"
+    info "  (or over SSH: ${_bin} setup --config ${CONFIG_PATH} — shows status + next commands)"
     case "${DOMAIN:-localhost}" in
       localhost|local|127.0.0.1|"")
         ;;

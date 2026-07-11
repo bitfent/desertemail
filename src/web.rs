@@ -1235,6 +1235,7 @@ fn route_inner(
                 ("POST", "/dns/dkim/generate") => handle_dns_dkim_generate(cfg, &user, req),
                 ("POST", "/dns/settings") => handle_dns_settings(cfg, &user, req),
                 ("POST", "/dns/acme/enable") => handle_dns_acme_enable(cfg, &user, req),
+                ("POST", "/dns/https/setup") => handle_dns_https_setup(cfg, &user, req, peer_ip),
                 ("GET", "/admin") => page_admin(cfg, &user, None, None),
                 ("GET", "/admin/backup") => handle_admin_backup(cfg, &user),
                 ("POST", "/admin") => handle_admin_post(cfg, &user, req),
@@ -3044,11 +3045,28 @@ pub fn build_dns_records(
     out
 }
 
+/// State for the "HTTPS with your own domain" panel after a verify/enable POST.
+struct HttpsPanelState {
+    domain: String,
+    email: String,
+    checks: Vec<crate::doctor::Check>,
+}
+
 fn page_dns(
     cfg: &Config,
     user: &str,
     flash: Option<&str>,
     checks: Option<&[crate::doctor::Check]>,
+) -> Response {
+    page_dns_full(cfg, user, flash, checks, None)
+}
+
+fn page_dns_full(
+    cfg: &Config,
+    user: &str,
+    flash: Option<&str>,
+    checks: Option<&[crate::doctor::Check]>,
+    https: Option<&HttpsPanelState>,
 ) -> Response {
     if !is_admin(cfg, user) {
         let body = "<h1>DNS</h1><p class=\"err\">Access denied — admin only. \
@@ -3154,6 +3172,7 @@ fn page_dns(
 
     let tls_panel = tls_security_panel_html(cfg, &mailhost);
     let access_panel = public_access_panel_html();
+    let https_panel = https_domain_panel_html(cfg, &mailhost, public_ip.as_deref(), https);
 
     let body = format!(
         "<h1>DNS</h1>{}\
@@ -3171,6 +3190,7 @@ fn page_dns(
          <button type=\"submit\">Check DNS</button></form>\
          </div>\
          <div class=\"pix-panel\"><h2>DKIM key</h2>{}</div>\
+         <div class=\"pix-panel\" id=\"https-domain\"><h2>HTTPS with your own domain</h2>{}</div>\
          <div class=\"pix-panel\"><h2>Security / TLS</h2>{}</div>\
          <div class=\"pix-panel\"><h2>Mail host &amp; domain</h2>\
          <form method=\"post\" action=\"/dns/settings\">\
@@ -3205,6 +3225,7 @@ fn page_dns(
         ip_hint,
         rows,
         dkim_panel,
+        https_panel,
         tls_panel,
         esc(&mailhost),
         esc(&primary)
@@ -3338,7 +3359,7 @@ fn handle_dns_dkim_generate(cfg: &Config, user: &str, req: &Request) -> Response
         }
     };
     let pem = key.to_pem_pkcs1();
-    let key_path = match dkim_key_path_for_config(cfg) {
+    let key_path = match useredit::dkim_key_path_for_config(cfg) {
         Ok(p) => p,
         Err(e) => return page_dns(cfg, user, Some(&format!("error: {}", e)), None),
     };
@@ -3395,40 +3416,6 @@ fn handle_dns_dkim_generate(cfg: &Config, user: &str, req: &Request) -> Response
     }
 }
 
-fn dkim_key_path_for_config(cfg: &Config) -> Result<std::path::PathBuf, String> {
-    // Prefer existing path; else $config_dir/dkim.pem (installer PREFIX convention).
-    if let Some(p) = cfg.dkim_key_file_path() {
-        return Ok(std::path::PathBuf::from(p));
-    }
-    let config_path = cfg
-        .config_path
-        .as_ref()
-        .ok_or_else(|| "config_path not set".to_string())?;
-    let dir = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    Ok(dir.join("dkim.pem"))
-}
-
-/// Default PEM paths next to config.toml for ACME-written certs.
-fn default_tls_paths(cfg: &Config) -> (String, String) {
-    let dir = cfg
-        .config_path
-        .as_ref()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let cert = cfg
-        .tls_cert_file
-        .clone()
-        .unwrap_or_else(|| dir.join("tls.crt").to_string_lossy().into_owned());
-    let key = cfg
-        .tls_key_file
-        .clone()
-        .unwrap_or_else(|| dir.join("tls.key").to_string_lossy().into_owned());
-    (cert, key)
-}
-
-/// Live + on-disk snapshot of ACME / TLS state for the Security panel.
 fn tls_state_from_disk(cfg: &Config) -> (bool, String, Vec<String>, Option<String>, Option<String>) {
     // Prefer re-reading config so UI reflects post-enable writes without restart.
     if let Some(path) = cfg.config_path.as_ref() {
@@ -3607,6 +3594,285 @@ fn tls_security_panel_html(cfg: &Config, mailhost: &str) -> String {
     format!("{}{}{}", state_line, listener_line, form)
 }
 
+/// Guided wizard: point a purchased domain at this server, verify DNS + port 80,
+/// then enable Let's Encrypt and set `public_url` — all from the UI.
+fn https_domain_panel_html(
+    cfg: &Config,
+    mailhost: &str,
+    public_ip: Option<&str>,
+    state: Option<&HttpsPanelState>,
+) -> String {
+    let public_url = cfg.public_url_get();
+    let tls_listen_active = web_tls_listener_active().load(std::sync::atomic::Ordering::SeqCst);
+
+    let mut out = String::new();
+    if public_url.starts_with("https://") && tls_listen_active {
+        out.push_str(&format!(
+            "<p class=\"ok\">Webmail is served over HTTPS at \
+             <a href=\"{u}\"><code>{u}</code></a>.</p>",
+            u = esc(&public_url)
+        ));
+    } else if public_url.starts_with("https://") {
+        out.push_str(&format!(
+            "<p class=\"warn\">Configured URL <code>{}</code> — HTTPS is not live yet \
+             (waiting for certificate and/or a restart; see Security / TLS below).</p>",
+            esc(&public_url)
+        ));
+    } else {
+        out.push_str(
+            "<p>Bought a domain? Point it at this server and get a free \
+             Let&rsquo;s Encrypt certificate, so webmail is served at \
+             <code>https://your-domain</code> with no browser warnings.</p>",
+        );
+    }
+
+    // Prefill: last submitted value, else host from public_url, else mail host.
+    let domain_prefill = state.map(|s| s.domain.clone()).unwrap_or_else(|| {
+        let from_url = public_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if !from_url.is_empty() {
+            from_url
+        } else if mailhost != "localhost" {
+            mailhost.to_string()
+        } else {
+            String::new()
+        }
+    });
+    let email_prefill = state
+        .map(|s| s.email.clone())
+        .filter(|e| !e.is_empty())
+        .or_else(|| {
+            let (_, acme_email, _, _, _) = tls_state_from_disk(cfg);
+            if acme_email.is_empty() {
+                None
+            } else {
+                Some(acme_email)
+            }
+        })
+        .unwrap_or_default();
+
+    // Step 1: the record to create at the registrar.
+    let ip_disp = public_ip.unwrap_or("<your-public-IP>");
+    let a_name = if domain_prefill.is_empty() {
+        "your-domain".to_string()
+    } else {
+        domain_prefill.clone()
+    };
+    out.push_str(&format!(
+        "<p><strong>Step 1 — DNS.</strong> At your registrar (Namecheap, Cloudflare, \
+         Porkbun, …), create an <strong>A</strong> record pointing your domain at this \
+         server:</p>\
+         <p><code class=\"dns-val\">A &nbsp; {n} &nbsp; {ip}</code> \
+         <button type=\"button\" class=\"copy-btn\" data-copy=\"A {n} {ip}\">Copy</button></p>",
+        n = esc(&a_name),
+        ip = esc(ip_disp)
+    ));
+    let web_port = cfg
+        .web_listen
+        .rsplit(':')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if !web_port.is_empty() && web_port != "80" {
+        out.push_str(&format!(
+            "<p class=\"muted\">Let&rsquo;s Encrypt validates over port <strong>80</strong>, \
+             but this server listens on port {p}. Forward external port 80 to this \
+             machine&rsquo;s port {p} on your router/firewall (or run on port 80).</p>",
+            p = esc(&web_port)
+        ));
+    }
+
+    // Steps 2 + 3: one form, two submit buttons.
+    out.push_str(&format!(
+        "<p><strong>Step 2 — verify</strong>, then <strong>Step 3 — enable HTTPS</strong>:</p>\
+         <form method=\"post\" action=\"/dns/https/setup\">\
+         <label>Your domain</label>\
+         <input type=\"text\" name=\"domain\" value=\"{}\" placeholder=\"mail.example.com\" \
+         required autocomplete=\"off\">\
+         <label>Contact email (Let&rsquo;s Encrypt account)</label>\
+         <input type=\"email\" name=\"email\" value=\"{}\" placeholder=\"you@example.com\" \
+         autocomplete=\"email\">\
+         <p>\
+         <button type=\"submit\" name=\"action\" value=\"verify\" class=\"btn-secondary\">\
+         Verify DNS &amp; port 80</button> \
+         <button type=\"submit\" name=\"action\" value=\"enable\">\
+         Enable HTTPS (Let&rsquo;s Encrypt)</button>\
+         </p></form>",
+        esc(&domain_prefill),
+        esc(&email_prefill)
+    ));
+
+    if let Some(s) = state {
+        if !s.checks.is_empty() {
+            out.push_str("<h3>Verification results</h3>");
+            out.push_str(&https_checks_html(&s.checks));
+        }
+    }
+    out.push_str(
+        "<p class=\"muted\">Enabling writes <code>acme=true</code> and \
+         <code>public_url</code> to config, requests the certificate in the background, \
+         and needs one restart once the certificate arrives so HTTPS can bind.</p>",
+    );
+    out
+}
+
+fn https_checks_html(checks: &[crate::doctor::Check]) -> String {
+    use crate::doctor::Status;
+    let mut out = String::from("<ul style=\"list-style:none;padding-left:0\">");
+    for c in checks {
+        let (cls, label) = match c.status {
+            Status::Ok => ("ok", "OK"),
+            Status::Warn => ("warn", "WARN"),
+            Status::Fail => ("fail", "FAIL"),
+        };
+        let fix = c
+            .fix
+            .as_ref()
+            .filter(|_| c.status != Status::Ok)
+            .map(|f| format!("<br><span class=\"muted\">Fix: {}</span>", esc(f)))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "<li style=\"margin-bottom:.5rem\">\
+             <span class=\"dns-status {}\">{}</span> {} — {}{}</li>",
+            cls,
+            label,
+            esc(&c.name),
+            esc(&truncate_str(&c.detail, 200)),
+            fix
+        ));
+    }
+    out.push_str("</ul>");
+    out
+}
+
+fn handle_dns_https_setup(cfg: &Config, user: &str, req: &Request, peer_ip: &str) -> Response {
+    if !is_admin(cfg, user) {
+        return page_dns(cfg, user, Some("error: access denied"), None);
+    }
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
+    }
+    let form = form_body(req);
+    let action = form.get("action").map(|s| s.as_str()).unwrap_or("verify");
+    // Accept pasted URLs too: strip scheme and path down to the bare hostname.
+    let domain = match useredit::normalize_https_domain(
+        form.get("domain").map(|s| s.as_str()).unwrap_or(""),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            return page_dns(cfg, user, Some(&format!("error: {}", e)), None);
+        }
+    };
+    let email = form
+        .get("email")
+        .map(|s| s.trim())
+        .unwrap_or("")
+        .to_string();
+
+    if action != "enable" {
+        if !ratelimit::check_allowed(peer_ip) {
+            return page_dns(
+                cfg,
+                user,
+                Some("error: too many requests — wait a moment and retry"),
+                None,
+            );
+        }
+        ratelimit::record_failure(peer_ip);
+        let checks = crate::doctor::run_https_checks_ui(cfg, &domain);
+        let all_ok = checks
+            .iter()
+            .all(|c| c.status == crate::doctor::Status::Ok);
+        let flash = if all_ok {
+            "Domain checks passed — you can enable HTTPS."
+        } else {
+            "Domain checks ran — fix any FAIL items below (DNS changes can take a while \
+             to propagate), then verify again."
+        };
+        let state = HttpsPanelState {
+            domain,
+            email,
+            checks,
+        };
+        return page_dns_full(cfg, user, Some(flash), None, Some(&state));
+    }
+
+    // action == enable
+    if email.is_empty() || !email.contains('@') {
+        let state = HttpsPanelState {
+            domain,
+            email,
+            checks: Vec::new(),
+        };
+        return page_dns_full(
+            cfg,
+            user,
+            Some("error: a contact email is required for the Let's Encrypt account"),
+            None,
+            Some(&state),
+        );
+    }
+    let (cert_path, key_path) = useredit::default_tls_paths(cfg);
+    let web_tls = if cfg.web_tls_listen.is_empty() {
+        "0.0.0.0:8443"
+    } else {
+        ""
+    };
+    let url = format!("https://{}", domain);
+    let domain_owned = domain.clone();
+    let email_owned = email.clone();
+    let cert_owned = cert_path.clone();
+    let key_owned = key_path.clone();
+    let web_tls_owned = web_tls.to_string();
+    let url_owned = url.clone();
+    match persist_and_reload(cfg, |c| {
+        let out = useredit::enable_acme(
+            c,
+            &email_owned,
+            &domain_owned,
+            &cert_owned,
+            &key_owned,
+            &web_tls_owned,
+        )?;
+        useredit::set_public_url(&out, &url_owned)
+    }) {
+        Ok(()) => {
+            // On-demand ACME: snapshot with written paths and start issuance thread.
+            let mut snap = if let Some(path) = cfg.config_path.as_ref() {
+                Config::load(path).unwrap_or_else(|_| cfg.clone())
+            } else {
+                cfg.clone()
+            };
+            snap.acme = true;
+            snap.acme_email = email;
+            snap.acme_domains = vec![domain];
+            snap.tls_cert_file = Some(cert_path);
+            snap.tls_key_file = Some(key_path);
+            snap.data_dir = cfg.data_dir.clone();
+            snap.config_path = cfg.config_path.clone();
+            acme::start_background(std::sync::Arc::new(snap));
+            page_dns(
+                cfg,
+                user,
+                Some(&format!(
+                    "HTTPS setup started for {u} — the Let's Encrypt certificate request is \
+                     running in the background. Keep DNS and port 80 in place; once the \
+                     certificate is written, restart desertemail and webmail will be served \
+                     at {u}.",
+                    u = url
+                )),
+                None,
+            )
+        }
+        Err(e) => page_dns(cfg, user, Some(&format!("error: {}", e)), None),
+    }
+}
+
 fn handle_dns_acme_enable(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
         return page_dns(cfg, user, Some("error: access denied"), None);
@@ -3629,7 +3895,7 @@ fn handle_dns_acme_enable(cfg: &Config, user: &str, req: &Request) -> Response {
             None,
         );
     }
-    let (cert_path, key_path) = default_tls_paths(cfg);
+    let (cert_path, key_path) = useredit::default_tls_paths(cfg);
     let web_tls = if cfg.web_tls_listen.is_empty() {
         "0.0.0.0:8443"
     } else {

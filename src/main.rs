@@ -44,6 +44,7 @@ fn main() {
     let mut hash_password_mode: Option<Option<String>> = None; // Some(None)=prompt, Some(Some(p))=non-interactive
     let mut user_cmd: Option<UserCmd> = None;
     let mut doctor_opts: Option<DoctorOpts> = None;
+    let mut setup_cmd: Option<SetupCmd> = None;
     let mut restore_tar: Option<String> = None;
     let mut restore_force = false;
     let mut i = 1;
@@ -84,7 +85,10 @@ fn main() {
         } else if args[i] == "doctor" {
             doctor_opts = Some(parse_doctor_opts(&args, i + 1));
             break;
-        } else if args[i] == "--help" || args[i] == "-h" {
+        } else if args[i] == "setup" {
+            setup_cmd = Some(parse_setup_cmd(&args, i + 1));
+            break;
+        } else if args[i] == "--help" || args[i] == "-h" || args[i] == "help" {
             print_help();
             return;
         }
@@ -108,6 +112,11 @@ fn main() {
 
     if let Some(opts) = doctor_opts {
         run_doctor(&config_path, opts);
+        return;
+    }
+
+    if let Some(cmd) = setup_cmd {
+        run_setup_cmd(&config_path, cmd);
         return;
     }
 
@@ -338,6 +347,10 @@ fn print_help() {
     println!("       desertemail user passwd <email>");
     println!("       desertemail doctor [--config path] [--domain <d>] [--host <mail.hostname>]");
     println!("                          [--public-ip <ip>] [--json] [--no-net]");
+    println!("       desertemail setup                 # status + guided next steps");
+    println!("       desertemail setup domain <domain> [--host <mail.hostname>]");
+    println!("       desertemail setup dkim [--selector <s>] [--force]");
+    println!("       desertemail setup https <domain> --email <email> [--check-only] [--yes]");
     println!();
     println!("DKIM setup:");
     println!("  1. Generate a key:  openssl genrsa -out dkim.pem 2048");
@@ -367,6 +380,16 @@ fn print_help() {
     println!("  desertemail doctor --public-ip 203.0.113.10 --json");
     println!("  desertemail doctor --no-net   # DNS-only (skip TCP probes)");
     println!("  Exit code = number of blockers (Fail checks). 0 = ready.");
+    println!();
+    println!("Domain & HTTPS setup (SSH-friendly; same edits as the /dns web UI):");
+    println!("  desertemail setup                 # where am I? checklist + next commands");
+    println!("  desertemail setup domain <domain> [--host <mail.hostname>]");
+    println!("  desertemail setup dkim [--selector <s>] [--force]");
+    println!("  desertemail setup https <domain> --email <email> [--check-only] [--yes]");
+    println!("  Example:");
+    println!("    desertemail setup domain example.com --host mail.example.com");
+    println!("    desertemail setup dkim");
+    println!("    desertemail setup https mail.example.com --email you@example.com");
     println!();
     println!("See config.example.toml and README.md");
 }
@@ -563,6 +586,603 @@ fn run_doctor(config_path: &str, opts: DoctorOpts) {
     }
     let code = doctor::run(&cfg, &opts);
     std::process::exit(code);
+}
+
+enum SetupCmd {
+    Status,
+    Domain {
+        domain: String,
+        host: Option<String>,
+    },
+    Dkim {
+        selector: Option<String>,
+        force: bool,
+    },
+    Https {
+        domain: String,
+        email: String,
+        check_only: bool,
+        yes: bool,
+    },
+}
+
+fn parse_setup_cmd(args: &[String], start: usize) -> SetupCmd {
+    // Bare `setup` (or `setup status`): show the guided checklist.
+    if start >= args.len() {
+        return SetupCmd::Status;
+    }
+    let sub = args[start].as_str();
+    match sub {
+        "status" => SetupCmd::Status,
+        "domain" => {
+            if start + 1 >= args.len() || args[start + 1].starts_with('-') {
+                eprintln!("Usage: desertemail setup domain <domain> [--host <mail.hostname>] [--config path]");
+                std::process::exit(1);
+            }
+            let domain = args[start + 1].clone();
+            let mut host = None;
+            let mut j = start + 2;
+            while j < args.len() {
+                if args[j] == "--host" && j + 1 < args.len() {
+                    host = Some(args[j + 1].clone());
+                    j += 2;
+                } else if args[j] == "--config" || args[j] == "-c" {
+                    j += 2;
+                } else if args[j] == "--help" || args[j] == "-h" {
+                    print_help();
+                    std::process::exit(0);
+                } else {
+                    eprintln!("Unknown setup domain option: {}", args[j]);
+                    eprintln!(
+                        "Usage: desertemail setup domain <domain> [--host <mail.hostname>] [--config path]"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            SetupCmd::Domain { domain, host }
+        }
+        "dkim" => {
+            let mut selector = None;
+            let mut force = false;
+            let mut j = start + 1;
+            while j < args.len() {
+                if args[j] == "--selector" && j + 1 < args.len() {
+                    selector = Some(args[j + 1].clone());
+                    j += 2;
+                } else if args[j] == "--force" {
+                    force = true;
+                    j += 1;
+                } else if args[j] == "--config" || args[j] == "-c" {
+                    j += 2;
+                } else if args[j] == "--help" || args[j] == "-h" {
+                    print_help();
+                    std::process::exit(0);
+                } else {
+                    eprintln!("Unknown setup dkim option: {}", args[j]);
+                    eprintln!(
+                        "Usage: desertemail setup dkim [--selector <s>] [--force] [--config path]"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            SetupCmd::Dkim { selector, force }
+        }
+        "https" => {
+            if start + 1 >= args.len() || args[start + 1].starts_with('-') {
+                eprintln!(
+                    "Usage: desertemail setup https <domain> --email <email> [--check-only] [--yes] [--config path]"
+                );
+                std::process::exit(1);
+            }
+            let domain = args[start + 1].clone();
+            let mut email = None;
+            let mut check_only = false;
+            let mut yes = false;
+            let mut j = start + 2;
+            while j < args.len() {
+                if args[j] == "--email" && j + 1 < args.len() {
+                    email = Some(args[j + 1].clone());
+                    j += 2;
+                } else if args[j] == "--check-only" {
+                    check_only = true;
+                    j += 1;
+                } else if args[j] == "--yes" || args[j] == "-y" {
+                    yes = true;
+                    j += 1;
+                } else if args[j] == "--config" || args[j] == "-c" {
+                    j += 2;
+                } else if args[j] == "--help" || args[j] == "-h" {
+                    print_help();
+                    std::process::exit(0);
+                } else {
+                    eprintln!("Unknown setup https option: {}", args[j]);
+                    eprintln!(
+                        "Usage: desertemail setup https <domain> --email <email> [--check-only] [--yes] [--config path]"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let email = match email {
+                Some(e) if !e.trim().is_empty() => e,
+                _ => {
+                    eprintln!("error: --email is required for Let's Encrypt account contact");
+                    eprintln!(
+                        "Usage: desertemail setup https <domain> --email <email> [--check-only] [--yes]"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            SetupCmd::Https {
+                domain,
+                email,
+                check_only,
+                yes,
+            }
+        }
+        // `setup --config path` / `setup -c path`: config was already applied
+        // in the global pass — treat as bare `setup` (status).
+        "--config" | "-c" => SetupCmd::Status,
+        _ => {
+            eprintln!("Unknown setup subcommand: {}", sub);
+            eprintln!();
+            eprintln!("Usage: desertemail setup                 # show status + next steps");
+            eprintln!("       desertemail setup domain <domain> [--host <mail.hostname>]");
+            eprintln!("       desertemail setup dkim [--selector <s>] [--force]");
+            eprintln!("       desertemail setup https <domain> --email <email> [--check-only] [--yes]");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_setup_cmd(config_path: &str, cmd: SetupCmd) {
+    let path = Path::new(config_path);
+    match cmd {
+        SetupCmd::Status => run_setup_status(path),
+        SetupCmd::Domain { domain, host } => run_setup_domain(path, &domain, host.as_deref()),
+        SetupCmd::Dkim { selector, force } => {
+            run_setup_dkim(path, selector.as_deref(), force)
+        }
+        SetupCmd::Https {
+            domain,
+            email,
+            check_only,
+            yes,
+        } => run_setup_https(path, &domain, &email, check_only, yes),
+    }
+}
+
+/// `desertemail setup` with no subcommand: guided checklist for an SSH session.
+/// Shows what is already configured, what is missing, and the exact commands
+/// (with the right --config path) to finish, in order.
+fn run_setup_status(config_path: &Path) {
+    use std::io::IsTerminal;
+    let color = std::env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal();
+    let mark = |done: bool| -> String {
+        match (done, color) {
+            (true, true) => "\x1b[32m✓\x1b[0m".into(),
+            (true, false) => "[x]".into(),
+            (false, true) => "\x1b[33m·\x1b[0m".into(),
+            (false, false) => "[ ]".into(),
+        }
+    };
+    let cfg_disp = config_path.display();
+
+    println!("DesertEmail setup — status & next steps");
+    println!();
+
+    if !config_path.is_file() {
+        println!("  {} config file: {} not found", mark(false), cfg_disp);
+        println!();
+        println!("No config yet. Either run the installer, or create one from the example:");
+        println!("  cp config.example.toml config.toml && desertemail setup");
+        println!("Point at an existing config with: desertemail setup --config /path/to/config.toml");
+        std::process::exit(1);
+    }
+
+    let cfg = load_cfg_or_exit(config_path);
+
+    // --- Gather state -----------------------------------------------------
+    let domain = cfg.primary_domain();
+    let domain_ok = !domain.is_empty() && domain != "localhost";
+    let host = cfg.public_host_name();
+    let users = cfg.user_names();
+    let users_ok = !users.is_empty();
+    let admin = cfg.admin_user_name().unwrap_or_default();
+    let dkim_ok = cfg
+        .dkim_key_file_path()
+        .map(|p| Path::new(&p).is_file())
+        .unwrap_or(false);
+    let cert_ok = cfg
+        .tls_cert_file
+        .as_ref()
+        .map(|p| Path::new(p).is_file())
+        .unwrap_or(false);
+    let https_ok = cfg.acme || cert_ok;
+    let public_url = cfg.public_url_get();
+
+    // --- Checklist ---------------------------------------------------------
+    println!("  {} config file:  {}", mark(true), cfg_disp);
+    if domain_ok {
+        let host_note = if host.is_empty() {
+            String::new()
+        } else {
+            format!("  (mail host: {})", host)
+        };
+        println!("  {} domain:       {}{}", mark(true), domain, host_note);
+    } else {
+        println!("  {} domain:       not set (still \"{}\")", mark(false), domain);
+    }
+    if users_ok {
+        let admin_note = if admin.is_empty() {
+            "no admin_user".to_string()
+        } else {
+            format!("admin: {}", admin)
+        };
+        println!(
+            "  {} users:        {} user(s), {}",
+            mark(true),
+            users.len(),
+            admin_note
+        );
+    } else {
+        println!("  {} users:        none yet", mark(false));
+    }
+    if dkim_ok {
+        println!(
+            "  {} DKIM key:     {} (selector {})",
+            mark(true),
+            cfg.dkim_key_file_path().unwrap_or_default(),
+            cfg.dkim_selector()
+        );
+    } else {
+        println!("  {} DKIM key:     not generated", mark(false));
+    }
+    if https_ok {
+        let detail = match (cfg.acme, cert_ok) {
+            (true, true) => format!(
+                "ACME on, cert at {}",
+                cfg.tls_cert_file.as_deref().unwrap_or("")
+            ),
+            (true, false) => "ACME on, waiting for first certificate".to_string(),
+            (false, _) => format!(
+                "cert file {}",
+                cfg.tls_cert_file.as_deref().unwrap_or("")
+            ),
+        };
+        println!("  {} HTTPS:        {}", mark(cert_ok), detail);
+    } else {
+        println!("  {} HTTPS:        not configured (plain HTTP)", mark(false));
+    }
+    if !public_url.is_empty() {
+        println!("  {} public URL:   {}", mark(true), public_url);
+    }
+
+    // --- Next steps (only what is missing, in order) ------------------------
+    let mut steps: Vec<String> = Vec::new();
+    if !domain_ok {
+        steps.push(format!(
+            "desertemail setup domain example.com --host mail.example.com -c {}",
+            cfg_disp
+        ));
+    }
+    if !users_ok {
+        steps.push(format!(
+            "desertemail user add you@{} -c {}",
+            if domain_ok { domain.as_str() } else { "example.com" },
+            cfg_disp
+        ));
+    }
+    if !dkim_ok {
+        steps.push(format!("desertemail setup dkim -c {}", cfg_disp));
+    }
+    if !https_ok {
+        steps.push(format!(
+            "desertemail setup https {} --email you@{} -c {}",
+            if host.is_empty() {
+                if domain_ok { domain.as_str() } else { "mail.example.com" }
+            } else {
+                host.as_str()
+            },
+            if domain_ok { domain.as_str() } else { "example.com" },
+            cfg_disp
+        ));
+    }
+
+    println!();
+    if steps.is_empty() {
+        println!("All set. Verify DNS and deliverability with:");
+        println!("  desertemail doctor -c {}", cfg_disp);
+        if cfg.acme && !cert_ok {
+            println!();
+            println!("ACME is enabled but no certificate yet — make sure port 80 is reachable");
+            println!("and (re)start the server so the ACME worker can request it:");
+            println!("  desertemail -c {}", cfg_disp);
+        }
+    } else {
+        println!("Next steps (in order):");
+        for (i, s) in steps.iter().enumerate() {
+            println!("  {}. {}", i + 1, s);
+        }
+        println!();
+        println!("Then check readiness:  desertemail doctor -c {}", cfg_disp);
+    }
+    println!();
+    println!("All commands: desertemail --help   ·   web UI equivalent: http://<host>:8080/dns");
+}
+
+fn load_cfg_or_exit(config_path: &Path) -> Config {
+    match Config::load(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot load {}: {}", config_path.display(), e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_setup_domain(config_path: &Path, domain: &str, host: Option<&str>) {
+    let domain = domain.trim().to_lowercase();
+    if domain.is_empty() {
+        eprintln!("error: domain required");
+        std::process::exit(1);
+    }
+    let host_owned = host.map(|h| h.trim().trim_end_matches('.').to_lowercase());
+    let domain_c = domain.clone();
+    let host_c = host_owned.clone();
+    match useredit::edit_file(config_path, |c| {
+        let mut out = useredit::set_primary_domain(c, &domain_c)?;
+        if let Some(ref h) = host_c {
+            out = useredit::set_public_host(&out, h)?;
+        }
+        Ok(out)
+    }) {
+        Ok(_) => {
+            println!("Wrote domains = [\"{}\"]", domain);
+            if let Some(ref h) = host_owned {
+                println!("Wrote public_host = \"{}\"", h);
+            }
+            println!();
+            println!("Next: publish MX/A/SPF/DKIM/DMARC for this domain, then run:");
+            println!("  desertemail doctor --config {}", config_path.display());
+            println!("Or continue setup: desertemail setup dkim --config {}", config_path.display());
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_setup_dkim(config_path: &Path, selector_opt: Option<&str>, force: bool) {
+    let cfg = load_cfg_or_exit(config_path);
+    let key_path = match useredit::dkim_key_path_for_config(&cfg) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if key_path.is_file() && !force {
+        eprintln!(
+            "error: DKIM key already exists at {} — pass --force to overwrite",
+            key_path.display()
+        );
+        eprintln!(
+            "note: regenerating requires re-publishing the TXT at <selector>._domainkey.<domain>"
+        );
+        std::process::exit(1);
+    }
+
+    let key = match crypto::RsaKey::generate(2048) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("error: key generation failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let pem = key.to_pem_pkcs1();
+    if let Some(parent) = key_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("error: cannot create key dir {}: {}", parent.display(), e);
+            std::process::exit(1);
+        }
+    }
+    if let Err(e) = std::fs::write(&key_path, pem.as_bytes()) {
+        eprintln!("error: cannot write {}: {}", key_path.display(), e);
+        std::process::exit(1);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let selector = {
+        if let Some(s) = selector_opt {
+            s.trim().to_lowercase()
+        } else {
+            let s = cfg.dkim_selector();
+            if s.is_empty() {
+                "mail".into()
+            } else {
+                s
+            }
+        }
+    };
+    let path_str = key_path.to_string_lossy().to_string();
+    let sel = selector.clone();
+    let path_for_edit = path_str.clone();
+    if let Err(e) = useredit::edit_file(config_path, |c| {
+        useredit::set_dkim_paths(c, &sel, &path_for_edit)
+    }) {
+        eprintln!("error: key written but config update failed: {}", e);
+        std::process::exit(1);
+    }
+
+    println!("DKIM key written to {} (mode 600)", key_path.display());
+    println!("Selector: {}", selector);
+    println!();
+    let txt = dkim::dns_txt_record(&key);
+    let domains = cfg.domains_list();
+    if domains.is_empty() {
+        println!("Publish this TXT record (Name uses your mail domain):");
+        println!("  Name:  {}._domainkey.<domain>", selector);
+        println!("  Value: {}", txt);
+    } else {
+        println!("Publish these DNS TXT records:");
+        for d in &domains {
+            println!("  Name:  {}._domainkey.{}", selector, d);
+            println!("  Value: {}", txt);
+            println!();
+        }
+    }
+    println!("Then verify with: desertemail doctor --config {}", config_path.display());
+}
+
+fn run_setup_https(config_path: &Path, domain_raw: &str, email: &str, check_only: bool, yes: bool) {
+    let domain = match useredit::normalize_https_domain(domain_raw) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let email = email.trim();
+    if email.is_empty() || !email.contains('@') {
+        eprintln!("error: a valid contact email is required for the Let's Encrypt account");
+        std::process::exit(1);
+    }
+
+    let cfg = load_cfg_or_exit(config_path);
+    let checks = doctor::run_https_checks_ui(&cfg, &domain);
+    print_https_checks(&domain, &checks);
+
+    let fails = checks
+        .iter()
+        .filter(|c| c.status == doctor::Status::Fail)
+        .count();
+
+    if check_only {
+        std::process::exit(fails as i32);
+    }
+
+    if fails > 0 && !yes {
+        eprintln!();
+        eprintln!(
+            "error: {} HTTPS check(s) failed — fix DNS/port 80, or pass --yes to write config anyway",
+            fails
+        );
+        eprintln!("  desertemail setup https {} --email {} --check-only", domain, email);
+        std::process::exit(1);
+    }
+
+    let (cert_path, key_path) = useredit::default_tls_paths(&cfg);
+    let web_tls = if cfg.web_tls_listen.is_empty() {
+        "0.0.0.0:8443"
+    } else {
+        ""
+    };
+    let url = format!("https://{}", domain);
+    let domain_owned = domain.clone();
+    let email_owned = email.to_string();
+    let cert_owned = cert_path.clone();
+    let key_owned = key_path.clone();
+    let web_tls_owned = web_tls.to_string();
+    let url_owned = url.clone();
+
+    match useredit::edit_file(config_path, |c| {
+        let out = useredit::enable_acme(
+            c,
+            &email_owned,
+            &domain_owned,
+            &cert_owned,
+            &key_owned,
+            &web_tls_owned,
+        )?;
+        useredit::set_public_url(&out, &url_owned)
+    }) {
+        Ok(_) => {
+            println!();
+            println!("Wrote ACME / TLS settings to {}", config_path.display());
+            println!("  acme = true");
+            println!("  acme_email = \"{}\"", email);
+            println!("  acme_domains = [\"{}\"]", domain);
+            println!("  tls_cert_file = \"{}\"", cert_path);
+            println!("  tls_key_file = \"{}\"", key_path);
+            if !web_tls.is_empty() {
+                println!("  web_tls_listen = \"{}\"", web_tls);
+            }
+            println!("  public_url = \"{}\"", url);
+            println!();
+            println!("Next steps:");
+            println!("  1. Keep port 80 reachable from the internet (ACME HTTP-01).");
+            println!(
+                "  2. Start or restart desertemail so the ACME background worker can request the certificate:"
+            );
+            println!("       desertemail --config {}", config_path.display());
+            println!(
+                "     (This CLI does not start the ACME thread — the server does that at startup when acme=true.)"
+            );
+            println!(
+                "  3. After the cert is written to {}, HTTPS binds on web_tls_listen.",
+                cert_path
+            );
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_https_checks(domain: &str, checks: &[doctor::Check]) {
+    use std::io::IsTerminal;
+    let color = std::env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal();
+    println!("HTTPS readiness for {}", domain);
+    println!();
+    for c in checks {
+        let glyph = match c.status {
+            doctor::Status::Ok => {
+                if color {
+                    "\x1b[32m✓\x1b[0m"
+                } else {
+                    "ok"
+                }
+            }
+            doctor::Status::Warn => {
+                if color {
+                    "\x1b[33m⚠\x1b[0m"
+                } else {
+                    "warn"
+                }
+            }
+            doctor::Status::Fail => {
+                if color {
+                    "\x1b[31m✗\x1b[0m"
+                } else {
+                    "FAIL"
+                }
+            }
+        };
+        println!("  {} {} — {}", glyph, c.name, c.detail);
+        if let Some(ref fix) = c.fix {
+            if c.status != doctor::Status::Ok {
+                for line in fix.lines() {
+                    println!("      → fix: {}", line);
+                }
+            }
+        }
+    }
+    let blockers = checks
+        .iter()
+        .filter(|c| c.status == doctor::Status::Fail)
+        .count();
+    let warnings = checks
+        .iter()
+        .filter(|c| c.status == doctor::Status::Warn)
+        .count();
+    println!();
+    println!("{} blocker(s), {} warning(s)", blockers, warnings);
 }
 
 enum UserCmd {

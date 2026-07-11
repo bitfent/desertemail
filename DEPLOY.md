@@ -6,11 +6,13 @@ one script (`build-binaries.sh`) and commits them into `bin-dist/`; Render runs
 `site-build.sh` and serves them under `/bin/` next to the per-platform
 installers.
 
-**TLS note:** release binaries now include rustls-based TLS (STARTTLS + optional
-implicit SMTPS/IMAPS/HTTPS). Operators supply `tls_cert_file` / `tls_key_file`
-in `config.toml` (self-signed, certbot/acme.sh, etc.). There is no ACME in the
-binary and **no behavior change** to the install/site pipeline — installers and
-`site-build.sh` are unchanged.
+**TLS note:** release binaries include rustls-based TLS (STARTTLS + optional
+implicit SMTPS/IMAPS/HTTPS) **and built-in ACME (Let's Encrypt HTTP-01)**.
+Operators either enable ACME (`acme = true`, via the `/dns` web page or
+`desertemail setup https`) or supply their own `tls_cert_file` /
+`tls_key_file` in `config.toml` (self-signed, certbot/acme.sh, etc.). No
+behavior change to the install/site pipeline — installers and `site-build.sh`
+are unchanged.
 
 ## (a) Build ALL binaries locally into `bin-dist/` — no GitHub, no cloud
 
@@ -167,6 +169,28 @@ If `SITE_BASE_URL` and `RENDER_EXTERNAL_URL` are both unset, `site-build.sh`
 defaults to `http://127.0.0.1:4173` and prints a warning.
 
 ## Operations (server lifecycle)
+
+### Domain & HTTPS setup over SSH
+
+Start with the guided status screen — it shows what is configured and prints
+the exact commands (with your `--config` path) still needed, in order:
+
+```bash
+desertemail setup --config /etc/desertemail/config.toml
+```
+
+Then run the steps it suggests:
+
+```bash
+desertemail setup domain example.com --host mail.example.com -c /etc/desertemail/config.toml
+desertemail setup dkim -c /etc/desertemail/config.toml        # prints the DKIM TXT to publish
+desertemail setup https mail.example.com --email you@example.com -c /etc/desertemail/config.toml
+sudo systemctl restart desertemail   # ACME worker requests the cert at startup
+```
+
+`setup https` probes A/AAAA + port 80 first (`--check-only` to probe without
+writing; `--yes` to write config even if checks fail). Same atomic config
+edits as the `/dns` web page.
 
 ### User management
 
