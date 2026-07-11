@@ -557,6 +557,8 @@ export PATH="$HOME/.desertemail/bin:$PATH"
         <p class="note">Fish uses <code>set -gx PATH …</code> between the same markers. Windows adds the bin directory to the <strong>user PATH</strong> via the registry (no shell-rc markers).</p>
         <ul>
           <li><strong>Optional systemd unit</strong> — <code>/etc/systemd/system/desertemail.service</code> only if you opt in (Linux with systemd). The installer uses <code>sudo</code> only when installing that unit and you are not root.</li>
+          <li><strong>Optional macOS launchd agent</strong> — <code>~/Library/LaunchAgents/org.desertemail.plist</code> when you accept “Start DesertEmail now” (or <code>DESERTEMAIL_AUTOSTART=1</code>). Survives reboots via <code>RunAtLoad</code>.</li>
+          <li><strong>Log file</strong> — <code>$PREFIX/desertemail.log</code> when the installer (or launchd) starts the server</li>
         </ul>
         <p><strong>Safety guarantees of the installer:</strong></p>
         <ul>
@@ -569,12 +571,13 @@ export PATH="$HOME/.desertemail/bin:$PATH"
       <section class="pix-panel" aria-labelledby="uninstall">
         <div class="heading-wrap"><h2 id="uninstall">How to uninstall</h2><a class="anchor" href="#uninstall" aria-label="Link to this section">#</a></div>
         <ol>
-          <li>Stop the process (or <code>systemctl stop desertemail</code> if you installed the unit).</li>
+          <li>Stop the process: <code>systemctl stop desertemail</code> (Linux unit), <code>launchctl bootout gui/$(id -u)/org.desertemail</code> (macOS agent), or kill the background process.</li>
           <li>Delete the prefix directory: <code>rm -rf ~/.desertemail</code> (or your <code>DESERTEMAIL_PREFIX</code>).</li>
           <li>Remove the PATH block between the markers in your shell rc (or remove the user PATH entry on Windows).</li>
           <li>If installed: <code>sudo systemctl disable --now desertemail</code> and <code>sudo rm /etc/systemd/system/desertemail.service</code>, then <code>sudo systemctl daemon-reload</code>.</li>
+          <li>On macOS, also remove <code>~/Library/LaunchAgents/org.desertemail.plist</code> if present.</li>
         </ol>
-        <p>That is a complete removal. There are no other system packages, launch agents, or hidden services.</p>
+        <p>That is a complete removal. There are no other system packages or hidden services beyond the optional unit/agent above.</p>
       </section>
 
       <section class="pix-panel" aria-labelledby="architecture">
@@ -924,22 +927,18 @@ web_tls_listen = "0.0.0.0:8443"</code></pre>
           <li>Download the binary for the fixed target triple baked into that script</li>
           <li>Verify SHA-256 against <code>/bin/SHA256SUMS</code> when available</li>
           <li>Install under <code>$PREFIX/bin</code> and append the PATH block (idempotent markers)</li>
-          <li>Run the wizard (or env defaults in non-interactive mode)</li>
+          <li>Express config by default (or advanced wizard / env defaults in non-interactive mode)</li>
           <li>Write <code>config.toml</code> if missing / if you confirm overwrite</li>
-          <li>Optionally install systemd unit (Linux only)</li>
-          <li>Print start command and DNS/DKIM hints</li>
+          <li>Optionally install systemd unit (Linux) or launchd agent (macOS when starting)</li>
+          <li>Optionally start the server, wait for webmail, and open the browser</li>
+          <li>Print login summary (password shown in express mode) and DNS/DKIM hints</li>
         </ol>
-        <div class="heading-wrap"><h3 id="installers-wizard">Wizard questions</h3><a class="anchor" href="#installers-wizard" aria-label="Link to this section">#</a></div>
+        <div class="heading-wrap"><h3 id="installers-wizard">Wizard (express by default)</h3><a class="anchor" href="#installers-wizard" aria-label="Link to this section">#</a></div>
+        <p>First prompt: <strong>Press Enter for recommended settings</strong>, or type <code>custom</code> for advanced setup.</p>
         <ul>
-          <li>Primary domain</li>
-          <li>Admin username</li>
-          <li>Admin password (hidden input; Enter generates a random one)</li>
-          <li>Data directory</li>
-          <li>Enable webmail? (Y/N)</li>
-          <li>Port set: high (2525/2587/2143) or privileged (25/587/143)</li>
-          <li>Enable DKIM signing? (needs <code>openssl</code> for keygen)</li>
-          <li>Overwrite existing config? (only if present)</li>
-          <li>Install systemd unit? (Linux with systemd)</li>
+          <li><strong>Express (default)</strong> — domain <code>localhost</code>, user <code>admin</code>, random password (printed at the end), default data dir, webmail on, high ports, DKIM off. No further questions.</li>
+          <li><strong>Custom</strong> — primary domain, admin user, password (hidden; Enter generates), data directory, webmail Y/N, port set high/privileged, DKIM Y/N, overwrite existing config if present, optional systemd unit (Linux)</li>
+          <li><strong>Start now?</strong> — after config, “Start DesertEmail now and open webmail?” (default yes). Starts in the background (macOS: launchd user agent; Linux: nohup, or systemd if you opted in), waits for <code>http://127.0.0.1:8080</code>, opens a browser when possible.</li>
         </ul>
         <div class="heading-wrap"><h3 id="installers-env">Env vars (headless / CI)</h3><a class="anchor" href="#installers-env" aria-label="Link to this section">#</a></div>
         <p>Use <code>DESERTEMAIL_NONINTERACTIVE=1</code> with optional overrides:</p>
@@ -951,12 +950,13 @@ web_tls_listen = "0.0.0.0:8443"</code></pre>
               <tr><td><code>DESERTEMAIL_PREFIX</code></td><td>Install root (default <code>~/.desertemail</code>)</td></tr>
               <tr><td><code>DESERTEMAIL_DOMAIN</code></td><td>Primary domain (default <code>localhost</code>)</td></tr>
               <tr><td><code>DESERTEMAIL_ADMIN_USER</code></td><td>Admin / first user (default <code>admin</code>)</td></tr>
-              <tr><td><code>DESERTEMAIL_ADMIN_PASSWORD</code></td><td>Admin password (else random)</td></tr>
+              <tr><td><code>DESERTEMAIL_ADMIN_PASSWORD</code></td><td>Admin password (else random; shown in summary when generated)</td></tr>
               <tr><td><code>DESERTEMAIL_DATA_DIR</code></td><td>Maildir root (default <code>$PREFIX/data</code>)</td></tr>
               <tr><td><code>DESERTEMAIL_WEBMAIL</code></td><td><code>1</code>/<code>0</code> — enable web UI (default on)</td></tr>
               <tr><td><code>DESERTEMAIL_PORTS</code></td><td><code>high</code> or <code>privileged</code></td></tr>
               <tr><td><code>DESERTEMAIL_DKIM</code></td><td><code>1</code>/<code>0</code> — generate/use DKIM key</td></tr>
               <tr><td><code>DESERTEMAIL_SYSTEMD</code></td><td><code>1</code>/<code>0</code> — install unit (POSIX only; Windows has no systemd)</td></tr>
+              <tr><td><code>DESERTEMAIL_AUTOSTART</code></td><td><code>1</code>/<code>0</code> — start server after install (default <code>0</code> when non-interactive so CI does not hang; interactive defaults to yes)</td></tr>
             </tbody>
           </table>
         </div>

@@ -580,8 +580,10 @@ env.pop("DESERTEMAIL_NONINTERACTIVE", None)
 # Ensure empty rc files exist
 open(os.path.join(home, ".zshrc"), "a").close()
 
-# Answers for: domain, user, password(empty=gen), data_dir, webmail, ports, dkim
+# Answers: custom mode, domain, user, password(empty=gen), data_dir,
+# webmail, ports, dkim, then autostart=n (and systemd=n if ever prompted).
 answers = [
+    "custom\n",
     "wizard.example\n",
     "wiz\n",
     "\n",
@@ -589,6 +591,8 @@ answers = [
     "\n",
     "\n",
     "\n",
+    "n\n",
+    "n\n",
 ]
 ans_i = 0
 output = bytearray()
@@ -813,7 +817,8 @@ test_windows_ps1() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 18: no github api/releases, no uname auto-detect
+# Test 18: no github api/releases, no platform uname auto-detect
+# (uname -s for Darwin launchd / OS service install is allowed)
 # ---------------------------------------------------------------------------
 test_no_github_api_or_uname() {
   _nn=18
@@ -832,10 +837,17 @@ test_no_github_api_or_uname() {
       _bad=1
       _detail="${_detail} github-releases in $(basename "${_f}");"
     fi
-    _uc=$(grep -c 'uname' "${_f}" 2>/dev/null || true)
-    if [ "${_uc}" -ne 0 ]; then
+    # Forbid using uname to pick the download target / binary triple.
+    if grep -qE 'TARGET=.*\$\(uname|TARGET=.*`uname|uname .*TARGET' "${_f}"; then
       _bad=1
-      _detail="${_detail} uname count=${_uc} in $(basename "${_f}");"
+      _detail="${_detail} uname used for TARGET in $(basename "${_f}");"
+    fi
+    # Any other uname must be the Darwin service check (uname -s).
+    if grep -q 'uname' "${_f}" 2>/dev/null; then
+      if ! grep -qE 'uname -s' "${_f}"; then
+        _bad=1
+        _detail="${_detail} unexpected uname usage in $(basename "${_f}");"
+      fi
     fi
   done
   if [ "${_bad}" -ne 0 ]; then
@@ -918,6 +930,51 @@ test_sha256sums_format() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 21: non-interactive express defaults + password shown; no autostart
+# ---------------------------------------------------------------------------
+test_express_noninteractive() {
+  _nn=21
+  _home=$(fake_home)
+  run_installer "macos-apple-silicon" "${_home}"
+  if [ "${INSTALL_EC}" -ne 0 ]; then
+    fail "${_nn}" "express-noninteractive" "install failed"
+    return
+  fi
+  _cfg="${_home}/.desertemail/config.toml"
+  if ! grep -q 'localhost' "${_cfg}"; then
+    fail "${_nn}" "express-noninteractive" "expected domain localhost"
+    return
+  fi
+  if ! grep -q 'admin_user = "admin"' "${_cfg}"; then
+    fail "${_nn}" "express-noninteractive" "expected admin user"
+    return
+  fi
+  if ! grep -q '0.0.0.0:2525' "${_cfg}"; then
+    fail "${_nn}" "express-noninteractive" "expected high ports"
+    return
+  fi
+  if ! grep -q 'Login  : admin /' "${OUT_COMBINED}"; then
+    fail "${_nn}" "express-noninteractive" "expected password shown in summary"
+    return
+  fi
+  # Default non-interactive autostart is off — no launchd agent for this HOME
+  if [ -f "${_home}/Library/LaunchAgents/org.desertemail.plist" ]; then
+    fail "${_nn}" "express-noninteractive" "launchd agent installed without AUTOSTART=1"
+    return
+  fi
+  if grep -qi 'Skipping autostart' "${OUT_COMBINED}"; then
+    :
+  else
+    # summary should say not started
+    if ! grep -q 'Status : not started' "${OUT_COMBINED}"; then
+      fail "${_nn}" "express-noninteractive" "expected no autostart"
+      return
+    fi
+  fi
+  ok "${_nn}" "express-noninteractive"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
@@ -945,6 +1002,7 @@ main() {
   test_no_github_api_or_uname
   test_shell_syntax
   test_sha256sums_format
+  test_express_noninteractive
 
   printf '\n=== summary ===\n'
   printf '%s/%s passed\n' "${PASSED}" "${TOTAL}"

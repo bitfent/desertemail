@@ -6,6 +6,7 @@
 #   DESERTEMAIL_DOMAIN, DESERTEMAIL_ADMIN_USER, DESERTEMAIL_ADMIN_PASSWORD
 #   DESERTEMAIL_DATA_DIR, DESERTEMAIL_WEBMAIL=1|0, DESERTEMAIL_PORTS=high|privileged
 #   DESERTEMAIL_DKIM=1|0, DESERTEMAIL_SYSTEMD=1|0
+#   DESERTEMAIL_AUTOSTART=1|0  (default: 1 interactive, 0 non-interactive)
 #
 # Placeholders substituted by site-build.sh:
 #   __TARGET__   rust triple (e.g. x86_64-unknown-linux-musl)
@@ -21,8 +22,15 @@ DEFAULT_PREFIX="${HOME}/.desertemail"
 PREFIX="${DESERTEMAIL_PREFIX:-$DEFAULT_PREFIX}"
 BIN_DIR="${PREFIX}/bin"
 CONFIG_PATH="${PREFIX}/config.toml"
+LOG_PATH="${PREFIX}/desertemail.log"
+LAUNCHD_LABEL="org.desertemail"
+LAUNCHD_PLIST=""
 TMPDIR_INSTALL=""
 INTERACTIVE=1
+SHOW_ADMIN_PASSWORD=0
+SERVER_STARTED=0
+SYSTEMD_INSTALLED=0
+LAUNCHD_INSTALLED=0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,6 +47,44 @@ info() {
 
 warn() {
   printf '%s\n' "warning: $*" >&2
+}
+
+# ANSI colors only on a real TTY with a non-dumb TERM.
+use_color() {
+  if [ -t 1 ] 2>/dev/null && [ "${TERM:-}" != "dumb" ] && [ -n "${TERM:-}" ]; then
+    return 0
+  fi
+  return 1
+}
+
+print_logo() {
+  # ~8 lines, ~60 cols; sand/orange when color is available.
+  if use_color; then
+    _sand='\033[38;5;180m'
+    _orange='\033[38;5;208m'
+    _cactus='\033[38;5;107m'
+    _rst='\033[0m'
+  else
+    _sand=''
+    _orange=''
+    _cactus=''
+    _rst=''
+  fi
+  printf '%s\n' ""
+  printf '%s\n' "${_sand}        .    '    .${_rst}"
+  printf '%s\n' "${_orange}    ____|____    DesertEmail${_rst}"
+  printf '%s\n' "${_sand}   /  .---.  \\   lightweight mail server${_rst}"
+  printf '%s\n' "${_cactus}  |  | o o |  |  + simple install${_rst}"
+  printf '%s\n' "${_cactus}   \\  '---'  /${_rst}"
+  printf '%s\n' "${_sand}    '---^---'${_rst}"
+  printf '%s\n' ""
+}
+
+step() {
+  # step N "Title"
+  info ""
+  info "[$1/4] $2"
+  info "----------------------------------------"
 }
 
 cleanup() {
@@ -156,10 +202,13 @@ prompt() {
 
 prompt_secret() {
   # prompt_secret "Question" "default_if_empty" -> sets REPLY (never echoes input)
+  # Sets SECRET_WAS_DEFAULT=1 when the user accepted the default (empty input).
   _q=$1
   _def=$2
+  SECRET_WAS_DEFAULT=0
   if [ "${INTERACTIVE}" -eq 0 ]; then
     REPLY="${_def}"
+    SECRET_WAS_DEFAULT=1
     return 0
   fi
   printf '%s [hidden, Enter=generate]: ' "${_q}"
@@ -169,6 +218,7 @@ prompt_secret() {
   printf '\n'
   if [ -z "${REPLY}" ]; then
     REPLY="${_def}"
+    SECRET_WAS_DEFAULT=1
   fi
 }
 
@@ -206,6 +256,15 @@ random_password() {
   fi
 }
 
+is_darwin() {
+  # OS service install only — platform binary target is baked into TARGET.
+  [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]
+}
+
+web_url() {
+  printf '%s' "http://127.0.0.1:8080"
+}
+
 # ---------------------------------------------------------------------------
 # Download binary from this site's /bin/ (no GitHub Releases / API)
 # ---------------------------------------------------------------------------
@@ -225,7 +284,7 @@ install_binary() {
   _bin_tmp="${TMPDIR_INSTALL}/${_asset}"
   _sums_tmp="${TMPDIR_INSTALL}/SHA256SUMS"
 
-  info "Downloading ${_asset} from ${_url} ..."
+  info "Downloading ${_asset} ..."
   if ! download_try "${_url}" "${_bin_tmp}"; then
     if [ "${DOWNLOAD_HTTP_CODE}" = "404" ]; then
       die "no prebuilt binary for ${TARGET} published yet — see the build-from-source installer"
@@ -233,7 +292,7 @@ install_binary() {
     die "no prebuilt binary for ${TARGET} published yet — see the build-from-source installer (download failed: ${_url})"
   fi
 
-  info "Downloading SHA256SUMS ..."
+  info "Verifying checksum ..."
   if download_try "${_sums_url}" "${_sums_tmp}"; then
     if _got=$(sha256_file "${_bin_tmp}"); then
       _want=$(grep -E "[ /]${_asset}\$" "${_sums_tmp}" 2>/dev/null | awk '{print $1}' | head -n 1)
@@ -358,9 +417,46 @@ write_config() {
   chmod 600 "${CONFIG_PATH}" 2>/dev/null || true
 }
 
+apply_port_set() {
+  case "${PORT_SET}" in
+    privileged|priv|2)
+      SMTP_LISTEN="0.0.0.0:25"
+      SUB_LISTEN="0.0.0.0:587"
+      IMAP_LISTEN="0.0.0.0:143"
+      ;;
+    *)
+      SMTP_LISTEN="0.0.0.0:2525"
+      SUB_LISTEN="0.0.0.0:2587"
+      IMAP_LISTEN="0.0.0.0:2143"
+      ;;
+  esac
+}
+
+maybe_generate_dkim() {
+  DKIM_KEY=""
+  if [ "${ENABLE_DKIM}" != "y" ]; then
+    return 0
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    DKIM_KEY="${PREFIX}/dkim.pem"
+    if [ ! -f "${DKIM_KEY}" ]; then
+      info "Generating DKIM key at ${DKIM_KEY} ..."
+      openssl genrsa -out "${DKIM_KEY}" 2048 2>/dev/null \
+        || die "openssl genrsa failed"
+      chmod 600 "${DKIM_KEY}" 2>/dev/null || true
+    else
+      info "Using existing DKIM key ${DKIM_KEY}"
+    fi
+  else
+    warn "openssl not found; skipping DKIM key generation"
+    DKIM_KEY=""
+  fi
+}
+
 configure() {
   info ""
-  info "=== DesertEmail setup ==="
+  info "Recommended settings: domain=localhost, user=admin, random password,"
+  info "  webmail on, high ports (no root), DKIM off."
   info ""
 
   # Defaults from env or sensible values
@@ -368,37 +464,76 @@ configure() {
   _def_admin="${DESERTEMAIL_ADMIN_USER:-admin}"
   _def_data="${DESERTEMAIL_DATA_DIR:-${PREFIX}/data}"
   _gen_pw=$(random_password)
-  _def_pw="${DESERTEMAIL_ADMIN_PASSWORD:-${_gen_pw}}"
+  _pw_from_env=0
+  if [ -n "${DESERTEMAIL_ADMIN_PASSWORD+x}" ] && [ -n "${DESERTEMAIL_ADMIN_PASSWORD}" ]; then
+    _def_pw="${DESERTEMAIL_ADMIN_PASSWORD}"
+    _pw_from_env=1
+  else
+    _def_pw="${_gen_pw}"
+  fi
+
+  SHOW_ADMIN_PASSWORD=0
 
   if [ "${INTERACTIVE}" -eq 1 ]; then
-    prompt "Primary domain" "${_def_domain}"
-    DOMAIN="${REPLY}"
+    prompt "Press Enter to install with recommended settings, or type 'custom' for advanced setup" ""
+    case "${REPLY}" in
+      custom|CUSTOM|Custom|advanced|ADVANCED|a|A)
+        info ""
+        info "Advanced setup — answer a few questions (Enter accepts the default)."
+        info ""
 
-    prompt "Admin username" "${_def_admin}"
-    ADMIN_USER="${REPLY}"
+        prompt "Primary domain" "${_def_domain}"
+        DOMAIN="${REPLY}"
 
-    prompt_secret "Admin password" "${_def_pw}"
-    ADMIN_PASSWORD="${REPLY}"
+        prompt "Admin username" "${_def_admin}"
+        ADMIN_USER="${REPLY}"
 
-    prompt "Data directory" "${_def_data}"
-    DATA_DIR="${REPLY}"
+        prompt_secret "Admin password" "${_def_pw}"
+        ADMIN_PASSWORD="${REPLY}"
+        if [ "${SECRET_WAS_DEFAULT}" -eq 1 ] && [ "${_pw_from_env}" -eq 0 ]; then
+          SHOW_ADMIN_PASSWORD=1
+        else
+          SHOW_ADMIN_PASSWORD=0
+        fi
 
-    yes_no "Enable webmail?" "Y"
-    if [ "${REPLY}" = "y" ]; then
-      WEB_LISTEN="0.0.0.0:8080"
-    else
-      WEB_LISTEN=""
-    fi
+        prompt "Data directory" "${_def_data}"
+        DATA_DIR="${REPLY}"
 
-    info "Ports:"
-    info "  1) high (2525/2587/2143) — no root required [default]"
-    info "  2) privileged (25/587/143) — needs CAP_NET_BIND_SERVICE or root"
-    prompt "Port set (high/privileged)" "high"
-    PORT_SET="${REPLY}"
+        yes_no "Enable webmail?" "Y"
+        if [ "${REPLY}" = "y" ]; then
+          WEB_LISTEN="0.0.0.0:8080"
+        else
+          WEB_LISTEN=""
+        fi
 
-    yes_no "Enable DKIM signing?" "N"
-    ENABLE_DKIM="${REPLY}"
+        info "Ports:"
+        info "  1) high (2525/2587/2143) — no root required [default]"
+        info "  2) privileged (25/587/143) — needs CAP_NET_BIND_SERVICE or root"
+        prompt "Port set (high/privileged)" "high"
+        PORT_SET="${REPLY}"
+
+        yes_no "Enable DKIM signing?" "N"
+        ENABLE_DKIM="${REPLY}"
+        ;;
+      *)
+        info "Using recommended settings (express install)."
+        DOMAIN="${_def_domain}"
+        ADMIN_USER="${_def_admin}"
+        ADMIN_PASSWORD="${_def_pw}"
+        DATA_DIR="${_def_data}"
+        WEB_LISTEN="0.0.0.0:8080"
+        PORT_SET="high"
+        ENABLE_DKIM=n
+        if [ "${_pw_from_env}" -eq 0 ]; then
+          SHOW_ADMIN_PASSWORD=1
+        else
+          SHOW_ADMIN_PASSWORD=0
+        fi
+        ;;
+    esac
   else
+    # Non-interactive: env overrides only (same as before). Show password when
+    # it was auto-generated so CI logs and first-run users can log in.
     DOMAIN="${_def_domain}"
     ADMIN_USER="${_def_admin}"
     ADMIN_PASSWORD="${_def_pw}"
@@ -412,38 +547,15 @@ configure() {
       1|y|Y|true|TRUE|yes|YES) ENABLE_DKIM=y ;;
       *) ENABLE_DKIM=n ;;
     esac
-  fi
-
-  case "${PORT_SET}" in
-    privileged|priv|2)
-      SMTP_LISTEN="0.0.0.0:25"
-      SUB_LISTEN="0.0.0.0:587"
-      IMAP_LISTEN="0.0.0.0:143"
-      ;;
-    *)
-      SMTP_LISTEN="0.0.0.0:2525"
-      SUB_LISTEN="0.0.0.0:2587"
-      IMAP_LISTEN="0.0.0.0:2143"
-      ;;
-  esac
-
-  DKIM_KEY=""
-  if [ "${ENABLE_DKIM}" = "y" ]; then
-    if command -v openssl >/dev/null 2>&1; then
-      DKIM_KEY="${PREFIX}/dkim.pem"
-      if [ ! -f "${DKIM_KEY}" ]; then
-        info "Generating DKIM key at ${DKIM_KEY} ..."
-        openssl genrsa -out "${DKIM_KEY}" 2048 2>/dev/null \
-          || die "openssl genrsa failed"
-        chmod 600 "${DKIM_KEY}" 2>/dev/null || true
-      else
-        info "Using existing DKIM key ${DKIM_KEY}"
-      fi
+    if [ "${_pw_from_env}" -eq 0 ]; then
+      SHOW_ADMIN_PASSWORD=1
     else
-      warn "openssl not found; skipping DKIM key generation"
-      DKIM_KEY=""
+      SHOW_ADMIN_PASSWORD=0
     fi
   fi
+
+  apply_port_set
+  maybe_generate_dkim
 
   mkdir -p "${PREFIX}"
   mkdir -p "${DATA_DIR}"
@@ -481,12 +593,13 @@ configure() {
 }
 
 # ---------------------------------------------------------------------------
-# Optional systemd unit
+# Optional systemd unit (Linux)
 # ---------------------------------------------------------------------------
 
 install_systemd() {
   _bin="${BIN_DIR}/${APP_NAME}"
   _want_systemd=0
+  SYSTEMD_INSTALLED=0
 
   if [ ! -d /run/systemd/system ] && [ ! -d /etc/systemd/system ]; then
     return 0
@@ -597,10 +710,12 @@ EOF
   fi
 
   if [ "${_wrote}" -eq 1 ]; then
+    SYSTEMD_INSTALLED=1
     if [ "$(id -u)" -eq 0 ]; then
       systemctl daemon-reload
       if systemctl enable --now desertemail.service; then
         info "systemd: desertemail.service enabled and started"
+        SERVER_STARTED=1
       else
         warn "systemctl enable/start failed"
       fi
@@ -608,10 +723,198 @@ EOF
       sudo systemctl daemon-reload
       if sudo systemctl enable --now desertemail.service; then
         info "systemd: desertemail.service enabled and started"
+        SERVER_STARTED=1
       else
         warn "systemctl enable/start failed"
       fi
     fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# macOS launchd user agent
+# ---------------------------------------------------------------------------
+
+install_launchd() {
+  LAUNCHD_INSTALLED=0
+  if ! is_darwin; then
+    return 0
+  fi
+  if ! command -v launchctl >/dev/null 2>&1; then
+    warn "launchctl not found; skipping launchd agent"
+    return 0
+  fi
+
+  _bin="${BIN_DIR}/${APP_NAME}"
+  _agents_dir="${HOME}/Library/LaunchAgents"
+  mkdir -p "${_agents_dir}"
+  LAUNCHD_PLIST="${_agents_dir}/${LAUNCHD_LABEL}.plist"
+
+  # Unload any previous agent so bootstrap/load is clean.
+  launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null || true
+  launchctl unload "${LAUNCHD_PLIST}" 2>/dev/null || true
+
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    printf '%s\n' '<plist version="1.0">'
+    printf '%s\n' '<dict>'
+    printf '%s\n' '  <key>Label</key>'
+    printf '  <string>%s</string>\n' "${LAUNCHD_LABEL}"
+    printf '%s\n' '  <key>ProgramArguments</key>'
+    printf '%s\n' '  <array>'
+    printf '    <string>%s</string>\n' "${_bin}"
+    printf '    <string>--config</string>\n'
+    printf '    <string>%s</string>\n' "${CONFIG_PATH}"
+    printf '%s\n' '  </array>'
+    printf '%s\n' '  <key>WorkingDirectory</key>'
+    printf '  <string>%s</string>\n' "${PREFIX}"
+    printf '%s\n' '  <key>RunAtLoad</key>'
+    printf '%s\n' '  <true/>'
+    printf '%s\n' '  <key>KeepAlive</key>'
+    printf '%s\n' '  <dict>'
+    printf '%s\n' '    <key>SuccessfulExit</key>'
+    printf '%s\n' '    <false/>'
+    printf '%s\n' '  </dict>'
+    printf '%s\n' '  <key>StandardOutPath</key>'
+    printf '  <string>%s</string>\n' "${LOG_PATH}"
+    printf '%s\n' '  <key>StandardErrorPath</key>'
+    printf '  <string>%s</string>\n' "${LOG_PATH}"
+    printf '%s\n' '</dict>'
+    printf '%s\n' '</plist>'
+  } > "${LAUNCHD_PLIST}"
+
+  _uid=$(id -u)
+  if launchctl bootstrap "gui/${_uid}" "${LAUNCHD_PLIST}" 2>/dev/null; then
+    LAUNCHD_INSTALLED=1
+    SERVER_STARTED=1
+    info "launchd: installed and loaded ${LAUNCHD_PLIST}"
+    return 0
+  fi
+  if launchctl load "${LAUNCHD_PLIST}" 2>/dev/null; then
+    LAUNCHD_INSTALLED=1
+    SERVER_STARTED=1
+    info "launchd: installed and loaded ${LAUNCHD_PLIST}"
+    return 0
+  fi
+
+  warn "launchctl bootstrap/load failed; will start in background instead"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Start server, wait for web, open browser
+# ---------------------------------------------------------------------------
+
+web_is_up() {
+  _url=$(web_url)
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS -o /dev/null --connect-timeout 1 "${_url}/" 2>/dev/null \
+      || curl -fsS -o /dev/null --connect-timeout 1 "${_url}" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  if command -v nc >/dev/null 2>&1; then
+    if nc -z 127.0.0.1 8080 2>/dev/null; then
+      return 0
+    fi
+  fi
+  # /dev/tcp is bash-only; skip for POSIX sh
+  return 1
+}
+
+wait_for_web() {
+  # Poll up to ~10 seconds
+  _n=0
+  while [ "${_n}" -lt 20 ]; do
+    if web_is_up; then
+      return 0
+    fi
+    _n=$((_n + 1))
+    sleep 0.5
+  done
+  return 1
+}
+
+start_background() {
+  _bin="${BIN_DIR}/${APP_NAME}"
+  mkdir -p "${PREFIX}"
+  : >> "${LOG_PATH}" 2>/dev/null || true
+
+  info "Starting DesertEmail in the background ..."
+  info "  log: ${LOG_PATH}"
+
+  if command -v setsid >/dev/null 2>&1; then
+    # Detach from the installer session when possible
+    setsid "${_bin}" --config "${CONFIG_PATH}" >>"${LOG_PATH}" 2>&1 </dev/null &
+  else
+    nohup "${_bin}" --config "${CONFIG_PATH}" >>"${LOG_PATH}" 2>&1 </dev/null &
+  fi
+  SERVER_STARTED=1
+}
+
+open_browser() {
+  _url=$(web_url)
+  if is_darwin && command -v open >/dev/null 2>&1; then
+    open "${_url}" 2>/dev/null || true
+    return 0
+  fi
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "${_url}" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+maybe_autostart() {
+  _want=0
+  if [ "${INTERACTIVE}" -eq 1 ]; then
+    yes_no "Start DesertEmail now and open webmail?" "Y"
+    if [ "${REPLY}" = "y" ]; then
+      _want=1
+    fi
+  else
+    # Non-interactive default OFF so CI/tests do not hang on a running server.
+    case "${DESERTEMAIL_AUTOSTART:-0}" in
+      1|y|Y|true|TRUE|yes|YES) _want=1 ;;
+      *) _want=0 ;;
+    esac
+  fi
+
+  if [ "${_want}" -eq 0 ]; then
+    info "Skipping autostart (start manually when ready)."
+    return 0
+  fi
+
+  # If systemd already started us, just wait and open the browser.
+  if [ "${SERVER_STARTED}" -eq 0 ]; then
+    if is_darwin; then
+      if ! install_launchd; then
+        start_background
+      fi
+    else
+      start_background
+    fi
+  fi
+
+  if [ -n "${WEB_LISTEN:-}" ]; then
+    info "Waiting for webmail at $(web_url) ..."
+    if wait_for_web; then
+      info "Webmail is up."
+      if open_browser; then
+        info "Opened browser to $(web_url)"
+      else
+        info "Open this URL in your browser: $(web_url)"
+      fi
+    else
+      warn "server did not become ready within ~10s"
+      warn "check the log: ${LOG_PATH}"
+      warn "start manually: ${BIN_DIR}/${APP_NAME} --config ${CONFIG_PATH}"
+    fi
+  else
+    info "Webmail is disabled; server start was still requested."
+    # Give a moment for bind, no URL to open
+    sleep 1
   fi
 }
 
@@ -621,6 +924,7 @@ EOF
 
 print_summary() {
   _bin="${BIN_DIR}/${APP_NAME}"
+  _url=$(web_url)
   info ""
   info "========================================"
   info " DesertEmail install complete"
@@ -628,15 +932,39 @@ print_summary() {
   info " Binary : ${_bin}"
   info " Config : ${CONFIG_PATH}"
   info " Prefix : ${PREFIX}"
+  info " Log    : ${LOG_PATH}"
   info " Ports  : SMTP ${SMTP_LISTEN:-?} | submission ${SUB_LISTEN:-?} | IMAP ${IMAP_LISTEN:-?}"
   if [ -n "${WEB_LISTEN:-}" ]; then
-    info " Webmail: http://127.0.0.1:8080  (listen ${WEB_LISTEN})"
+    info " Webmail: ${_url}"
   else
     info " Webmail: disabled"
   fi
+  if [ -n "${ADMIN_USER:-}" ]; then
+    if [ "${SHOW_ADMIN_PASSWORD}" -eq 1 ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+      info " Login  : ${ADMIN_USER} / ${ADMIN_PASSWORD}"
+      info "          (save this password — it will not be shown again)"
+    else
+      info " Login  : ${ADMIN_USER} / (password stored in ${CONFIG_PATH})"
+    fi
+  fi
   info ""
-  info "Start manually:"
-  info "  ${_bin} --config ${CONFIG_PATH}"
+  if [ "${SERVER_STARTED}" -eq 1 ]; then
+    info " Status : running (started by installer)"
+  else
+    info " Status : not started"
+    info " Start  : ${_bin} --config ${CONFIG_PATH}"
+  fi
+  if [ "${LAUNCHD_INSTALLED}" -eq 1 ]; then
+    info " Service: launchd ${LAUNCHD_LABEL}"
+    info " Stop   : launchctl bootout gui/$(id -u)/${LAUNCHD_LABEL}"
+    info " Start  : launchctl bootstrap gui/$(id -u) ${LAUNCHD_PLIST:-~/Library/LaunchAgents/${LAUNCHD_LABEL}.plist}"
+  elif [ "${SYSTEMD_INSTALLED}" -eq 1 ]; then
+    info " Service: systemd desertemail.service"
+    info " Stop   : sudo systemctl stop desertemail"
+    info " Start  : sudo systemctl start desertemail"
+  else
+    info " Stop   : kill the desertemail process (or Ctrl-C if foreground)"
+  fi
   info ""
   info "If PATH was updated, open a new shell or:"
   info "  export PATH=\"${BIN_DIR}:\$PATH\""
@@ -659,8 +987,6 @@ print_summary() {
   else
     info "DNS (when going public): MX + A/AAAA + SPF TXT for your domain."
   fi
-  info ""
-  info "Admin password is stored in ${CONFIG_PATH} (not shown here)."
   info "========================================"
 }
 
@@ -669,13 +995,25 @@ print_summary() {
 # ---------------------------------------------------------------------------
 
 main() {
-  info "DesertEmail installer"
+  print_logo
   info "Target: ${TARGET}"
 
+  step "1" "Download"
   install_binary
   ensure_path
+
+  step "2" "Configure"
   configure
-  install_systemd
+
+  # systemd is Linux-only optional; launchd is handled in autostart on macOS
+  if ! is_darwin; then
+    install_systemd
+  fi
+
+  step "3" "Start"
+  maybe_autostart
+
+  step "4" "Done"
   print_summary
 }
 

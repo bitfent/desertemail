@@ -16,7 +16,7 @@ Easiest — one command, a prebuilt static binary, no toolchain or compile:
 curl -fsSL https://desertemail.org/install-linux-x86_64.sh | sh
 ```
 
-Pick your platform at **[desertemail.org](https://desertemail.org)** — Linux (x86_64 / ARM64 / ARMv7 / ARMv6 Pi Zero), macOS (Intel & Apple Silicon), Windows (PowerShell), Android (Termux), or build-from-source. The installer downloads the matching binary, verifies its SHA-256, and runs a short config wizard. Prefer to build it yourself? See [Quick Start](#quick-start-raspberry-pi--any-linux).
+Pick your platform at **[desertemail.org](https://desertemail.org)** — Linux (x86_64 / ARM64 / ARMv7 / ARMv6 Pi Zero), macOS (Intel & Apple Silicon), Windows (PowerShell), Android (Termux), or build-from-source. The installer downloads the matching binary, verifies its SHA-256, applies recommended settings by default (or an advanced wizard), and can start the server and open webmail. Prefer to build it yourself? See [Quick Start](#quick-start-raspberry-pi--any-linux).
 
 **Installer vs doctor:** the installer (or a manual `config.toml`) sets up the **software**. `desertemail doctor` verifies the **environment** — DNS, ports, rDNS, TLS, and config sanity — so mail actually delivers. Run doctor after DNS setup and before you announce the address.
 
