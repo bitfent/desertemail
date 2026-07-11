@@ -398,6 +398,38 @@ pub fn fuzz_parse_http(data: &[u8]) {
     let _ = mime_boundary(&s);
 }
 
+/// Fuzz-visible MIME message walker entry: full message bytes (headers +
+/// body). Exercises the multipart walker, transfer decoding, HTML stripping
+/// and attachment extraction.
+pub fn fuzz_parse_mime(data: &[u8]) {
+    let parsed = parse_mime_message(data);
+    let _ = parsed.text.len();
+    let _ = parsed.attachments.len();
+}
+
+/// Fuzz-visible multipart/form-data parser entry. First line of `data` is
+/// used as the boundary, the rest as the request body.
+pub fn fuzz_multipart_form(data: &[u8]) {
+    let split = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
+    let boundary = String::from_utf8_lossy(&data[..split]).into_owned();
+    let body = data.get(split + 1..).unwrap_or(&[]).to_vec();
+    let mut headers = HashMap::new();
+    headers.insert(
+        "content-type".to_string(),
+        format!("multipart/form-data; boundary={}", boundary),
+    );
+    let req = Request {
+        method: "POST".into(),
+        path: "/send".into(),
+        query: HashMap::new(),
+        headers,
+        body,
+    };
+    let (fields, files) = parse_multipart_form(&req);
+    let _ = fields.len();
+    let _ = files.len();
+}
+
 fn parse_request(reader: &mut impl BufRead) -> io::Result<Option<Request>> {
     let first = match util::read_line(reader)? {
         Some(l) => l,
@@ -411,7 +443,11 @@ fn parse_request(reader: &mut impl BufRead) -> io::Result<Option<Request>> {
     let target = parts.next().unwrap_or("/").to_string();
     let (path, query) = split_path_query(&target);
 
+    // Cap header count: unbounded header lines would let a client grow the
+    // map (and consume parse time) indefinitely.
+    const MAX_HEADER_LINES: usize = 200;
     let mut headers = HashMap::new();
+    let mut header_lines = 0usize;
     loop {
         let line = match util::read_line(reader)? {
             Some(l) => l,
@@ -419,6 +455,13 @@ fn parse_request(reader: &mut impl BufRead) -> io::Result<Option<Request>> {
         };
         if line.is_empty() {
             break;
+        }
+        header_lines += 1;
+        if header_lines > MAX_HEADER_LINES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "too many request headers",
+            ));
         }
         if let Some(colon) = line.find(':') {
             let key = line.get(..colon).unwrap_or("").trim().to_lowercase();
@@ -3953,6 +3996,15 @@ pub struct ParsedMime {
     pub attachments: Vec<MimeAttachment>,
 }
 
+/// Maximum multipart nesting depth. A hostile message can nest multiparts
+/// arbitrarily deep; since release builds use `panic = "abort"`, an unbounded
+/// recursive walk that overflows the stack would take down the whole server.
+/// Beyond this depth we stop recursing and treat the part as opaque.
+const MAX_MIME_DEPTH: usize = 16;
+/// Maximum number of parts processed within a single multipart body. Guards
+/// against a body split into a pathological number of tiny parts.
+const MAX_MIME_PARTS: usize = 1000;
+
 /// Walk MIME tree: prefer text/plain, fall back to stripped HTML; list attachments;
 /// decode base64 / quoted-printable transfer encodings.
 pub fn parse_mime_message(raw: &[u8]) -> ParsedMime {
@@ -3967,14 +4019,19 @@ pub fn parse_mime_message(raw: &[u8]) -> ParsedMime {
         .get("content-transfer-encoding")
         .map(|s| s.as_str())
         .unwrap_or("");
-    walk_mime_part(ct, te, body)
+    walk_mime_part(ct, te, body, 0)
 }
 
-fn walk_mime_part(content_type: &str, transfer_enc: &str, body: &[u8]) -> ParsedMime {
+fn walk_mime_part(content_type: &str, transfer_enc: &str, body: &[u8], depth: usize) -> ParsedMime {
     let ct_lower = content_type.to_lowercase();
-    if ct_lower.contains("multipart/") {
+    if ct_lower.contains("multipart/") && depth < MAX_MIME_DEPTH {
         if let Some(boundary) = mime_boundary(content_type) {
-            return walk_multipart(body, &boundary, ct_lower.contains("multipart/alternative"));
+            return walk_multipart(
+                body,
+                &boundary,
+                ct_lower.contains("multipart/alternative"),
+                depth,
+            );
         }
     }
     let decoded = decode_transfer(body, transfer_enc);
@@ -4011,7 +4068,7 @@ fn walk_mime_part(content_type: &str, transfer_enc: &str, body: &[u8]) -> Parsed
     }
 }
 
-fn walk_multipart(body: &[u8], boundary: &str, _is_alt: bool) -> ParsedMime {
+fn walk_multipart(body: &[u8], boundary: &str, _is_alt: bool, depth: usize) -> ParsedMime {
     let delim = format!("--{}", boundary);
     let text = String::from_utf8_lossy(body);
     let mut parts = text.split(&delim);
@@ -4020,7 +4077,12 @@ fn walk_multipart(body: &[u8], boundary: &str, _is_alt: bool) -> ParsedMime {
     let mut html: Option<String> = None;
     let mut attachments = Vec::new();
     let mut nested = Vec::new();
+    let mut seen = 0usize;
     for part in parts {
+        seen += 1;
+        if seen > MAX_MIME_PARTS {
+            break;
+        }
         let part = part.trim_start_matches("\r\n").trim_start_matches('\n');
         if part.starts_with("--") || part.trim().is_empty() {
             break;
@@ -4041,9 +4103,11 @@ fn walk_multipart(body: &[u8], boundary: &str, _is_alt: bool) -> ParsedMime {
             .map(|s| s.as_str())
             .unwrap_or("");
         let ct_lower = ct.to_lowercase();
-        // Nested multipart
-        if ct_lower.contains("multipart/") {
-            let sub = walk_mime_part(ct, te, pbody_str.as_bytes());
+        // Nested multipart — bounded by MAX_MIME_DEPTH. Past the limit the part
+        // is left to fall through and be handled as an opaque (attachment) body
+        // rather than recursed into.
+        if ct_lower.contains("multipart/") && depth + 1 < MAX_MIME_DEPTH {
+            let sub = walk_mime_part(ct, te, pbody_str.as_bytes(), depth + 1);
             nested.push(sub);
             continue;
         }
@@ -5997,5 +6061,42 @@ Content-Type: text/html; charset=utf-8\r\n\
         assert_eq!(qp, b"Hello World!");
         let b64 = decode_transfer(b"SGVsbG8=", "base64");
         assert_eq!(b64, b"Hello");
+    }
+
+    #[test]
+    fn mime_deeply_nested_multipart_does_not_recurse_unbounded() {
+        // Build a message nested far deeper than MAX_MIME_DEPTH. With
+        // panic=abort in release, unbounded recursion here would abort the
+        // whole server; the walker must return without overflowing the stack.
+        let depth = MAX_MIME_DEPTH + 200;
+        let mut msg = String::from("From: a@b\r\nSubject: nested\r\n");
+        for i in 0..depth {
+            msg.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"B{}\"\r\n\r\n--B{}\r\n",
+                i, i
+            ));
+        }
+        msg.push_str("Content-Type: text/plain\r\n\r\ndeep body\r\n");
+        for i in (0..depth).rev() {
+            msg.push_str(&format!("\r\n--B{}--\r\n", i));
+        }
+        // Must complete (no stack overflow / abort) and not panic.
+        let parsed = parse_mime_message(msg.as_bytes());
+        let _ = parsed.text;
+    }
+
+    #[test]
+    fn mime_multipart_part_count_is_capped() {
+        // A body split into far more parts than MAX_MIME_PARTS must terminate
+        // and not accumulate unbounded work.
+        let mut msg = String::from(
+            "From: a@b\r\nSubject: many\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n",
+        );
+        for _ in 0..(MAX_MIME_PARTS + 500) {
+            msg.push_str("--B\r\nContent-Type: text/plain\r\n\r\nx\r\n");
+        }
+        msg.push_str("--B--\r\n");
+        let parsed = parse_mime_message(msg.as_bytes());
+        let _ = parsed.text;
     }
 }

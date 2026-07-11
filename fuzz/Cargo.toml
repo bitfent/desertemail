@@ -58,3 +58,31 @@ path = "fuzz_targets/auth_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mime_walk"
+path = "fuzz_targets/mime_walk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multipart_form"
+path = "fuzz_targets/multipart_form.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tar_parse"
+path = "fuzz_targets/tar_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "invites_json"
+path = "fuzz_targets/invites_json.rs"
+test = false
+doc = false
+bench = false

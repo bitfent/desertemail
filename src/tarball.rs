@@ -424,6 +424,13 @@ pub fn extract_backup(
         if rel.is_empty() || rel == "/" {
             continue;
         }
+        // Path-traversal guard: never extract an entry whose path is absolute or
+        // contains a `..` component. `--restore` reads attacker-controllable tar
+        // files, and Path::join does not normalize `..`, so an entry like
+        // `data/../../etc/x` would otherwise escape the destination.
+        if !is_safe_relative(rel) {
+            return Err(format!("unsafe path in archive: {}", rel));
+        }
         if ent.is_dir {
             // Dirs created as needed for files.
             continue;
@@ -455,6 +462,35 @@ pub fn extract_backup(
 pub struct ExtractSummary {
     pub files: usize,
     pub bytes: u64,
+}
+
+/// Fuzz-visible tar reader entry: parse arbitrary bytes as an archive and
+/// run every entry path through the traversal check. Never touches the fs.
+pub fn fuzz_parse_tar(data: &[u8]) {
+    if let Ok(entries) = parse_tar(data) {
+        for e in &entries {
+            let p = e.path.trim_start_matches("./");
+            let rel = p.strip_prefix("desertemail-backup/").unwrap_or(p);
+            let _ = is_safe_relative(rel);
+        }
+    }
+}
+
+/// True when `rel` is safe to join onto a destination directory: not absolute
+/// (no leading `/`, no Windows drive/backslash) and containing no `..` or `.`
+/// path components.
+pub fn is_safe_relative(rel: &str) -> bool {
+    if rel.starts_with('/') || rel.starts_with('\\') {
+        return false;
+    }
+    if rel.contains('\\') {
+        return false;
+    }
+    // Windows drive prefix like "C:".
+    if rel.len() >= 2 && rel.as_bytes()[1] == b':' {
+        return false;
+    }
+    rel.split('/').all(|c| c != ".." && c != ".")
 }
 
 fn cstr_field(bytes: &[u8]) -> String {
@@ -577,5 +613,77 @@ mod tests {
         assert!(!parsed.iter().any(|e| e.path.contains("/tmp/")));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn safe_relative_rejects_traversal() {
+        assert!(is_safe_relative("data/user/new/msg"));
+        assert!(is_safe_relative("config.toml"));
+        assert!(!is_safe_relative("/etc/passwd"));
+        assert!(!is_safe_relative("data/../../etc/passwd"));
+        assert!(!is_safe_relative(".."));
+        assert!(!is_safe_relative("data/./x"));
+        assert!(!is_safe_relative("C:evil"));
+        assert!(!is_safe_relative("data\\..\\evil"));
+    }
+
+    /// Hand-craft a tar whose entry path escapes via `..` and assert
+    /// extract_backup refuses it instead of writing outside the destination.
+    #[test]
+    fn extract_rejects_path_traversal_entry() {
+        let mut tar = Vec::new();
+        let payload = b"owned";
+        write_header(
+            &mut tar,
+            "desertemail-backup/data/../../../danger.txt",
+            payload.len() as u64,
+            b'0',
+            0o644,
+        )
+        .unwrap();
+        tar.extend_from_slice(payload);
+        let pad = (BLOCK - (payload.len() % BLOCK)) % BLOCK;
+        tar.extend(std::iter::repeat(0u8).take(pad));
+        tar.extend(std::iter::repeat(0u8).take(BLOCK * 2));
+
+        let base = std::env::temp_dir().join(format!(
+            "desertemail-tar-trav-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("dest/data")).unwrap();
+
+        let res = extract_backup(
+            &tar,
+            &base.join("dest/config.toml"),
+            &base.join("dest/extras"),
+            &base.join("dest/data"),
+        );
+        assert!(res.is_err(), "traversal entry must be rejected");
+        assert!(
+            !base.join("danger.txt").exists(),
+            "file must not escape destination"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parse_rejects_truncated_and_bad_checksum() {
+        // Truncated: header claims more data than present.
+        let mut tar = Vec::new();
+        write_header(&mut tar, "file.bin", 5000, b'0', 0o644).unwrap();
+        tar.extend(std::iter::repeat(0u8).take(BLOCK)); // only 512 of 5000 bytes
+        assert!(parse_tar(&tar).is_err());
+
+        // Corrupted checksum.
+        let mut tar2 = Vec::new();
+        write_header(&mut tar2, "ok.txt", 0, b'0', 0o644).unwrap();
+        tar2[148] = b'7'; // clobber checksum field
+        tar2.extend(std::iter::repeat(0u8).take(BLOCK * 2));
+        assert!(parse_tar(&tar2).is_err());
     }
 }

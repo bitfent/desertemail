@@ -86,15 +86,50 @@ pub fn fill_random(buf: &mut [u8]) {
     }
 }
 
+/// Hard cap on a single protocol line. Without it, a client sending an
+/// endless byte stream with no `\n` makes `read_line` buffer unboundedly —
+/// trivial memory exhaustion against SMTP/IMAP/HTTP. 1 MiB is far beyond any
+/// legitimate command, request line, or header.
+pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+
 /// Read one CRLF/LF-terminated line from a persistent buffered reader.
 /// Callers must keep ONE BufReader per connection: constructing a fresh
 /// BufReader per line would discard whatever the previous one buffered.
+/// Lines longer than MAX_LINE_BYTES yield an InvalidData error (the caller
+/// drops the connection).
 pub fn read_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
-    let mut line = String::new();
-    let n = reader.read_line(&mut line)?;
-    if n == 0 {
-        return Ok(None);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            break; // EOF terminates a final unterminated line
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(pos) => {
+                if buf.len() + pos + 1 > MAX_LINE_BYTES {
+                    reader.consume(pos + 1);
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
+                }
+                buf.extend_from_slice(&available[..=pos]);
+                reader.consume(pos + 1);
+                break;
+            }
+            None => {
+                let n = available.len();
+                if buf.len() + n > MAX_LINE_BYTES {
+                    reader.consume(n);
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
+                }
+                buf.extend_from_slice(available);
+                reader.consume(n);
+            }
+        }
     }
+    let mut line = String::from_utf8(buf)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"))?;
     if line.ends_with("\r\n") {
         line.truncate(line.len() - 2);
     } else if line.ends_with('\n') {
@@ -337,3 +372,38 @@ pub use log;
 pub use log_error;
 pub use log_event;
 pub use log_warn;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::BufReader;
+
+    #[test]
+    fn read_line_basic_crlf_lf_eof() {
+        let mut r = BufReader::new(&b"hello\r\nworld\nlast"[..]);
+        assert_eq!(read_line(&mut r).unwrap().as_deref(), Some("hello"));
+        assert_eq!(read_line(&mut r).unwrap().as_deref(), Some("world"));
+        assert_eq!(read_line(&mut r).unwrap().as_deref(), Some("last"));
+        assert_eq!(read_line(&mut r).unwrap(), None);
+    }
+
+    #[test]
+    fn read_line_rejects_oversized_line() {
+        // A newline-free stream longer than MAX_LINE_BYTES must error instead
+        // of buffering forever.
+        let big = vec![b'a'; MAX_LINE_BYTES + 10];
+        let mut r = BufReader::new(&big[..]);
+        let err = read_line(&mut r).expect_err("oversized line must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_line_accepts_line_just_under_cap() {
+        let mut data = vec![b'a'; 1000];
+        data.push(b'\n');
+        data.extend_from_slice(b"next\n");
+        let mut r = BufReader::new(&data[..]);
+        assert_eq!(read_line(&mut r).unwrap().map(|l| l.len()), Some(1000));
+        assert_eq!(read_line(&mut r).unwrap().as_deref(), Some("next"));
+    }
+}

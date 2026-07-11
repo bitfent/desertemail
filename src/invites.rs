@@ -334,6 +334,12 @@ fn serialize_invites_json(invites: &[Invite]) -> String {
     out
 }
 
+/// Fuzz-visible invites store parser entry.
+pub fn fuzz_parse_invites(data: &[u8]) {
+    let s = String::from_utf8_lossy(data);
+    let _ = parse_invites_json(&s);
+}
+
 fn parse_invites_json(content: &str) -> Result<Vec<Invite>, String> {
     let content = content.trim();
     if content.is_empty() || content == "[]" {
