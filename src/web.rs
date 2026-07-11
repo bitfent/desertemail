@@ -15,6 +15,7 @@ use crate::acme;
 use crate::auth;
 use crate::config::Config;
 use crate::crypto;
+use crate::invites;
 use crate::limits;
 use crate::metrics;
 use crate::queue;
@@ -813,6 +814,8 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/login") => page_login(None, 200),
         ("POST", "/login") => handle_login(cfg, req, secure, peer_ip),
+        ("GET", "/invite") => page_invite(cfg, req, None, 200),
+        ("POST", "/invite") => handle_invite_redeem(cfg, req, secure, peer_ip),
         ("GET", "/logout") => {
             clear_session(token.as_deref());
             Response::redirect("/login").with_cookie(&clear_session_cookie(secure))
@@ -841,11 +844,16 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
                 ("POST", "/dns/check") => handle_dns_check(cfg, &user, req, peer_ip),
                 ("POST", "/dns/dkim/generate") => handle_dns_dkim_generate(cfg, &user, req),
                 ("POST", "/dns/settings") => handle_dns_settings(cfg, &user, req),
-                ("GET", "/admin") => page_admin(cfg, &user, None),
+                ("GET", "/admin") => page_admin(cfg, &user, None, None),
                 ("POST", "/admin") => handle_admin_post(cfg, &user, req),
                 ("POST", "/admin/user/add") => handle_admin_user_add(cfg, &user, req),
                 ("POST", "/admin/user/remove") => handle_admin_user_remove(cfg, &user, req),
                 ("POST", "/admin/user/quota") => handle_admin_user_quota(cfg, &user, req),
+                ("POST", "/admin/invite") => handle_admin_invite(cfg, &user, req, secure),
+                ("POST", "/admin/invite/revoke") => handle_admin_invite_revoke(cfg, &user, req),
+                ("POST", "/admin/invite/regenerate") => {
+                    handle_admin_invite_regenerate(cfg, &user, req, secure)
+                }
                 ("POST", "/admin/queue/delete") => handle_queue_delete(cfg, &user, req),
                 _ => Response::html(
                     404,
@@ -4091,7 +4099,14 @@ fn is_admin(cfg: &Config, user: &str) -> bool {
     }
 }
 
-fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
+/// `flash` is plain text (escaped). `extra_html` is trusted server-built HTML
+/// (e.g. invite link with copy button) rendered after the flash.
+fn page_admin(
+    cfg: &Config,
+    user: &str,
+    flash: Option<&str>,
+    extra_html: Option<&str>,
+) -> Response {
     if !is_admin(cfg, user) {
         let body = if cfg
             .admin_user_name()
@@ -4117,8 +4132,9 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
         );
     }
 
-    let domains: String = cfg
-        .domains_list()
+    let domain_list = cfg.domains_list();
+    let primary = cfg.primary_domain();
+    let domains: String = domain_list
         .iter()
         .map(|d| format!("<li>{}</li>", esc(d)))
         .collect();
@@ -4137,6 +4153,36 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
     }
     if users_html.is_empty() {
         users_html.push_str("<li><em>(none configured)</em></li>");
+    }
+
+    let pending = invites::list_pending(&cfg.data_dir).unwrap_or_default();
+    let mut invite_rows = String::new();
+    if pending.is_empty() {
+        invite_rows.push_str(
+            "<tr class=\"empty\"><td colspan=\"4\">No pending invites</td></tr>",
+        );
+    } else {
+        for inv in &pending {
+            invite_rows.push_str(&format!(
+                "<tr>\
+                 <td data-label=\"Address\">{}</td>\
+                 <td data-label=\"Created\">{}</td>\
+                 <td data-label=\"Expires\">{}</td>\
+                 <td>\
+                 <form method=\"post\" action=\"/admin/invite/regenerate\" style=\"display:inline\">\
+                 <input type=\"hidden\" name=\"token_hash\" value=\"{}\">\
+                 <button type=\"submit\" class=\"btn-secondary\">Resend / regenerate</button></form> \
+                 <form method=\"post\" action=\"/admin/invite/revoke\" style=\"display:inline\">\
+                 <input type=\"hidden\" name=\"token_hash\" value=\"{}\">\
+                 <button type=\"submit\">Revoke</button></form>\
+                 </td></tr>",
+                esc(&inv.email),
+                esc(&fmt_unix_date(inv.created_at)),
+                esc(&fmt_unix_date(inv.expires_at)),
+                esc(&inv.token_hash),
+                esc(&inv.token_hash)
+            ));
+        }
     }
 
     let queue_rows = match queue::list_queue(&cfg.data_dir) {
@@ -4182,9 +4228,10 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
             }
         })
         .unwrap_or_default();
+    let extra = extra_html.unwrap_or("");
 
     let body = format!(
-        "<h1>Admin</h1>{}\
+        "<h1>Admin</h1>{}{}\
          <div class=\"pix-panel\"><h2>Domains</h2><ul>{}</ul>\
          <p class=\"muted\"><a href=\"/dns\">DNS setup &amp; checks →</a></p></div>\
          <div class=\"pix-panel\"><h2>Users</h2><ul>{}</ul>\
@@ -4193,6 +4240,22 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
          <label>Email / username</label><input type=\"text\" name=\"email\" required>\
          <label>Password</label><input type=\"password\" name=\"password\" required>\
          <p><button type=\"submit\">Add user</button></p></form>\
+         <h3>Invite user</h3>\
+         <p class=\"muted\">Create an account without choosing their password. They open a \
+         one-time link and set it themselves. Optional: email the link to an address they \
+         already read — <strong>not</strong> their new mailbox (they cannot log in yet).</p>\
+         <form method=\"post\" action=\"/admin/invite\">\
+         <label>Address</label>\
+         <input type=\"text\" name=\"email\" required placeholder=\"user@{}\" autocomplete=\"off\">\
+         <p class=\"muted\">Must be <code>user@</code> one of your configured domains \
+         (primary: <code>{}</code>).</p>\
+         <label>Send invite to (external email, optional)</label>\
+         <input type=\"email\" name=\"send_to\" placeholder=\"them@gmail.com\" autocomplete=\"off\">\
+         <p><button type=\"submit\">Create invite</button></p></form>\
+         <h3>Pending invites</h3>\
+         <div class=\"table-scroll\">\
+         <table class=\"queue-list\"><thead><tr><th>Address</th><th>Created</th>\
+         <th>Expires</th><th></th></tr></thead><tbody>{}</tbody></table></div>\
          <h3>Set quota (MiB)</h3>\
          <form method=\"post\" action=\"/admin/user/quota\">\
          <label>Username</label><input type=\"text\" name=\"email\" required>\
@@ -4204,8 +4267,31 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
          <table class=\"queue-list\"><thead><tr><th>ID</th><th>Sender</th><th>Recipients</th>\
          <th>Retries</th><th>Next attempt</th><th></th></tr></thead>\
          <tbody>{}</tbody></table></div></div>\
-         <p class=\"admin-ops\">Ops: <code>/healthz</code> · <code>/metrics</code></p>",
-        flash_html, domains, users_html, queue_rows
+         <p class=\"admin-ops\">Ops: <code>/healthz</code> · <code>/metrics</code></p>\
+         <script>(function(){{\
+         document.querySelectorAll('button.copy-btn').forEach(function(b){{\
+           b.addEventListener('click',function(){{\
+             var t=b.getAttribute('data-copy')||'';\
+             if(navigator.clipboard&&navigator.clipboard.writeText){{\
+               navigator.clipboard.writeText(t).then(function(){{b.textContent='Copied';\
+               setTimeout(function(){{b.textContent='Copy'}},1200)}});\
+             }} else {{\
+               var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);\
+               a.select();try{{document.execCommand('copy');b.textContent='Copied'}}catch(e){{}}\
+               document.body.removeChild(a);\
+               setTimeout(function(){{b.textContent='Copy'}},1200);\
+             }}\
+           }});\
+         }});\
+         }})();</script>",
+        flash_html,
+        extra,
+        domains,
+        users_html,
+        esc(&primary),
+        esc(&primary),
+        invite_rows,
+        queue_rows
     );
     Response::html(
         200,
@@ -4221,8 +4307,91 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
     )
 }
 
+fn fmt_unix_date(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let (y, m, d) = util::civil_from_days(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Base URL for invite links: `public_host` when set, else request Host.
+fn invite_url_base(cfg: &Config, req: &Request, secure: bool) -> String {
+    let ph = cfg.public_host_name();
+    if !ph.is_empty() {
+        let host = ph.trim().trim_end_matches('.');
+        if host.starts_with("http://") || host.starts_with("https://") {
+            return host.trim_end_matches('/').to_string();
+        }
+        let scheme = if secure || !cfg.web_tls_listen.is_empty() {
+            "https"
+        } else {
+            "http"
+        };
+        let port = web_listen_port(cfg, secure);
+        if !host.contains(':') {
+            if let Some(p) = port {
+                if (scheme == "https" && p != 443) || (scheme == "http" && p != 80) {
+                    return format!("{}://{}:{}", scheme, host, p);
+                }
+            }
+        }
+        return format!("{}://{}", scheme, host);
+    }
+    let host = req
+        .headers
+        .get("host")
+        .map(|s| s.as_str())
+        .filter(|h| !h.is_empty())
+        .unwrap_or("127.0.0.1:8080");
+    let scheme = if secure { "https" } else { "http" };
+    format!("{}://{}", scheme, host)
+}
+
+fn web_listen_port(cfg: &Config, secure: bool) -> Option<u16> {
+    let listen = if secure && !cfg.web_tls_listen.is_empty() {
+        cfg.web_tls_listen.as_str()
+    } else if !cfg.web_listen.is_empty() {
+        cfg.web_listen.as_str()
+    } else if !cfg.web_tls_listen.is_empty() {
+        cfg.web_tls_listen.as_str()
+    } else {
+        return None;
+    };
+    listen.rsplit(':').next().and_then(|p| p.parse().ok())
+}
+
+fn build_invite_url(cfg: &Config, req: &Request, secure: bool, token: &str) -> String {
+    format!(
+        "{}/invite?token={}",
+        invite_url_base(cfg, req, secure),
+        token
+    )
+}
+
+fn invite_link_flash_html(url: &str, note: &str) -> String {
+    format!(
+        "<div class=\"pix-panel\" style=\"margin-bottom:1rem\">\
+         <p class=\"ok\">{}</p>\
+         <p>Invite link (copy now — it cannot be shown again from the table):</p>\
+         <p><code style=\"word-break:break-all;user-select:all\">{}</code> \
+         <button type=\"button\" class=\"copy-btn\" data-copy=\"{}\">Copy</button></p>\
+         </div>",
+        esc(note),
+        esc(url),
+        esc(url)
+    )
+}
+
+fn user_already_exists(cfg: &Config, email: &str) -> bool {
+    let email_l = email.to_lowercase();
+    let (local, _) = util::parse_email_addr(&email_l);
+    cfg.user_names().iter().any(|n| {
+        let n = n.to_lowercase();
+        n == email_l || n == local
+    })
+}
+
 fn handle_admin_post(cfg: &Config, user: &str, _req: &Request) -> Response {
-    page_admin(cfg, user, None)
+    page_admin(cfg, user, None, None)
 }
 
 fn config_path_for_edit(cfg: &Config) -> Result<&std::path::Path, String> {
@@ -4243,16 +4412,16 @@ where
 
 fn handle_admin_user_add(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
-        return page_admin(cfg, user, Some("error: access denied"));
+        return page_admin(cfg, user, Some("error: access denied"), None);
     }
     if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"));
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
     }
     let form = form_body(req);
     let email = form.get("email").map(|s| s.trim()).unwrap_or("");
     let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
     if email.is_empty() || password.is_empty() {
-        return page_admin(cfg, user, Some("error: email and password required"));
+        return page_admin(cfg, user, Some("error: email and password required"), None);
     }
     let email_owned = email.to_string();
     let password_owned = password.to_string();
@@ -4261,25 +4430,26 @@ fn handle_admin_user_add(cfg: &Config, user: &str, req: &Request) -> Response {
             cfg,
             user,
             Some(&format!("User {} added (live; no restart needed).", email_owned)),
+            None,
         ),
-        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e))),
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
     }
 }
 
 fn handle_admin_user_remove(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
-        return page_admin(cfg, user, Some("error: access denied"));
+        return page_admin(cfg, user, Some("error: access denied"), None);
     }
     if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"));
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
     }
     let form = form_body(req);
     let email = form.get("email").map(|s| s.trim()).unwrap_or("");
     if email.is_empty() {
-        return page_admin(cfg, user, Some("error: email required"));
+        return page_admin(cfg, user, Some("error: email required"), None);
     }
     if email.eq_ignore_ascii_case(user) {
-        return page_admin(cfg, user, Some("error: cannot remove the logged-in admin"));
+        return page_admin(cfg, user, Some("error: cannot remove the logged-in admin"), None);
     }
     let email_owned = email.to_string();
     match persist_and_reload(cfg, |c| useredit::remove_user(c, &email_owned)) {
@@ -4287,23 +4457,24 @@ fn handle_admin_user_remove(cfg: &Config, user: &str, req: &Request) -> Response
             cfg,
             user,
             Some(&format!("User {} removed.", email_owned)),
+            None,
         ),
-        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e))),
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
     }
 }
 
 fn handle_admin_user_quota(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
-        return page_admin(cfg, user, Some("error: access denied"));
+        return page_admin(cfg, user, Some("error: access denied"), None);
     }
     if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"));
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
     }
     let form = form_body(req);
     let email = form.get("email").map(|s| s.trim()).unwrap_or("");
     let mb_s = form.get("quota_mb").map(|s| s.trim()).unwrap_or("0");
     if email.is_empty() {
-        return page_admin(cfg, user, Some("error: email required"));
+        return page_admin(cfg, user, Some("error: email required"), None);
     }
     let mb: u64 = mb_s.parse().unwrap_or(0);
     let email_owned = email.to_string();
@@ -4314,25 +4485,349 @@ fn handle_admin_user_quota(cfg: &Config, user: &str, req: &Request) -> Response 
                 cfg,
                 user,
                 Some(&format!("Quota for {} set to {} MiB.", email_owned, mb)),
+                None,
             )
         }
-        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e))),
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
     }
 }
 
 fn handle_queue_delete(cfg: &Config, user: &str, req: &Request) -> Response {
     if !is_admin(cfg, user) {
-        return page_admin(cfg, user, None);
+        return page_admin(cfg, user, None, None);
     }
     if !same_origin_ok(req) {
-        return page_admin(cfg, user, Some("error: cross-origin request blocked"));
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
     }
     let form = form_body(req);
     let id = form.get("id").map(|s| s.as_str()).unwrap_or("");
     match queue::delete_queued(&cfg.data_dir, id) {
-        Ok(true) => page_admin(cfg, user, Some("Queue entry deleted.")),
-        Ok(false) => page_admin(cfg, user, Some("Queue entry not found.")),
-        Err(e) => page_admin(cfg, user, Some(&format!("Delete failed: {}", e))),
+        Ok(true) => page_admin(cfg, user, Some("Queue entry deleted."), None),
+        Ok(false) => page_admin(cfg, user, Some("Queue entry not found."), None),
+        Err(e) => page_admin(cfg, user, Some(&format!("Delete failed: {}", e)), None),
+    }
+}
+
+fn handle_admin_invite(cfg: &Config, user: &str, req: &Request, secure: bool) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"), None);
+    }
+    if !same_origin_ok(req) {
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    }
+    let form = form_body(req);
+    let email_raw = form.get("email").map(|s| s.trim()).unwrap_or("");
+    let send_to = form
+        .get("send_to")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+
+    let domains = cfg.domains_list();
+    let email = match invites::validate_invite_address(email_raw, &domains) {
+        Ok(e) => e,
+        Err(e) => {
+            return page_admin(cfg, user, Some(&format!("error: {}", e)), None);
+        }
+    };
+    if user_already_exists(cfg, &email) {
+        return page_admin(
+            cfg,
+            user,
+            Some(&format!("error: user {} already exists", email)),
+            None,
+        );
+    }
+
+    let created = match invites::create(
+        &cfg.data_dir,
+        &email,
+        user,
+        invites::DEFAULT_TTL_SECS,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return page_admin(cfg, user, Some(&format!("error: {}", e)), None);
+        }
+    };
+    let url = build_invite_url(cfg, req, secure, &created.token);
+    let mut note = format!("Invite created for {}.", email);
+    if !send_to.is_empty() {
+        match send_invite_email(cfg, user, send_to, &email, &url) {
+            Ok(status) => {
+                note.push(' ');
+                note.push_str(&status);
+            }
+            Err(e) => {
+                note.push_str(&format!(
+                    " Email to {} failed ({}) — hand over the link below.",
+                    send_to, e
+                ));
+            }
+        }
+    }
+    let extra = invite_link_flash_html(&url, &note);
+    page_admin(cfg, user, None, Some(&extra))
+}
+
+fn send_invite_email(
+    cfg: &Config,
+    admin: &str,
+    to: &str,
+    invited_addr: &str,
+    link: &str,
+) -> Result<String, String> {
+    let from = user_from_addr(cfg, admin);
+    let host = {
+        let ph = cfg.public_host_name();
+        if !ph.is_empty() {
+            ph
+        } else {
+            cfg.primary_domain()
+        }
+    };
+    let subject = format!("You're invited to {}", invited_addr);
+    let body = format!(
+        "You've been invited to {} on {}.\n\n\
+         Set your password: {}\n\n\
+         This link expires in 7 days. If you did not expect this, ignore this message.\n",
+        invited_addr, host, link
+    );
+    let raw = build_rfc5322_message(
+        &from,
+        to,
+        "",
+        "",
+        &subject,
+        &body,
+        "",
+        "",
+        &[],
+        cfg,
+    );
+    deliver_like_submission(cfg, admin, &from, &[to.to_string()], &raw)?;
+    // Local vs remote status for flash.
+    if cfg.resolve_mailbox(to).is_some() {
+        Ok(format!("Invite email delivered locally to {}.", to))
+    } else {
+        Ok(format!("Invite email queued for {}.", to))
+    }
+}
+
+fn handle_admin_invite_revoke(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"), None);
+    }
+    if !same_origin_ok(req) {
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    }
+    let form = form_body(req);
+    let token_hash = form.get("token_hash").map(|s| s.as_str()).unwrap_or("");
+    match invites::revoke_by_hash(&cfg.data_dir, token_hash) {
+        Ok(true) => page_admin(cfg, user, Some("Invite revoked."), None),
+        Ok(false) => page_admin(cfg, user, Some("error: invite not found"), None),
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
+    }
+}
+
+fn handle_admin_invite_regenerate(
+    cfg: &Config,
+    user: &str,
+    req: &Request,
+    secure: bool,
+) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"), None);
+    }
+    if !same_origin_ok(req) {
+        return page_admin(cfg, user, Some("error: cross-origin request blocked"), None);
+    }
+    let form = form_body(req);
+    let token_hash = form.get("token_hash").map(|s| s.as_str()).unwrap_or("");
+    match invites::regenerate(&cfg.data_dir, token_hash) {
+        Ok(Some(created)) => {
+            let url = build_invite_url(cfg, req, secure, &created.token);
+            let note = format!(
+                "New invite link for {} (previous link is invalid).",
+                created.invite.email
+            );
+            let extra = invite_link_flash_html(&url, &note);
+            page_admin(cfg, user, None, Some(&extra))
+        }
+        Ok(None) => page_admin(cfg, user, Some("error: invite not found"), None),
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Invite redemption (public)
+// ---------------------------------------------------------------------------
+
+fn page_invite_invalid() -> Response {
+    page_invite_notice(
+        "Invite unavailable",
+        "This invite link is invalid or has expired — ask your admin for a new one.",
+        404,
+        "Not Found",
+    )
+}
+
+fn page_invite_notice(title: &str, message: &str, status: u16, reason: &'static str) -> Response {
+    let body = format!(
+        "<div class=\"login-wrap\"><div class=\"pix-panel login-card\" style=\"max-width:26rem\">\
+         <div class=\"login-brand\">{}<span>DESERTEMAIL</span></div>\
+         <h1>{}</h1>\
+         <p>{}</p>\
+         <p class=\"muted\" style=\"text-align:center\"><a href=\"/login\">Back to login</a></p>\
+         </div></div>",
+        CACTUS_SVG,
+        esc(title),
+        esc(message)
+    );
+    Response::html(status, reason, page_shell("Invite", "", &body))
+}
+
+fn page_invite(cfg: &Config, req: &Request, error: Option<&str>, status: u16) -> Response {
+    let token = req
+        .query
+        .get("token")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    // POST re-renders with token from form; GET from query.
+    let token = if token.is_empty() {
+        form_body(req)
+            .get("token")
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default()
+    } else {
+        token.to_string()
+    };
+    if token.is_empty() {
+        return page_invite_invalid();
+    }
+    let inv = match invites::lookup(&cfg.data_dir, &token) {
+        Ok(Some(i)) => i,
+        Ok(None) | Err(_) => return page_invite_invalid(),
+    };
+    let err = error
+        .map(|e| format!("<p class=\"err\">{}</p>", esc(e)))
+        .unwrap_or_default();
+    let reason = if status == 429 {
+        "Too Many Requests"
+    } else {
+        "OK"
+    };
+    let body = format!(
+        "<div class=\"login-wrap\"><div class=\"pix-panel login-card\" style=\"max-width:26rem\">\
+         <div class=\"login-brand\">{}<span>DESERTEMAIL</span></div>\
+         <h1>You've been invited</h1>\
+         <p class=\"muted\" style=\"text-align:center;margin-top:-.35rem\">\
+         Create your password for <strong>{}</strong></p>\
+         {}\
+         <form method=\"post\" action=\"/invite\" autocomplete=\"on\">\
+         <input type=\"hidden\" name=\"token\" value=\"{}\">\
+         <label>Password <span class=\"muted\">(at least 8 characters)</span></label>\
+         <input type=\"password\" name=\"password\" id=\"invite-pass\" required minlength=\"8\" autocomplete=\"new-password\">\
+         <label>Confirm password</label>\
+         <input type=\"password\" name=\"password2\" id=\"invite-pass2\" required minlength=\"8\" autocomplete=\"new-password\">\
+         <p class=\"muted\" style=\"margin:.35rem 0 0\">\
+         <label style=\"display:inline;font-weight:500;text-transform:none;letter-spacing:0\">\
+         <input type=\"checkbox\" id=\"invite-show\" style=\"width:auto;display:inline;margin-right:.35rem\" \
+         onchange=\"var p=document.getElementById('invite-pass'),q=document.getElementById('invite-pass2');\
+         var t=this.checked?'text':'password';p.type=t;q.type=t;\">Show passwords</label></p>\
+         <p><button type=\"submit\">Create account</button></p></form></div></div>",
+        CACTUS_SVG,
+        esc(&inv.email),
+        err,
+        esc(&token)
+    );
+    Response::html(status, reason, page_shell("Invite", "", &body))
+}
+
+fn handle_invite_redeem(
+    cfg: &Config,
+    req: &Request,
+    secure: bool,
+    peer_ip: &str,
+) -> Response {
+    if !ratelimit::check_allowed(peer_ip) {
+        return page_invite(cfg, req, Some("Too many attempts, try later"), 429);
+    }
+    if !same_origin_ok(req) {
+        return page_invite(cfg, req, Some("Cross-origin request blocked"), 200);
+    }
+    let form = form_body(req);
+    let token = form.get("token").map(|s| s.as_str()).unwrap_or("");
+    let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
+    let password2 = form.get("password2").map(|s| s.as_str()).unwrap_or("");
+
+    if token.is_empty() {
+        return page_invite_invalid();
+    }
+    // Validate invite first (friendly error without consuming).
+    let inv = match invites::lookup(&cfg.data_dir, token) {
+        Ok(Some(i)) => i,
+        Ok(None) | Err(_) => {
+            ratelimit::record_failure(peer_ip);
+            return page_invite_invalid();
+        }
+    };
+    if password.len() < 8 {
+        return page_invite(
+            cfg,
+            req,
+            Some("Password must be at least 8 characters"),
+            200,
+        );
+    }
+    if password != password2 {
+        return page_invite(cfg, req, Some("Passwords do not match"), 200);
+    }
+    if user_already_exists(cfg, &inv.email) {
+        // Consume invite so the token cannot be reused.
+        let _ = invites::redeem(&cfg.data_dir, token);
+        return page_invite_notice(
+            "Account exists",
+            "This account already exists — ask your admin, or try logging in.",
+            200,
+            "OK",
+        );
+    }
+
+    // Add user first, then delete invite (task order). Re-POST fails on user exists.
+    let email_owned = inv.email.clone();
+    let pass_owned = password.to_string();
+    match persist_and_reload(cfg, |c| {
+        // Refuse overwrite if someone raced us into [users].
+        if useredit::list_users(c)
+            .iter()
+            .any(|u| u.eq_ignore_ascii_case(&email_owned))
+        {
+            return Err("user already exists".into());
+        }
+        useredit::add_user(c, &email_owned, &pass_owned)
+    }) {
+        Ok(()) => {
+            let _ = invites::redeem(&cfg.data_dir, token);
+            ratelimit::record_success(peer_ip);
+            let user = email_owned.to_lowercase();
+            let session = make_session_token(&user);
+            set_session(&session, &user);
+            util::log_event!(
+                "info",
+                "invite redeemed",
+                "event" => "invite_redeem",
+                "user" => user.as_str()
+            );
+            Response::redirect("/").with_cookie(&session_cookie(&session, secure))
+        }
+        Err(e) => {
+            if e.contains("already exists") {
+                let _ = invites::redeem(&cfg.data_dir, token);
+            }
+            ratelimit::record_failure(peer_ip);
+            page_invite(cfg, req, Some(&e), 200)
+        }
     }
 }
 

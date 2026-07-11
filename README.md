@@ -249,7 +249,8 @@ desertemail --config config.toml user remove bob
 
 These rewrite only the `[users]` / `[quotas]` blocks in place (atomic temp+rename).
 The running server also reloads users/quotas live when you use the admin web UI
-(forms on `/admin` for `admin_user`).
+(forms on `/admin` for `admin_user`). Admins can also **invite** users (one-time
+`/invite` link; invitee sets their own password) without choosing a password.
 
 ### Health & metrics
 

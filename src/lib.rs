@@ -10,6 +10,7 @@ pub mod dmarc;
 pub mod dns;
 pub mod doctor;
 pub mod imap;
+pub mod invites;
 pub mod limits;
 pub mod metrics;
 pub mod passwd;

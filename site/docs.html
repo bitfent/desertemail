@@ -738,6 +738,9 @@ desertemail --config /etc/desertemail/config.toml user passwd alice
 desertemail --config /etc/desertemail/config.toml user remove bob</code></pre>
         <p>On the webmail <strong>Admin</strong> page (<code>admin_user</code> only): add user (email + password), remove user, set quota (MiB). Mutations require a session cookie and a same-origin check when <code>Origin</code>/<code>Referer</code> is present. The running process reloads the users/quotas map <strong>live</strong> (no full restart).</p>
 
+        <div class="heading-wrap"><h3 id="ops-invites">Inviting users</h3><a class="anchor" href="#ops-invites" aria-label="Link to this section">#</a></div>
+        <p>When you do not want to choose a password for someone, use <strong>Invite user</strong> on Admin. Enter <code>user@</code> one of your configured domains; the server stores a one-time token hash under <code>&lt;data_dir&gt;/invites.json</code> (7-day expiry) and shows a copyable <code>/invite?token=…</code> link once. Hand the link over any channel, or optionally email it to an <em>external</em> address they already read — not their new mailbox (they cannot log in until they set a password). They open the branded invite page, choose a password (≥8 characters), and land in their inbox. Pending invites can be regenerated (new link) or revoked; used links cannot be reused.</p>
+
         <div class="heading-wrap"><h3 id="ops-backup">Backup &amp; restore</h3><a class="anchor" href="#ops-backup" aria-label="Link to this section">#</a></div>
         <pre><code>./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail
 CONFIG=/etc/desertemail/config.toml DKIM=/etc/desertemail/dkim.pem \
