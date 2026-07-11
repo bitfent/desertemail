@@ -179,6 +179,7 @@ dnsbls = []                         # e.g. ["zen.spamhaus.org"]
 dnsbl_reject = false
 spam_score_tag = 5                  # >= tag => X-Spam-Flag: YES
 spam_score_reject = 0               # 0 = reject disabled
+spam_folder_threshold = 4           # >= this => deliver to Spam (.Junk); 0 = off
 spam_check_ptr = true
 
 # Optional: smarthost for outbound (e.g. your ISP or free relay).

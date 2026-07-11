@@ -652,6 +652,7 @@ export PATH="$HOME/.desertemail/bin:$PATH"
               <tr><td><code>dnsbl_reject</code></td><td>bool</td><td><code>false</code></td><td>When true, a DNSBL hit alone causes 550</td></tr>
               <tr><td><code>spam_score_tag</code></td><td>i32</td><td><code>5</code></td><td>Score ≥ this adds <code>X-Spam-Flag: YES</code></td></tr>
               <tr><td><code>spam_score_reject</code></td><td>i32</td><td><code>0</code></td><td>Score ≥ this → 550; <code>0</code> disables reject</td></tr>
+              <tr><td><code>spam_folder_threshold</code></td><td>i32</td><td><code>4</code></td><td>Score ≥ this delivers to Spam (<code>.Junk</code>); <code>0</code> disables</td></tr>
               <tr><td><code>spam_check_ptr</code></td><td>bool</td><td><code>true</code></td><td>Include missing/mismatched rDNS in spam score</td></tr>
               <tr><td><code>default_quota_mb</code></td><td>u64</td><td><code>0</code></td><td>Default mailbox quota in MiB; <code>0</code> = unlimited. Over-quota: SMTP <code>452 4.2.2</code>, IMAP APPEND <code>NO [OVERQUOTA]</code></td></tr>
               <tr><td><code>log_format</code></td><td>string</td><td><code>"text"</code></td><td><code>"text"</code> or <code>"json"</code> (one object per line: ts, level, msg, fields). Auth failures: <code>event=auth_fail</code></td></tr>
