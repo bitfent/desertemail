@@ -303,6 +303,12 @@ fn main() {
         acme::start_background(Arc::clone(&cfg));
     }
 
+    // Best-effort automatic router port-forwarding + public-URL discovery so
+    // the server is reachable from other machines right away (best-effort;
+    // never fatal). Skipped only when auto_port_forward=false (still records
+    // LAN URL + guidance in that case).
+    desertemail::portmap::start(Arc::clone(&cfg));
+
     util::log!("all servers running. SIGTERM/SIGINT (Ctrl-C) for graceful shutdown.");
     util::log!("Tip: use high ports + firewall port-forward, or run as root / with capabilities for 25/587/143.");
 

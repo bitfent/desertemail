@@ -14,6 +14,7 @@ pub mod invites;
 pub mod limits;
 pub mod metrics;
 pub mod passwd;
+pub mod portmap;
 pub mod queue;
 pub mod ratelimit;
 pub mod shutdown;

@@ -96,6 +96,18 @@ web_listen = "0.0.0.0:8080"
 # If true, AUTH on plaintext SMTP is rejected with 538 (default false).
 # require_tls_for_auth = false
 
+# --- Remote access ---
+# Best-effort automatic router port-forwarding (UPnP-IGD / NAT-PMP) at startup
+# so the server is reachable from other machines without manual router config.
+# Best-effort only: failures are logged, never fatal. Default true. When the
+# router reports a private/CGNAT WAN IP, no public URL is possible and the LAN
+# URL + guidance are shown instead. Set false to disable all router probing.
+# auto_port_forward = true
+# Operator-supplied public base URL for the webmail (overrides auto-detection,
+# shown verbatim as the shareable URL). Set this when you have a real domain or
+# a reverse proxy in front. Live-reloadable.
+# public_url = "https://mail.example.com"
+
 # --- Quotas (Tier 3) ---
 # Default mailbox size limit in MiB (0 = unlimited). Checked on inbound SMTP
 # delivery (452 4.2.2 Mailbox full) and IMAP APPEND (NO [OVERQUOTA]).

@@ -64,6 +64,14 @@ pub struct Config {
     /// TLS in front of desertemail. Default **false** (ignore proxy headers so
     /// clients cannot spoof HTTPS and suppress the cleartext warning).
     pub trust_proxy_headers: bool,
+    /// Best-effort automatic router port-forwarding (UPnP-IGD / NAT-PMP) at
+    /// startup, so the server is reachable from other machines without manual
+    /// router config. Best-effort: failures are logged, never fatal. Default true.
+    pub auto_port_forward: bool,
+    /// Operator-supplied public base URL for the webmail (e.g.
+    /// `https://mail.example.com`). When set, it overrides all auto-detection
+    /// and is shown verbatim as the shareable URL. Live-reloadable.
+    pub public_url: Arc<RwLock<String>>,
     /// If true, reject AUTH on plaintext SMTP (reply 538). Default false.
     pub require_tls_for_auth: bool,
     /// Failed auth attempts before lockout (default 10).
@@ -162,6 +170,8 @@ impl Default for Config {
             imaps_listen: String::new(),
             web_tls_listen: String::new(),
             trust_proxy_headers: false,
+            auto_port_forward: true,
+            public_url: Arc::new(RwLock::new(String::new())),
             require_tls_for_auth: false,
             auth_max_failures: 10,
             auth_window_secs: 300,
@@ -306,6 +316,11 @@ impl Config {
                 ("", "imaps_listen") => cfg.imaps_listen = val,
                 ("", "web_tls_listen") => cfg.web_tls_listen = val,
                 ("", "trust_proxy_headers") => cfg.trust_proxy_headers = parse_bool(&val),
+                ("", "auto_port_forward") => cfg.auto_port_forward = parse_bool(&val),
+                ("", "public_url") => {
+                    *cfg.public_url.write().unwrap_or_else(|e| e.into_inner()) =
+                        val.trim().trim_end_matches('/').to_string();
+                }
                 ("", "require_tls_for_auth") => cfg.require_tls_for_auth = parse_bool(&val),
                 ("", "auth_max_failures") => {
                     cfg.auth_max_failures = parse_u32(&val, cfg.auth_max_failures)
@@ -462,6 +477,7 @@ impl Config {
         let domains = fresh.domains_list();
         let admin = fresh.admin_user_name();
         let public_host = fresh.public_host_name();
+        let public_url = fresh.public_url_get();
         let dkim_selector = fresh.dkim_selector();
         let dkim_key_file = fresh.dkim_key_file_path();
         *self
@@ -484,6 +500,10 @@ impl Config {
             .public_host
             .write()
             .map_err(|_| "public_host lock poisoned".to_string())? = public_host;
+        *self
+            .public_url
+            .write()
+            .map_err(|_| "public_url lock poisoned".to_string())? = public_url;
         *self
             .dkim_selector
             .write()
@@ -520,6 +540,14 @@ impl Config {
         let h = host.trim().trim_end_matches('.').to_lowercase();
         if let Ok(mut g) = self.public_host.write() {
             *g = h;
+        }
+    }
+
+    /// Operator-configured public base URL (empty when unset → auto-detect).
+    pub fn public_url_get(&self) -> String {
+        match self.public_url.read() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
         }
     }
 

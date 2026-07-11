@@ -3153,9 +3153,11 @@ fn page_dns(
     };
 
     let tls_panel = tls_security_panel_html(cfg, &mailhost);
+    let access_panel = public_access_panel_html();
 
     let body = format!(
         "<h1>DNS</h1>{}\
+         <div class=\"pix-panel\"><h2>Remote access</h2>{}</div>\
          <p>Add these records at your DNS provider (Cloudflare, Namecheap, Route&nbsp;53, …). \
          Then click <strong>Check DNS</strong>. Propagation can take minutes to hours.</p>\
          <p class=\"muted\">{}</p>\
@@ -3199,6 +3201,7 @@ fn page_dns(
          }});\
          }})();</script>",
         flash_html,
+        access_panel,
         ip_hint,
         rows,
         dkim_panel,
@@ -3446,6 +3449,62 @@ fn tls_state_from_disk(cfg: &Config) -> (bool, String, Vec<String>, Option<Strin
         cfg.tls_cert_file.clone(),
         cfg.tls_key_file.clone(),
     )
+}
+
+/// Panel describing how this server is reachable from other machines
+/// (auto port-forward result / sslip.io URL / honest CGNAT + manual fallback).
+fn public_access_panel_html() -> String {
+    let pa = match crate::portmap::current() {
+        Some(p) => p,
+        None => {
+            return "<p class=\"muted\">Checking how this server is reachable from other \
+                    machines… reload in a moment.</p>"
+                .to_string();
+        }
+    };
+    let mut out = String::new();
+    if pa.reachable {
+        if let Some(ref url) = pa.url {
+            out.push_str(&format!(
+                "<p class=\"ok\">Reachable from other machines. Share this URL:</p>\
+                 <p><a href=\"{u}\"><code class=\"dns-val\">{u}</code></a> \
+                 <button type=\"button\" class=\"copy-btn\" data-copy=\"{u}\">Copy</button></p>",
+                u = esc(url)
+            ));
+        }
+        if let Some(ref ipu) = pa.ip_url {
+            out.push_str(&format!(
+                "<p class=\"muted\">Or by IP: <code>{}</code></p>",
+                esc(ipu)
+            ));
+        }
+        if let Some(m) = pa.method {
+            out.push_str(&format!(
+                "<p class=\"muted\">Port-forwarding configured automatically via {}.</p>",
+                esc(m)
+            ));
+        }
+    } else {
+        out.push_str(&format!("<p class=\"warn\">{}</p>", esc(&pa.note)));
+        if let Some(ref lan) = pa.lan_url {
+            out.push_str(&format!(
+                "<p>On the same network: <a href=\"{u}\"><code>{u}</code></a></p>",
+                u = esc(lan)
+            ));
+        }
+        out.push_str(
+            "<p class=\"muted\">To reach it from the internet: forward the webmail port \
+             (and mail ports 25/587/143) on your router to this machine, or set \
+             <code>public_url</code> in config if you have a domain or reverse proxy.</p>",
+        );
+    }
+    if let Some(ref ip) = pa.external_ip {
+        out.push_str(&format!(
+            "<p class=\"muted\">Detected WAN IP: <code>{}</code>.</p>",
+            esc(ip)
+        ));
+    }
+    out
 }
 
 fn tls_security_panel_html(cfg: &Config, mailhost: &str) -> String {

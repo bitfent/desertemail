@@ -1064,6 +1064,29 @@ open_browser() {
   return 1
 }
 
+# Read the server-written public URL state file (best-effort; may lag a few
+# seconds behind web readiness while UPnP/NAT-PMP discovery runs).
+read_public_url() {
+  PUBLIC_URL=""
+  PUBLIC_REACHABLE=""
+  PUBLIC_NOTE=""
+  _f="${DATA_DIR:-${PREFIX}/data}/public_url.txt"
+  _n=0
+  while [ "${_n}" -lt 16 ]; do
+    if [ -f "${_f}" ]; then
+      PUBLIC_URL=$(grep -E '^url=' "${_f}" 2>/dev/null | head -n 1 | sed 's/^url=//' || true)
+      PUBLIC_REACHABLE=$(grep -E '^reachable=' "${_f}" 2>/dev/null | head -n 1 | sed 's/^reachable=//' || true)
+      PUBLIC_NOTE=$(grep -E '^note=' "${_f}" 2>/dev/null | head -n 1 | sed 's/^note=//' || true)
+      if [ -n "${PUBLIC_URL}" ]; then
+        return 0
+      fi
+    fi
+    _n=$((_n + 1))
+    sleep 0.5
+  done
+  return 1
+}
+
 maybe_autostart() {
   _want=0
   if [ "${INTERACTIVE}" -eq 1 ]; then
@@ -1099,6 +1122,14 @@ maybe_autostart() {
     info "Waiting for webmail at $(web_url) ..."
     if wait_for_web; then
       info "Webmail is up."
+      if read_public_url; then
+        if [ "${PUBLIC_REACHABLE}" = "true" ]; then
+          info "Reachable from other machines: ${PUBLIC_URL}"
+        else
+          info "Local access: $(web_url)"
+          [ -n "${PUBLIC_NOTE}" ] && info "Remote access: ${PUBLIC_NOTE}"
+        fi
+      fi
       if [ "${SETUP_VIA_BROWSER:-0}" -eq 1 ]; then
         info "Finish setup in your browser: create your admin account at $(web_url)"
       fi
@@ -1140,6 +1171,11 @@ print_summary() {
   info " Ports  : SMTP ${SMTP_LISTEN:-?} | submission ${SUB_LISTEN:-?} | IMAP ${IMAP_LISTEN:-?}"
   if [ -n "${WEB_LISTEN:-}" ]; then
     info " Webmail: ${_url}"
+    if [ -n "${PUBLIC_URL:-}" ] && [ "${PUBLIC_REACHABLE:-}" = "true" ]; then
+      info " Public : ${PUBLIC_URL}  (share this — works from other machines)"
+    elif [ -n "${PUBLIC_NOTE:-}" ]; then
+      info " Public : not auto-reachable — ${PUBLIC_NOTE}"
+    fi
   else
     info " Webmail: disabled"
   fi
