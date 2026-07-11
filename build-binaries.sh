@@ -80,6 +80,9 @@ printf '%s\n' "$ZIG_TARGETS" | while IFS='|' read -r t o; do
   copy_out "$t" "$o"
 done
 
+sh scripts/source-hash.sh > bin-dist/SOURCE_HASH
+echo "  stamped bin-dist/SOURCE_HASH (pre-push guard)"
+
 echo "== done — bin-dist/ =="
 for f in bin-dist/desertemail-*; do [ -f "$f" ] && echo "  $(basename "$f")"; done
 echo

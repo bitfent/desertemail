@@ -1,0 +1,33 @@
+#!/bin/sh
+# LOCAL guard (no GitHub Actions / CI): refuse to push if the committed release
+# binaries in bin-dist/ are STALE relative to the current source. This catches
+# the common mistake of changing src/ but not rebuilding the prebuilt binaries
+# that curl|sh ships to users.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# Bypass in an emergency:  git push --no-verify
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+# Nothing to guard if there are no stamped binaries yet.
+[ -f bin-dist/SOURCE_HASH ] || exit 0
+[ -f scripts/source-hash.sh ] || exit 0
+
+want=$(cat bin-dist/SOURCE_HASH)
+have=$(sh scripts/source-hash.sh)
+
+if [ "$want" != "$have" ]; then
+  echo "" >&2
+  echo "  ✗ pre-push BLOCKED: bin-dist/ binaries are STALE vs src/." >&2
+  echo "    Source changed but the prebuilt binaries were not rebuilt, so" >&2
+  echo "    curl|sh would ship an old binary to users." >&2
+  echo "" >&2
+  echo "    Fix:  sh build-binaries.sh && git add bin-dist && git commit -m 'rebuild binaries'" >&2
+  echo "    Then push again. (Emergency bypass: git push --no-verify)" >&2
+  echo "" >&2
+  exit 1
+fi
+
+exit 0

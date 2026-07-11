@@ -434,6 +434,27 @@ cross-built with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild
 [`DEPLOY.md`](DEPLOY.md). The site itself is a static page hosted on Render; see
 DEPLOY.md for the full distribution pipeline (`bin-dist/` → `site-build.sh` → `/bin/`).
 
+> ### ⚠️ Binaries must match source — read this before pushing (humans **and** agents)
+>
+> The binaries in `bin-dist/` are committed and served to users, so **whenever you
+> change anything under `src/` or `Cargo.*`, you must rebuild them** — otherwise
+> `curl | sh` ships an old binary without your change:
+>
+> ```bash
+> sh build-binaries.sh                                   # rebuilds all 7 targets + stamps bin-dist/SOURCE_HASH
+> git add bin-dist && git commit -m "rebuild binaries"
+> ```
+>
+> A **local** `pre-push` git hook enforces this (no CI, no cloud): it refuses to
+> push when `bin-dist/` is stale (compares `bin-dist/SOURCE_HASH` to the current
+> source; fast, no compile). Enable it **once per clone**:
+>
+> ```bash
+> git config core.hooksPath .githooks
+> ```
+>
+> If a push is blocked, run the rebuild above. Emergency bypass: `git push --no-verify`.
+
 ## Hardening roadmap (MVP → production self-hostable)
 
 **All four tiers below are complete and in tree.** They took DesertEmail from a
@@ -477,7 +498,8 @@ remaining hard gate before pointing MX at it in a high-stakes setting.
 PRs and issues welcome — this is intentionally small enough to read the
 SMTP/IMAP/DKIM RFCs alongside the code.
 
-- **Build & test:** `cargo build` and `cargo test` (~100 tests, all pure-std/rustls).
+- **Build & test:** `cargo build` and `cargo test` (~150 tests, all pure-std/rustls).
+- **Changed `src/`? Rebuild the committed binaries** (`sh build-binaries.sh`) and enable the pre-push guard (`git config core.hooksPath .githooks`) — see "Binaries must match source" above. This is the #1 thing to remember.
 - **Layout:** see the Architecture map above — one module per protocol/concern.
 - **Fuzzing:** `fuzz/` has `cargo-fuzz` targets for the network parsers
   (`cargo +nightly fuzz run <target>`); running these long is the single
