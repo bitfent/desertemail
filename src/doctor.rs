@@ -201,7 +201,7 @@ fn resolve_domains(cfg: &Config, opts: &DoctorOpts) -> Vec<String> {
             .filter(|d| !d.is_empty())
             .collect();
     }
-    cfg.domains
+    cfg.domains_list()
         .iter()
         .map(|d| d.trim().trim_end_matches('.').to_lowercase())
         .filter(|d| !d.is_empty())
@@ -223,10 +223,12 @@ fn resolve_host(cfg: &Config, opts: &DoctorOpts, domains: &[String]) -> String {
         }
         return domain.clone();
     }
-    cfg.domains
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "localhost".into())
+    let d = cfg.primary_domain();
+    if d.is_empty() {
+        "localhost".into()
+    } else {
+        d
+    }
 }
 
 /// Returns (expected_public_ip, egress_ip, notes).
@@ -354,7 +356,8 @@ fn ip_info_check(
 fn check_config_sanity(cfg: &Config) -> Vec<Check> {
     let mut out = Vec::new();
 
-    if cfg.domains.is_empty() {
+    let domains = cfg.domains_list();
+    if domains.is_empty() {
         out.push(Check::fail(
             "config domains",
             "domains list is empty",
@@ -363,7 +366,7 @@ fn check_config_sanity(cfg: &Config) -> Vec<Check> {
     } else {
         out.push(Check::ok(
             "config domains",
-            format!("{} domain(s): {}", cfg.domains.len(), cfg.domains.join(", ")),
+            format!("{} domain(s): {}", domains.len(), domains.join(", ")),
         ));
     }
 
@@ -1728,7 +1731,7 @@ mod tests {
     #[test]
     fn config_sanity_flags_plaintext_and_changeme() {
         let mut cfg = Config::default();
-        cfg.domains = vec!["example.com".into()];
+        *cfg.domains.write().unwrap() = vec!["example.com".into()];
         cfg.default_password = "changeme".into();
         cfg.allow_default_password_auth = false;
         cfg.require_tls_for_auth = false;

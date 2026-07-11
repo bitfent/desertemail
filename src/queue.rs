@@ -507,10 +507,12 @@ fn has_dkim_signature(raw: &[u8]) -> bool {
 
 /// EHLO/HELO name: first configured domain, falling back to a placeholder.
 fn helo_name(cfg: &Config) -> String {
-    cfg.domains
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "desertemail.local".into())
+    let d = cfg.primary_domain();
+    if d.is_empty() {
+        "desertemail.local".into()
+    } else {
+        d
+    }
 }
 
 fn deliver_to_domain(

@@ -86,7 +86,7 @@ pub fn ensure_certificate(cfg: &Config) -> Result<String, String> {
         .as_ref()
         .ok_or("acme=true requires tls_key_file")?;
     let domains = if cfg.acme_domains.is_empty() {
-        cfg.domains.clone()
+        cfg.domains_list()
     } else {
         cfg.acme_domains.clone()
     };

@@ -302,13 +302,43 @@ test_run_macos_binary() {
   _p3=$(pick_port)
   _p4=$(pick_port)
   _cfg="${_home}/.desertemail/config.toml"
-  # Rewrite listen addresses in place
+  # Rewrite listen addresses in the top-level section (before any [table]).
+  # Appending after [users] would parse them as usernames.
   {
-    grep -v -E '^(smtp_listen|submission_listen|imap_listen|web_listen)' "${_cfg}" || true
-    printf 'smtp_listen = "127.0.0.1:%s"\n' "${_p1}"
-    printf 'submission_listen = "127.0.0.1:%s"\n' "${_p2}"
-    printf 'imap_listen = "127.0.0.1:%s"\n' "${_p3}"
-    printf 'web_listen = "127.0.0.1:%s"\n' "${_p4}"
+    _in_table=0
+    _injected=0
+    while IFS= read -r _line || [ -n "${_line}" ]; do
+      case "${_line}" in
+        \[*)
+          if [ "${_injected}" -eq 0 ]; then
+            printf 'smtp_listen = "127.0.0.1:%s"\n' "${_p1}"
+            printf 'submission_listen = "127.0.0.1:%s"\n' "${_p2}"
+            printf 'imap_listen = "127.0.0.1:%s"\n' "${_p3}"
+            printf 'web_listen = "127.0.0.1:%s"\n' "${_p4}"
+            _injected=1
+          fi
+          _in_table=1
+          printf '%s\n' "${_line}"
+          ;;
+        smtp_listen*|submission_listen*|imap_listen*|web_listen*)
+          # drop old top-level listen lines
+          if [ "${_in_table}" -eq 0 ]; then
+            :
+          else
+            printf '%s\n' "${_line}"
+          fi
+          ;;
+        *)
+          printf '%s\n' "${_line}"
+          ;;
+      esac
+    done < "${_cfg}"
+    if [ "${_injected}" -eq 0 ]; then
+      printf 'smtp_listen = "127.0.0.1:%s"\n' "${_p1}"
+      printf 'submission_listen = "127.0.0.1:%s"\n' "${_p2}"
+      printf 'imap_listen = "127.0.0.1:%s"\n' "${_p3}"
+      printf 'web_listen = "127.0.0.1:%s"\n' "${_p4}"
+    fi
   } > "${_cfg}.new"
   mv "${_cfg}.new" "${_cfg}"
 
@@ -1185,6 +1215,289 @@ test_reinstall_keeps_config() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 27: express interactive → empty [users], no admin_user, setup URL
+# ---------------------------------------------------------------------------
+test_express_interactive_empty_users() {
+  _nn=27
+  _home=$(fake_home)
+  _py="${TMP_ROOT}/pty_express.py"
+  cat > "${_py}" <<'PY'
+import os, pty, select, sys, time
+
+url = sys.argv[1]
+home = sys.argv[2]
+
+env = os.environ.copy()
+env["HOME"] = home
+env["SHELL"] = "/bin/zsh"
+env.pop("DESERTEMAIL_NONINTERACTIVE", None)
+open(os.path.join(home, ".zshrc"), "a").close()
+
+# Express: Enter (recommended), then autostart=n
+answers = [
+    "\n",
+    "n\n",
+]
+ans_i = 0
+output = bytearray()
+
+pid, master = pty.fork()
+if pid == 0:
+    cmd = f'curl -fsSL "{url}" | sh'
+    os.execve("/bin/sh", ["sh", "-c", cmd], env)
+    os._exit(127)
+
+deadline = time.time() + 90
+status = None
+while time.time() < deadline:
+    wpid, wstat = os.waitpid(pid, os.WNOHANG)
+    if wpid == pid:
+        status = wstat
+        while True:
+            r, _, _ = select.select([master], [], [], 0.05)
+            if master not in r:
+                break
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                break
+            output.extend(chunk)
+        break
+
+    r, _, _ = select.select([master], [], [], 0.15)
+    if master in r:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            chunk = b""
+        if chunk:
+            output.extend(chunk)
+            text = output.decode("utf-8", "replace")
+            last = text.split("\n")[-1]
+            if ans_i < len(answers) and (last.endswith(": ") or last.rstrip().endswith(":")):
+                try:
+                    os.write(master, answers[ans_i].encode())
+                except OSError:
+                    pass
+                ans_i += 1
+
+if status is None:
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+    try:
+        os.waitpid(pid, 0)
+    except OSError:
+        pass
+    sys.stderr.write("pty express timed out\n")
+    sys.stderr.buffer.write(bytes(output))
+    sys.exit(2)
+
+if os.WIFEXITED(status):
+    code = os.WEXITSTATUS(status)
+else:
+    code = 1
+
+sys.stdout.buffer.write(bytes(output))
+sys.exit(code)
+PY
+
+  _url="http://127.0.0.1:${PORT}/install-macos-apple-silicon.sh"
+  OUT_COMBINED="${TMP_ROOT}/t27.log"
+  if ! python3 "${_py}" "${_url}" "${_home}" >"${OUT_COMBINED}" 2>&1; then
+    fail "${_nn}" "express-interactive-empty-users" "wizard failed: $(tr '\n' ' ' <"${OUT_COMBINED}" | head -c 400)"
+    return
+  fi
+  _cfg="${_home}/.desertemail/config.toml"
+  if [ ! -f "${_cfg}" ]; then
+    fail "${_nn}" "express-interactive-empty-users" "no config written"
+    return
+  fi
+  if grep -qE '^admin_user' "${_cfg}"; then
+    fail "${_nn}" "express-interactive-empty-users" "admin_user should be absent in setup-pending config"
+    return
+  fi
+  # [users] present but no user entries (no "name" = "value" under it)
+  if ! grep -q '^\[users\]' "${_cfg}"; then
+    fail "${_nn}" "express-interactive-empty-users" "expected empty [users] section"
+    return
+  fi
+  if grep -E '^[[:space:]]*"[^"]+"[[:space:]]*=' "${_cfg}" | grep -v '^\s*#' >/dev/null 2>&1; then
+    # Only fail if a user-like entry exists after [users]
+    _after=$(awk '/^\[users\]/{p=1;next} /^\[/{p=0} p && /=/{print}' "${_cfg}" || true)
+    if [ -n "${_after}" ]; then
+      fail "${_nn}" "express-interactive-empty-users" "expected no users; got: ${_after}"
+      return
+    fi
+  fi
+  if ! grep -q 'http://127.0.0.1:8080/setup' "${OUT_COMBINED}"; then
+    fail "${_nn}" "express-interactive-empty-users" "expected setup URL in summary"
+    return
+  fi
+  if grep -qE 'Login  : admin /' "${OUT_COMBINED}"; then
+    fail "${_nn}" "express-interactive-empty-users" "must not print admin password in express interactive"
+    return
+  fi
+  ok "${_nn}" "express-interactive-empty-users"
+}
+
+# ---------------------------------------------------------------------------
+# Test 28: setup-pending server serves /setup (real binary + curl)
+# ---------------------------------------------------------------------------
+test_setup_pending_serves_setup() {
+  _nn=28
+  _bin=""
+  if [ -x "${REPO}/target/release/desertemail" ]; then
+    _bin="${REPO}/target/release/desertemail"
+  elif [ -x "${REPO}/bin-dist/desertemail-aarch64-apple-darwin" ]; then
+    _bin="${REPO}/bin-dist/desertemail-aarch64-apple-darwin"
+  elif [ -x "${REPO}/target/debug/desertemail" ]; then
+    _bin="${REPO}/target/debug/desertemail"
+  elif command -v cargo >/dev/null 2>&1; then
+    if ! cargo build --release >"${TMP_ROOT}/t28-build.log" 2>&1; then
+      fail "${_nn}" "setup-pending-serves-setup" "cargo build failed"
+      return
+    fi
+    _bin="${REPO}/target/release/desertemail"
+  else
+    ok "${_nn}" "setup-pending-serves-setup (skipped: no binary)"
+    return
+  fi
+
+  _dir=$(mktemp -d "${TMP_ROOT}/setup28.XXXXXX")
+  _cfg="${_dir}/config.toml"
+  _data="${_dir}/data"
+  mkdir -p "${_data}"
+  # Free high port for this test (8080 may be busy)
+  _port=18080
+  # Find free port
+  for _try in 18080 18081 18082 18083 18084; do
+    if ! nc -z 127.0.0.1 "${_try}" 2>/dev/null; then
+      _port=${_try}
+      break
+    fi
+  done
+  {
+    printf 'domains = ["localhost"]\n'
+    printf 'data_dir = "%s"\n' "${_data}"
+    printf 'smtp_listen = "127.0.0.1:12525"\n'
+    printf 'submission_listen = "127.0.0.1:12587"\n'
+    printf 'imap_listen = "127.0.0.1:12143"\n'
+    printf 'web_listen = "127.0.0.1:%s"\n' "${_port}"
+    printf 'catch_all = true\n'
+    printf '\n[users]\n'
+  } > "${_cfg}"
+
+  "${_bin}" --config "${_cfg}" >"${_dir}/server.log" 2>&1 &
+  _spid=$!
+  SERVER_PID="${_spid}"
+
+  _ok=0
+  _n=0
+  while [ "${_n}" -lt 40 ]; do
+    if curl -fsS -o /dev/null --connect-timeout 1 "http://127.0.0.1:${_port}/healthz" 2>/dev/null; then
+      _ok=1
+      break
+    fi
+    _n=$((_n + 1))
+    sleep 0.25
+  done
+  if [ "${_ok}" -ne 1 ]; then
+    kill "${_spid}" 2>/dev/null || true
+    wait "${_spid}" 2>/dev/null || true
+    SERVER_PID=""
+    fail "${_nn}" "setup-pending-serves-setup" "server did not start: $(tr '\n' ' ' <"${_dir}/server.log" | head -c 300)"
+    return
+  fi
+
+  # / should redirect to /setup
+  _loc=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "http://127.0.0.1:${_port}/" 2>/dev/null || true)
+  case "${_loc}" in
+    302*|301*)
+      ;;
+    *)
+      kill "${_spid}" 2>/dev/null || true
+      wait "${_spid}" 2>/dev/null || true
+      SERVER_PID=""
+      fail "${_nn}" "setup-pending-serves-setup" "/ did not redirect: ${_loc}"
+      return
+      ;;
+  esac
+
+  _body=$(curl -fsS "http://127.0.0.1:${_port}/setup" 2>/dev/null || true)
+  if ! printf '%s' "${_body}" | grep -q 'Welcome to DesertEmail'; then
+    kill "${_spid}" 2>/dev/null || true
+    wait "${_spid}" 2>/dev/null || true
+    SERVER_PID=""
+    fail "${_nn}" "setup-pending-serves-setup" "/setup missing welcome text"
+    return
+  fi
+  if ! printf '%s' "${_body}" | grep -q 'action="/setup"'; then
+    kill "${_spid}" 2>/dev/null || true
+    wait "${_spid}" 2>/dev/null || true
+    SERVER_PID=""
+    fail "${_nn}" "setup-pending-serves-setup" "/setup form missing"
+    return
+  fi
+
+  # POST setup (loopback)
+  _post=$(curl -sS -o "${_dir}/post.out" -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
+    -H "Host: 127.0.0.1:${_port}" \
+    -H "Origin: http://127.0.0.1:${_port}" \
+    --data 'username=admin&password=testpass1&password2=testpass1&domain=example.com' \
+    "http://127.0.0.1:${_port}/setup" 2>/dev/null || true)
+  case "${_post}" in
+    302|301)
+      ;;
+    *)
+      kill "${_spid}" 2>/dev/null || true
+      wait "${_spid}" 2>/dev/null || true
+      SERVER_PID=""
+      fail "${_nn}" "setup-pending-serves-setup" "POST /setup status=${_post} body=$(head -c 200 "${_dir}/post.out" | tr '\n' ' ')"
+      return
+      ;;
+  esac
+
+  if ! grep -q 'admin_user = "admin"' "${_cfg}"; then
+    kill "${_spid}" 2>/dev/null || true
+    wait "${_spid}" 2>/dev/null || true
+    SERVER_PID=""
+    fail "${_nn}" "setup-pending-serves-setup" "admin_user not written"
+    return
+  fi
+  if ! grep -q 'example.com' "${_cfg}"; then
+    kill "${_spid}" 2>/dev/null || true
+    wait "${_spid}" 2>/dev/null || true
+    SERVER_PID=""
+    fail "${_nn}" "setup-pending-serves-setup" "domain not updated"
+    return
+  fi
+
+  # After setup, /setup redirects to /login
+  _loc2=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${_port}/setup" 2>/dev/null || true)
+  case "${_loc2}" in
+    302|301)
+      ;;
+    *)
+      kill "${_spid}" 2>/dev/null || true
+      wait "${_spid}" 2>/dev/null || true
+      SERVER_PID=""
+      fail "${_nn}" "setup-pending-serves-setup" "after setup /setup status=${_loc2}"
+      return
+      ;;
+  esac
+
+  kill "${_spid}" 2>/dev/null || true
+  wait "${_spid}" 2>/dev/null || true
+  SERVER_PID=""
+  ok "${_nn}" "setup-pending-serves-setup"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
@@ -1218,6 +1531,8 @@ main() {
   test_uninstall_purge_data
   test_uninstall_refuses_without_flag
   test_reinstall_keeps_config
+  test_express_interactive_empty_users
+  test_setup_pending_serves_setup
 
   printf '\n=== summary ===\n'
   printf '%s/%s passed\n' "${PASSED}" "${TOTAL}"

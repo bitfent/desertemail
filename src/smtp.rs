@@ -154,11 +154,12 @@ fn handle_client(
     let mut helo_domain = String::from("unknown");
     let mut data_buf = Vec::new();
     let starttls_available = tls_cfg.is_some();
-    let hostname = cfg
-        .domains
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("desertemail");
+    let hostname_owned = cfg.primary_domain();
+    let hostname = if hostname_owned.is_empty() {
+        "desertemail"
+    } else {
+        hostname_owned.as_str()
+    };
 
     loop {
         let line = match read_line(&mut reader)? {
@@ -933,9 +934,8 @@ mod tests {
 
     #[test]
     fn foreign_domain_rejected_by_is_our_domain() {
-        let mut cfg = Config::default();
-        cfg.domains = vec!["example.com".into()];
-        cfg.catch_all = true;
+        let cfg = Config::default();
+        *cfg.domains.write().unwrap() = vec!["example.com".into()];
         let rcpt = "victim@evil.com";
         let (_l, domain) = util::parse_email_addr(rcpt);
         assert!(!cfg.is_our_domain(&domain));
@@ -944,9 +944,8 @@ mod tests {
 
     #[test]
     fn local_domain_accepted() {
-        let mut cfg = Config::default();
-        cfg.domains = vec!["example.com".into()];
-        cfg.catch_all = true;
+        let cfg = Config::default();
+        *cfg.domains.write().unwrap() = vec!["example.com".into()];
         assert!(cfg.is_our_domain("example.com"));
         assert!(cfg.resolve_mailbox("user@example.com").is_some());
     }

@@ -67,6 +67,9 @@ spam_check_ptr = true        # include missing/mismatched rDNS in spam score
 web_listen = "0.0.0.0:8080"
 # Login name that may access /admin. Leave unset or empty to disable admin.
 # admin_user = "postmaster"
+# Optional: allow remote first-run setup (empty [users]) via /setup?setup_token=...
+# Without this, /setup is only reachable from loopback (127.0.0.1 / ::1).
+# setup_token = "change-me-long-random"
 
 # --- TLS (optional) ---
 # Both paths set => STARTTLS on SMTP/IMAP and optional implicit-TLS listeners.

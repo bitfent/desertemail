@@ -60,6 +60,125 @@ pub fn set_quota(content: &str, email: &str, mb: u64) -> Result<String, String> 
     Ok(rewrite_sections(content, &users, &quotas))
 }
 
+/// Complete first-run setup: add admin user, set `admin_user`, update primary domain.
+///
+/// Rewrites `[users]` via the normal helper, then updates top-level `admin_user` and
+/// `domains` keys (preserving comments and other settings).
+pub fn complete_setup(
+    content: &str,
+    username: &str,
+    password: &str,
+    domain: &str,
+) -> Result<String, String> {
+    let username = normalize_user(username)?;
+    if password.len() < 8 {
+        return Err("password must be at least 8 characters".into());
+    }
+    let domain = domain.trim().to_lowercase();
+    if domain.is_empty() {
+        return Err("domain required".into());
+    }
+    if domain.contains(|c: char| c.is_control() || c == '"' || c == '[' || c == ']') {
+        return Err("invalid domain characters".into());
+    }
+
+    // Add user first (creates [users] section if needed).
+    let mut out = add_user(content, &username, password)?;
+    out = set_top_level_string(&out, "admin_user", &username);
+    out = set_domains_primary(&out, &domain);
+    Ok(out)
+}
+
+/// Set or replace a top-level string key (`key = "value"`). Preserves other lines.
+fn set_top_level_string(content: &str, key: &str, value: &str) -> String {
+    let key_l = key.to_lowercase();
+    let mut out = String::with_capacity(content.len() + 64);
+    let mut section = String::new();
+    let mut replaced = false;
+    let new_line = format!("{} = \"{}\"\n", key, escape_toml_str(value));
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() >= 2 {
+            // Insert before first table section if not yet written.
+            if !replaced && section.is_empty() {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&new_line);
+                replaced = true;
+            }
+            section = trimmed[1..trimmed.len() - 1].trim().to_lowercase();
+            out.push_str(raw_line);
+            out.push('\n');
+            continue;
+        }
+        if section.is_empty() && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some(eq) = trimmed.find('=') {
+                let k = trimmed[..eq].trim().trim_matches('"').trim_matches('\'').to_lowercase();
+                if k == key_l {
+                    out.push_str(&new_line);
+                    replaced = true;
+                    continue;
+                }
+            }
+        }
+        out.push_str(raw_line);
+        out.push('\n');
+    }
+    if !replaced {
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&new_line);
+    }
+    out
+}
+
+/// Replace top-level `domains = [...]` with a single primary domain (or insert it).
+fn set_domains_primary(content: &str, domain: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 64);
+    let mut section = String::new();
+    let mut replaced = false;
+    let new_line = format!("domains = [\"{}\"]\n", escape_toml_str(domain));
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() >= 2 {
+            if !replaced && section.is_empty() {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&new_line);
+                replaced = true;
+            }
+            section = trimmed[1..trimmed.len() - 1].trim().to_lowercase();
+            out.push_str(raw_line);
+            out.push('\n');
+            continue;
+        }
+        if section.is_empty() && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some(eq) = trimmed.find('=') {
+                let k = trimmed[..eq].trim().trim_matches('"').trim_matches('\'').to_lowercase();
+                if k == "domains" {
+                    out.push_str(&new_line);
+                    replaced = true;
+                    continue;
+                }
+            }
+        }
+        out.push_str(raw_line);
+        out.push('\n');
+    }
+    if !replaced {
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&new_line);
+    }
+    out
+}
+
 /// Write config atomically (temp file in same directory + rename).
 pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -322,5 +441,26 @@ log_format = "text"
     #[test]
     fn empty_password_rejected() {
         assert!(add_user(SAMPLE, "x", "").is_err());
+    }
+
+    #[test]
+    fn complete_setup_adds_admin_and_domain() {
+        let base = r#"# gen
+domains = ["localhost"]
+data_dir = "./data"
+web_listen = "0.0.0.0:8080"
+
+[users]
+"#;
+        let out = complete_setup(base, "Admin", "password1", "mail.example.com").unwrap();
+        assert!(out.contains("admin_user = \"admin\""));
+        assert!(out.contains("domains = [\"mail.example.com\"]"));
+        let names = list_users(&out);
+        assert!(names.contains(&"admin".to_string()));
+        let (users, _) = parse_sections(&out);
+        let stored = users.get("admin").unwrap();
+        assert!(passwd::verify_password(stored, "password1"));
+        // short password rejected
+        assert!(complete_setup(base, "a", "short", "x.com").is_err());
     }
 }

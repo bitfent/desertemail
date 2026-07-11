@@ -187,7 +187,7 @@ fn main() {
 
     util::log!(
         "domains: {:?} | catch_all={} | data={} | smarthost={:?}",
-        cfg.domains,
+        cfg.domains_list(),
         cfg.catch_all,
         cfg.data_dir,
         cfg.smarthost

@@ -586,6 +586,20 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
         return Response::plain(404, "not found");
     }
 
+    // First-run setup: empty [users] → everything goes to /setup (except healthz/metrics/acme).
+    let pending = cfg.setup_pending();
+    if pending {
+        return match (req.method.as_str(), req.path.as_str()) {
+            ("GET", "/setup") => page_setup(cfg, req, peer_ip, None, 200),
+            ("POST", "/setup") => handle_setup(cfg, req, secure, peer_ip),
+            _ => Response::redirect("/setup"),
+        };
+    }
+    // Setup already done — /setup permanently redirects to login.
+    if req.path == "/setup" {
+        return Response::redirect("/login");
+    }
+
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/login") => page_login(None, 200),
         ("POST", "/login") => handle_login(cfg, req, secure, peer_ip),
@@ -612,6 +626,205 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
                 ("POST", "/admin/queue/delete") => handle_queue_delete(cfg, &user, req),
                 _ => Response::html(404, "Not Found", page_shell("Not Found", &user, "<p>404</p>")),
             }
+        }
+    }
+}
+
+/// Loopback peer for first-run setup (127.0.0.1 / ::1 / IPv4-mapped ::ffff:127.0.0.1).
+fn is_loopback_peer(ip: &str) -> bool {
+    let ip = ip.trim();
+    ip == "127.0.0.1"
+        || ip == "::1"
+        || ip == "localhost"
+        || ip == "0:0:0:0:0:0:0:1"
+        || ip == "::ffff:127.0.0.1"
+        || ip.eq_ignore_ascii_case("::ffff:127.0.0.1")
+}
+
+/// Setup is allowed from loopback, or with a matching `setup_token` (query or form).
+fn setup_access_ok(cfg: &Config, req: &Request, peer_ip: &str, form_token: Option<&str>) -> bool {
+    if is_loopback_peer(peer_ip) {
+        return true;
+    }
+    if cfg.setup_token.is_empty() {
+        return false;
+    }
+    if let Some(t) = form_token {
+        if t == cfg.setup_token {
+            return true;
+        }
+    }
+    if let Some(t) = req.query.get("setup_token") {
+        if t == &cfg.setup_token {
+            return true;
+        }
+    }
+    false
+}
+
+fn page_setup_remote_blocked(cfg: &Config) -> Response {
+    let token_hint = if cfg.setup_token.is_empty() {
+        "<p class=\"muted\">No <code>setup_token</code> is configured. Open this page from the \
+         machine itself (127.0.0.1), or add <code>setup_token = \"...\"</code> to config.toml and \
+         open <code>/setup?setup_token=...</code>.</p>"
+            .to_string()
+    } else {
+        "<p class=\"muted\">Add <code>?setup_token=...</code> to the URL (same value as \
+         <code>setup_token</code> in config.toml), or open from the machine itself.</p>"
+            .to_string()
+    };
+    let body = format!(
+        "<div class=\"login-wrap\"><div class=\"pix-panel login-card\">\
+         <div class=\"login-brand\">{}<span>DESERTEMAIL</span></div>\
+         <h1>Setup from this machine</h1>\
+         <p>First-run setup is only open on the local machine by default, so nobody else on the \
+         network can claim your server.</p>{}\
+         <p class=\"muted\">Open <code>http://127.0.0.1:8080/setup</code> in a browser on this host.</p>\
+         </div></div>",
+        CACTUS_SVG, token_hint
+    );
+    Response::html(403, "Forbidden", page_shell("Setup", "", &body))
+}
+
+fn page_setup(
+    cfg: &Config,
+    req: &Request,
+    peer_ip: &str,
+    error: Option<&str>,
+    status: u16,
+) -> Response {
+    if !setup_access_ok(cfg, req, peer_ip, None) {
+        return page_setup_remote_blocked(cfg);
+    }
+    let err = error
+        .map(|e| format!("<p class=\"err\">{}</p>", esc(e)))
+        .unwrap_or_default();
+    let domain_prefill = cfg.primary_domain();
+    let token_field = if !cfg.setup_token.is_empty() && !is_loopback_peer(peer_ip) {
+        let pre = req
+            .query
+            .get("setup_token")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        format!(
+            "<input type=\"hidden\" name=\"setup_token\" value=\"{}\">",
+            esc(pre)
+        )
+    } else {
+        String::new()
+    };
+    let body = format!(
+        "<div class=\"login-wrap\"><div class=\"pix-panel login-card\" style=\"max-width:26rem\">\
+         <div class=\"login-brand\">{}<span>DESERTEMAIL</span></div>\
+         <h1>Welcome to DesertEmail</h1>\
+         <p class=\"muted\" style=\"text-align:center;margin-top:-.35rem\">Create your admin account — one-time setup.</p>\
+         {}\
+         <form method=\"post\" action=\"/setup\" autocomplete=\"on\">\
+         {}\
+         <label>Username</label>\
+         <input type=\"text\" name=\"username\" value=\"admin\" autofocus required autocomplete=\"username\">\
+         <label>Password <span class=\"muted\">(at least 8 characters)</span></label>\
+         <input type=\"password\" name=\"password\" id=\"setup-pass\" required minlength=\"8\" autocomplete=\"new-password\">\
+         <label>Confirm password</label>\
+         <input type=\"password\" name=\"password2\" id=\"setup-pass2\" required minlength=\"8\" autocomplete=\"new-password\">\
+         <p class=\"muted\" style=\"margin:.35rem 0 0\">\
+         <label style=\"display:inline;font-weight:500;text-transform:none;letter-spacing:0\">\
+         <input type=\"checkbox\" id=\"setup-show\" style=\"width:auto;display:inline;margin-right:.35rem\" \
+         onchange=\"var p=document.getElementById('setup-pass'),q=document.getElementById('setup-pass2');\
+         var t=this.checked?'text':'password';p.type=t;q.type=t;\">Show passwords</label></p>\
+         <label>Primary domain</label>\
+         <input type=\"text\" name=\"domain\" value=\"{}\" required autocomplete=\"off\">\
+         <p class=\"muted\">Used for your email addresses (e.g. admin@domain). You can change DNS later.</p>\
+         <p><button type=\"submit\">Create admin account</button></p></form></div></div>",
+        CACTUS_SVG,
+        err,
+        token_field,
+        esc(&domain_prefill)
+    );
+    let reason = if status == 429 {
+        "Too Many Requests"
+    } else if status == 403 {
+        "Forbidden"
+    } else {
+        "OK"
+    };
+    Response::html(status, reason, page_shell("Setup", "", &body))
+}
+
+fn handle_setup(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
+    if !ratelimit::check_allowed(peer_ip) {
+        return page_setup(
+            cfg,
+            req,
+            peer_ip,
+            Some("Too many attempts, try later"),
+            429,
+        );
+    }
+    let form = form_body(req);
+    let form_token = form.get("setup_token").map(|s| s.as_str());
+    if !setup_access_ok(cfg, req, peer_ip, form_token) {
+        ratelimit::record_failure(peer_ip);
+        return page_setup_remote_blocked(cfg);
+    }
+    if !same_origin_ok(req) {
+        return page_setup(
+            cfg,
+            req,
+            peer_ip,
+            Some("Cross-origin request blocked"),
+            200,
+        );
+    }
+    // Re-check: race with another setup POST.
+    if !cfg.setup_pending() {
+        return Response::redirect("/login");
+    }
+    let username = form.get("username").map(|s| s.trim()).unwrap_or("");
+    let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
+    let password2 = form.get("password2").map(|s| s.as_str()).unwrap_or("");
+    let domain = form.get("domain").map(|s| s.trim()).unwrap_or("");
+    if username.is_empty() {
+        return page_setup(cfg, req, peer_ip, Some("Username required"), 200);
+    }
+    if password.len() < 8 {
+        return page_setup(
+            cfg,
+            req,
+            peer_ip,
+            Some("Password must be at least 8 characters"),
+            200,
+        );
+    }
+    if password != password2 {
+        return page_setup(cfg, req, peer_ip, Some("Passwords do not match"), 200);
+    }
+    if domain.is_empty() {
+        return page_setup(cfg, req, peer_ip, Some("Domain required"), 200);
+    }
+    let user_owned = username.to_string();
+    let pass_owned = password.to_string();
+    let domain_owned = domain.to_string();
+    match persist_and_reload(cfg, |c| {
+        useredit::complete_setup(c, &user_owned, &pass_owned, &domain_owned)
+    }) {
+        Ok(()) => {
+            ratelimit::record_success(peer_ip);
+            let user = user_owned.to_lowercase();
+            let token = make_session_token(&user);
+            set_session(&token, &user);
+            util::log_event!(
+                "info",
+                "first-run setup complete",
+                "event" => "setup_complete",
+                "user" => user.as_str(),
+                "domain" => domain_owned.as_str()
+            );
+            Response::redirect("/").with_cookie(&session_cookie(&token, secure))
+        }
+        Err(e) => {
+            ratelimit::record_failure(peer_ip);
+            page_setup(cfg, req, peer_ip, Some(&e), 200)
         }
     }
 }
@@ -996,7 +1209,10 @@ fn page_login(error: Option<&str>, status: u16) -> Response {
     let body = format!(
         "<div class=\"login-wrap\"><div class=\"pix-panel login-card\">\
          <div class=\"login-brand\">{}<span>DESERTEMAIL</span></div>\
-         <h1>Login</h1>{}<form method=\"post\" action=\"/login\">\
+         <h1>Login</h1>\
+         <p class=\"muted\" style=\"text-align:center;margin-top:-.35rem;font-size:.85rem\">\
+         Credentials were chosen during setup</p>\
+         {}<form method=\"post\" action=\"/login\">\
          <label>Username</label><input type=\"text\" name=\"username\" autofocus required autocomplete=\"username\">\
          <label>Password</label><input type=\"password\" name=\"password\" required autocomplete=\"current-password\">\
          <p><button type=\"submit\">Sign in</button></p></form></div></div>",
@@ -1052,12 +1268,7 @@ fn user_from_addr(cfg: &Config, user: &str) -> String {
     if user.contains('@') {
         user.to_string()
     } else {
-        let domain = cfg
-            .domains
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or("localhost");
-        format!("{}@{}", user, domain)
+        format!("{}@{}", user, cfg.primary_domain())
     }
 }
 
@@ -1494,11 +1705,7 @@ fn build_rfc5322_message(
     body: &str,
     cfg: &Config,
 ) -> Vec<u8> {
-    let domain = cfg
-        .domains
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("localhost");
+    let domain = cfg.primary_domain();
     let date = util::rfc2822_date(util::now_secs());
     let msg_id = format!(
         "<{}.{}@{}>",
@@ -1591,7 +1798,7 @@ fn deliver_like_submission(
 // ---------------------------------------------------------------------------
 
 fn is_admin(cfg: &Config, user: &str) -> bool {
-    match &cfg.admin_user {
+    match cfg.admin_user_name() {
         Some(a) if !a.is_empty() => a.eq_ignore_ascii_case(user),
         _ => false,
     }
@@ -1599,7 +1806,11 @@ fn is_admin(cfg: &Config, user: &str) -> bool {
 
 fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
     if !is_admin(cfg, user) {
-        let body = if cfg.admin_user.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+        let body = if cfg
+            .admin_user_name()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+        {
             "<h1>Admin</h1><p class=\"err\">Admin page is disabled (admin_user not set).</p>"
                 .to_string()
         } else {
@@ -1609,7 +1820,7 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
     }
 
     let domains: String = cfg
-        .domains
+        .domains_list()
         .iter()
         .map(|d| format!("<li>{}</li>", esc(d)))
         .collect();
@@ -1865,5 +2076,14 @@ mod tests {
             "mail.example.com"
         ));
         assert!(!origin_matches_host("https://evil.com", "mail.example.com"));
+    }
+
+    #[test]
+    fn loopback_peer_detection() {
+        assert!(is_loopback_peer("127.0.0.1"));
+        assert!(is_loopback_peer("::1"));
+        assert!(is_loopback_peer("::ffff:127.0.0.1"));
+        assert!(!is_loopback_peer("192.168.1.1"));
+        assert!(!is_loopback_peer("10.0.0.2"));
     }
 }

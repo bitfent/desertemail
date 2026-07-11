@@ -14,7 +14,8 @@ pub const DEFAULT_MAX_MESSAGE_BYTES: u64 = 25 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub domains: Vec<String>,
+    /// Accepted domains (live-reloadable for first-run setup).
+    pub domains: Arc<RwLock<Vec<String>>>,
     pub data_dir: String,
     pub smtp_listen: String,
     pub submission_listen: String,
@@ -39,7 +40,11 @@ pub struct Config {
     /// HTTP webmail/admin listen address. Empty string disables the web UI.
     pub web_listen: String,
     /// Login name allowed to access /admin. None or empty disables admin page.
-    pub admin_user: Option<String>,
+    /// Live-reloadable so first-run setup can enable admin without restart.
+    pub admin_user: Arc<RwLock<Option<String>>>,
+    /// Optional token allowing remote (non-loopback) first-run setup via
+    /// `?setup_token=` / form field. Empty disables remote setup.
+    pub setup_token: String,
     /// PEM certificate chain for TLS (STARTTLS + implicit listeners).
     pub tls_cert_file: Option<String>,
     /// PEM private key (PKCS#8 or RSA) for TLS.
@@ -119,7 +124,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            domains: vec!["localhost".into()],
+            domains: Arc::new(RwLock::new(vec!["localhost".into()])),
             data_dir: "./data".into(),
             smtp_listen: "0.0.0.0:2525".into(),
             submission_listen: "0.0.0.0:2587".into(),
@@ -135,7 +140,8 @@ impl Default for Config {
             dkim_key_file: None,
             dkim_key: None,
             web_listen: "0.0.0.0:8080".into(),
-            admin_user: None,
+            admin_user: Arc::new(RwLock::new(None)),
+            setup_token: String::new(),
             tls_cert_file: None,
             tls_key_file: None,
             smtps_listen: String::new(),
@@ -232,7 +238,7 @@ impl Config {
 
             match (section.as_str(), key.as_str()) {
                 ("", "domains") => {
-                    cfg.domains = parse_list(&val);
+                    *cfg.domains.write().unwrap_or_else(|e| e.into_inner()) = parse_list(&val);
                 }
                 ("", "data_dir") => cfg.data_dir = val,
                 ("", "smtp_listen") => cfg.smtp_listen = val,
@@ -250,12 +256,14 @@ impl Config {
                 ("", "dkim_key_file") => cfg.dkim_key_file = Some(val),
                 ("", "web_listen") => cfg.web_listen = val,
                 ("", "admin_user") => {
-                    if val.is_empty() {
-                        cfg.admin_user = None;
+                    let v = if val.is_empty() {
+                        None
                     } else {
-                        cfg.admin_user = Some(val.to_lowercase());
-                    }
+                        Some(val.to_lowercase())
+                    };
+                    *cfg.admin_user.write().unwrap_or_else(|e| e.into_inner()) = v;
                 }
+                ("", "setup_token") => cfg.setup_token = val,
                 ("", "tls_cert_file") => {
                     if val.is_empty() {
                         cfg.tls_cert_file = None;
@@ -347,7 +355,10 @@ impl Config {
             }
         }
 
-        cfg.domains = cfg.domains.into_iter().map(|d| d.to_lowercase()).collect();
+        {
+            let mut doms = cfg.domains.write().unwrap_or_else(|e| e.into_inner());
+            *doms = doms.iter().map(|d| d.to_lowercase()).collect();
+        }
         let mut new_users = HashMap::new();
         for (k, v) in users {
             new_users.insert(k.to_lowercase(), v);
@@ -359,7 +370,7 @@ impl Config {
         *cfg.users.write().unwrap_or_else(|e| e.into_inner()) = new_users;
         *cfg.quotas.write().unwrap_or_else(|e| e.into_inner()) = new_quotas;
         if cfg.acme_domains.is_empty() {
-            cfg.acme_domains = cfg.domains.clone();
+            cfg.acme_domains = cfg.domains_list();
         } else {
             cfg.acme_domains = cfg
                 .acme_domains
@@ -371,7 +382,36 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Reload users + quotas maps from `config_path` (live, no restart).
+    /// Snapshot of configured domains (lowercase).
+    pub fn domains_list(&self) -> Vec<String> {
+        match self.domains.read() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// First configured domain, or `"localhost"`.
+    pub fn primary_domain(&self) -> String {
+        self.domains_list()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "localhost".into())
+    }
+
+    /// Current admin username (if any).
+    pub fn admin_user_name(&self) -> Option<String> {
+        match self.admin_user.read() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// True when no users are configured — first-run web setup is pending.
+    pub fn setup_pending(&self) -> bool {
+        self.user_names().is_empty()
+    }
+
+    /// Reload users + quotas (+ admin_user + domains) from `config_path` (live, no restart).
     pub fn reload_users_quotas(&self) -> Result<(), String> {
         let path = self
             .config_path
@@ -389,6 +429,8 @@ impl Config {
             .read()
             .map_err(|_| "quotas lock poisoned".to_string())?
             .clone();
+        let domains = fresh.domains_list();
+        let admin = fresh.admin_user_name();
         *self
             .users
             .write()
@@ -397,6 +439,16 @@ impl Config {
             .quotas
             .write()
             .map_err(|_| "quotas lock poisoned".to_string())? = quotas;
+        *self
+            .domains
+            .write()
+            .map_err(|_| "domains lock poisoned".to_string())? = domains;
+        *self
+            .admin_user
+            .write()
+            .map_err(|_| "admin_user lock poisoned".to_string())? = admin;
+        // setup_token is only needed while pending; clear live value after first user exists
+        // by re-reading (token may still be on disk but is ignored once users exist).
         Ok(())
     }
 
@@ -504,7 +556,7 @@ impl Config {
             }
             return None;
         }
-        if !self.domains.iter().any(|d| d == &domain) {
+        if !self.is_our_domain(&domain) {
             return None;
         }
         let full = format!("{}@{}", local, domain);
@@ -540,7 +592,8 @@ impl Config {
     }
 
     pub fn is_our_domain(&self, domain: &str) -> bool {
-        self.domains.iter().any(|d| d == &domain.to_lowercase())
+        let domain = domain.to_lowercase();
+        self.domains_list().iter().any(|d| d == &domain)
     }
 }
 
@@ -678,12 +731,23 @@ metrics_token = "secret"
 
     #[test]
     fn foreign_domain_not_resolved() {
-        let mut cfg = Config::default();
-        cfg.domains = vec!["example.com".into()];
-        cfg.catch_all = true;
+        let cfg = Config::default();
+        *cfg.domains.write().unwrap() = vec!["example.com".into()];
+        // catch_all is true by default
         assert!(cfg.resolve_mailbox("a@example.com").is_some());
         assert!(cfg.resolve_mailbox("a@evil.com").is_none());
         assert!(!cfg.is_our_domain("evil.com"));
         assert!(cfg.is_our_domain("example.com"));
+    }
+
+    #[test]
+    fn setup_pending_when_no_users() {
+        let cfg = Config::default();
+        assert!(cfg.setup_pending());
+        cfg.users
+            .write()
+            .unwrap()
+            .insert("admin".into(), "x".into());
+        assert!(!cfg.setup_pending());
     }
 }

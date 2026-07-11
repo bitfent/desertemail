@@ -64,6 +64,7 @@ use_color() {
 }
 
 print_logo() {
+  # Figlet-style DESERTEMAIL + pixel cactus; ≤80 cols, ≤12 lines.
   if use_color; then
     _sand='\033[38;5;180m'
     _orange='\033[38;5;208m'
@@ -76,12 +77,14 @@ print_logo() {
     _rst=''
   fi
   printf '%s\n' ""
-  printf '%s\n' "${_sand}        .    '    .${_rst}"
-  printf '%s\n' "${_orange}    ____|____    DesertEmail${_rst}"
-  printf '%s\n' "${_sand}   /  .---.  \\   lightweight mail server${_rst}"
-  printf '%s\n' "${_cactus}  |  | o o |  |  + simple uninstall${_rst}"
-  printf '%s\n' "${_cactus}   \\  '---'  /${_rst}"
-  printf '%s\n' "${_sand}    '---^---'${_rst}"
+  printf '%s\n' "${_cactus}      .${_rst}"
+  printf '%s\n' "${_cactus}     /|\\  ${_orange} ____  _____ ____  _____ ____ _____ _____ __  __    _    ___ _     ${_rst}"
+  printf '%s\n' "${_cactus}    / | \\ ${_orange}|  _ \\| ____/ ___|| ____|  _ \\_   _| ____|  \\/  |  / \\  |_ _| |    ${_rst}"
+  printf '%s\n' "${_cactus}    \\ | / ${_orange}| | | |  _| \\___ \\|  _| | |_) || | |  _| | |\\/| | / _ \\  | || |    ${_rst}"
+  printf '%s\n' "${_cactus}     \\|/  ${_orange}| |_| | |___ ___) | |___|  _ < | | | |___| |  | |/ ___ \\ | || |___ ${_rst}"
+  printf '%s\n' "${_cactus}      |   ${_orange}|____/|_____|____/|_____|_| \\_\\|_| |_____|_|  |_/_/   \\_\\___|_____|${_rst}"
+  printf '%s\n' "${_cactus}     / \\${_rst}"
+  printf '%s\n' "${_sand}  your own email server — one command${_rst}"
   printf '%s\n' ""
 }
 

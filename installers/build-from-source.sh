@@ -25,6 +25,8 @@ LAUNCHD_PLIST=""
 TMPDIR_INSTALL=""
 INTERACTIVE=1
 SHOW_ADMIN_PASSWORD=0
+# 1 = interactive express: empty [users], finish setup in the browser
+SETUP_VIA_BROWSER=0
 SERVER_STARTED=0
 SYSTEMD_INSTALLED=0
 LAUNCHD_INSTALLED=0
@@ -54,6 +56,7 @@ use_color() {
 }
 
 print_logo() {
+  # Figlet-style DESERTEMAIL + pixel cactus; ≤80 cols, ≤12 lines.
   if use_color; then
     _sand='\033[38;5;180m'
     _orange='\033[38;5;208m'
@@ -66,12 +69,14 @@ print_logo() {
     _rst=''
   fi
   printf '%s\n' ""
-  printf '%s\n' "${_sand}        .    '    .${_rst}"
-  printf '%s\n' "${_orange}    ____|____    DesertEmail${_rst}"
-  printf '%s\n' "${_sand}   /  .---.  \\   lightweight mail server${_rst}"
-  printf '%s\n' "${_cactus}  |  | o o |  |  + simple install${_rst}"
-  printf '%s\n' "${_cactus}   \\  '---'  /${_rst}"
-  printf '%s\n' "${_sand}    '---^---'${_rst}"
+  printf '%s\n' "${_cactus}      .${_rst}"
+  printf '%s\n' "${_cactus}     /|\\  ${_orange} ____  _____ ____  _____ ____ _____ _____ __  __    _    ___ _     ${_rst}"
+  printf '%s\n' "${_cactus}    / | \\ ${_orange}|  _ \\| ____/ ___|| ____|  _ \\_   _| ____|  \\/  |  / \\  |_ _| |    ${_rst}"
+  printf '%s\n' "${_cactus}    \\ | / ${_orange}| | | |  _| \\___ \\|  _| | |_) || | |  _| | |\\/| | / _ \\  | || |    ${_rst}"
+  printf '%s\n' "${_cactus}     \\|/  ${_orange}| |_| | |___ ___) | |___|  _ < | | | |___| |  | |/ ___ \\ | || |___ ${_rst}"
+  printf '%s\n' "${_cactus}      |   ${_orange}|____/|_____|____/|_____|_| \\_\\|_| |_____|_|  |_/_/   \\_\\___|_____|${_rst}"
+  printf '%s\n' "${_cactus}     / \\${_rst}"
+  printf '%s\n' "${_sand}  your own email server — one command${_rst}"
   printf '%s\n' ""
 }
 
@@ -206,7 +211,11 @@ is_darwin() {
 }
 
 web_url() {
-  printf '%s' "http://127.0.0.1:8080"
+  if [ "${SETUP_VIA_BROWSER:-0}" -eq 1 ]; then
+    printf '%s' "http://127.0.0.1:8080/setup"
+  else
+    printf '%s' "http://127.0.0.1:8080"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -496,6 +505,8 @@ ensure_path() {
 # ---------------------------------------------------------------------------
 
 write_config() {
+  # Args: domain admin password data_dir web_listen smtp sub imap dkim_key
+  # If admin or password is empty → setup-pending config (empty [users], no admin_user).
   _domain=$1
   _admin=$2
   _password=$3
@@ -506,8 +517,6 @@ write_config() {
   _imap=$8
   _dkim_key=$9
 
-  _esc_pw=$(toml_escape "${_password}")
-  _esc_admin=$(toml_escape "${_admin}")
   _esc_domain=$(toml_escape "${_domain}")
   _esc_data=$(toml_escape "${_data_dir}")
   _esc_web=$(toml_escape "${_web_listen}")
@@ -523,16 +532,24 @@ write_config() {
     printf 'submission_listen = "%s"\n' "${_esc_sub}"
     printf 'imap_listen = "%s"\n' "${_esc_imap}"
     printf 'web_listen = "%s"\n' "${_esc_web}"
-    printf 'admin_user = "%s"\n' "${_esc_admin}"
     printf 'catch_all = true\n'
-    printf 'default_password = "%s"\n' "${_esc_pw}"
+    if [ -n "${_admin}" ] && [ -n "${_password}" ]; then
+      _esc_pw=$(toml_escape "${_password}")
+      _esc_admin=$(toml_escape "${_admin}")
+      printf 'admin_user = "%s"\n' "${_esc_admin}"
+      printf 'default_password = "%s"\n' "${_esc_pw}"
+    fi
     if [ -n "${_dkim_key}" ]; then
       _esc_dkim=$(toml_escape "${_dkim_key}")
       printf 'dkim_selector = "mail"\n'
       printf 'dkim_key_file = "%s"\n' "${_esc_dkim}"
     fi
     printf '\n[users]\n'
-    printf '"%s" = "%s"\n' "${_esc_admin}" "${_esc_pw}"
+    if [ -n "${_admin}" ] && [ -n "${_password}" ]; then
+      _esc_pw=$(toml_escape "${_password}")
+      _esc_admin=$(toml_escape "${_admin}")
+      printf '"%s" = "%s"\n' "${_esc_admin}" "${_esc_pw}"
+    fi
   } > "${CONFIG_PATH}"
 
   chmod 600 "${CONFIG_PATH}" 2>/dev/null || true
@@ -576,8 +593,8 @@ maybe_generate_dkim() {
 
 configure() {
   info ""
-  info "Recommended settings: domain=localhost, user=admin, random password,"
-  info "  webmail on, high ports (no root), DKIM off."
+  info "Recommended settings: domain=localhost, webmail on, high ports (no root),"
+  info "  DKIM off — create your admin account in the browser after install."
   info ""
 
   _def_domain="${DESERTEMAIL_DOMAIN:-localhost}"
@@ -593,6 +610,7 @@ configure() {
   fi
 
   SHOW_ADMIN_PASSWORD=0
+  SETUP_VIA_BROWSER=0
 
   if [ "${INTERACTIVE}" -eq 1 ]; then
     prompt "Press Enter to install with recommended settings, or type 'custom' for advanced setup" ""
@@ -634,21 +652,20 @@ configure() {
 
         yes_no "Enable DKIM signing?" "N"
         ENABLE_DKIM="${REPLY}"
+        SETUP_VIA_BROWSER=0
         ;;
       *)
         info "Using recommended settings (express install)."
+        info "You will create your admin account in the browser after install."
         DOMAIN="${_def_domain}"
-        ADMIN_USER="${_def_admin}"
-        ADMIN_PASSWORD="${_def_pw}"
+        ADMIN_USER=""
+        ADMIN_PASSWORD=""
         DATA_DIR="${_def_data}"
         WEB_LISTEN="0.0.0.0:8080"
         PORT_SET="high"
         ENABLE_DKIM=n
-        if [ "${_pw_from_env}" -eq 0 ]; then
-          SHOW_ADMIN_PASSWORD=1
-        else
-          SHOW_ADMIN_PASSWORD=0
-        fi
+        SHOW_ADMIN_PASSWORD=0
+        SETUP_VIA_BROWSER=1
         ;;
     esac
   else
@@ -670,6 +687,7 @@ configure() {
     else
       SHOW_ADMIN_PASSWORD=0
     fi
+    SETUP_VIA_BROWSER=0
   fi
 
   apply_port_set
@@ -920,10 +938,9 @@ install_launchd() {
 # ---------------------------------------------------------------------------
 
 web_is_up() {
-  _url=$(web_url)
+  # Probe healthz (always 200, works in setup-pending too) then port.
   if command -v curl >/dev/null 2>&1; then
-    if curl -fsS -o /dev/null --connect-timeout 1 "${_url}/" 2>/dev/null \
-      || curl -fsS -o /dev/null --connect-timeout 1 "${_url}" 2>/dev/null; then
+    if curl -fsS -o /dev/null --connect-timeout 1 "http://127.0.0.1:8080/healthz" 2>/dev/null; then
       return 0
     fi
   fi
@@ -1009,6 +1026,9 @@ maybe_autostart() {
     info "Waiting for webmail at $(web_url) ..."
     if wait_for_web; then
       info "Webmail is up."
+      if [ "${SETUP_VIA_BROWSER:-0}" -eq 1 ]; then
+        info "Finish setup in your browser: create your admin account at $(web_url)"
+      fi
       if open_browser; then
         info "Opened browser to $(web_url)"
       else
@@ -1018,6 +1038,9 @@ maybe_autostart() {
       warn "server did not become ready within ~10s"
       warn "check the log: ${LOG_PATH}"
       warn "start manually: ${BIN_DIR}/${APP_NAME} --config ${CONFIG_PATH}"
+      if [ "${SETUP_VIA_BROWSER:-0}" -eq 1 ]; then
+        warn "then open http://127.0.0.1:8080/setup"
+      fi
     fi
   else
     info "Webmail is disabled; server start was still requested."
@@ -1046,7 +1069,10 @@ print_summary() {
   else
     info " Webmail: disabled"
   fi
-  if [ -n "${ADMIN_USER:-}" ]; then
+  if [ "${SETUP_VIA_BROWSER:-0}" -eq 1 ]; then
+    info " Setup  : Finish setup in your browser: create your admin account at"
+    info "          http://127.0.0.1:8080/setup"
+  elif [ -n "${ADMIN_USER:-}" ]; then
     if [ "${SHOW_ADMIN_PASSWORD}" -eq 1 ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
       info " Login  : ${ADMIN_USER} / ${ADMIN_PASSWORD}"
       info "          (save this password — it will not be shown again)"
@@ -1060,6 +1086,9 @@ print_summary() {
   else
     info " Status : not started"
     info " Start  : ${_bin} --config ${CONFIG_PATH}"
+    if [ "${SETUP_VIA_BROWSER:-0}" -eq 1 ] && [ -n "${WEB_LISTEN:-}" ]; then
+      info " Then   : open http://127.0.0.1:8080/setup to create your admin account"
+    fi
   fi
   if [ "${LAUNCHD_INSTALLED}" -eq 1 ]; then
     info " Service: launchd ${LAUNCHD_LABEL}"
