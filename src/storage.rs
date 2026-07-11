@@ -256,6 +256,82 @@ impl Maildir {
         Ok(())
     }
 
+    /// Atomically move a message into this maildir (same-filesystem rename).
+    /// Preserves the unique base name and Maildir flags; destination uses
+    /// `cur` when the source had flags or was already in cur, otherwise `new`.
+    pub fn take_message(&self, meta: &MessageMeta) -> io::Result<MessageMeta> {
+        let name = meta
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty name"));
+        }
+        let base = base_name(&name);
+        let flags = if meta.in_new {
+            String::new()
+        } else {
+            flags_from_name(&name)
+        };
+        let go_cur = !meta.in_new || !flags.is_empty();
+        let dest_name = if go_cur {
+            if flags.is_empty() {
+                format!("{}{}", base, INFO_SEP)
+            } else {
+                format!("{}{}{}", base, INFO_SEP, flags)
+            }
+        } else {
+            base.clone()
+        };
+        let dest = if go_cur {
+            self.root.join("cur").join(&dest_name)
+        } else {
+            self.root.join("new").join(&dest_name)
+        };
+        // Avoid clobbering an existing file with the same name.
+        let dest = if dest.exists() {
+            let uniq = unique_name();
+            let alt_name = if go_cur {
+                if flags.is_empty() {
+                    format!("{}{}", uniq, INFO_SEP)
+                } else {
+                    format!("{}{}{}", uniq, INFO_SEP, flags)
+                }
+            } else {
+                uniq
+            };
+            if go_cur {
+                self.root.join("cur").join(alt_name)
+            } else {
+                self.root.join("new").join(alt_name)
+            }
+        } else {
+            dest
+        };
+        fs::rename(&meta.path, &dest)?;
+        invalidate_size_cache_for_path(&self.root);
+        if let Some(parent) = meta.path.parent().and_then(|p| p.parent()) {
+            invalidate_size_cache_for_path(parent);
+        }
+        let new_name = dest
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(MessageMeta {
+            path: dest,
+            uid: hash_name(&base_name(&new_name)),
+            size: meta.size,
+            flags,
+            in_new: !go_cur,
+        })
+    }
+
+    /// Move message into another maildir folder (e.g. Trash). Creates dest dirs.
+    pub fn move_to(&self, meta: &MessageMeta, dest: &Maildir) -> io::Result<MessageMeta> {
+        dest.take_message(meta)
+    }
+
     /// Snapshot for IDLE change detection: (mtime of new/ or root, file count).
     pub fn idle_snapshot(&self) -> (u64, u64) {
         let mut count = 0u64;
@@ -593,6 +669,28 @@ mod tests {
         assert!(Maildir::would_exceed_quota(sz, 1, sz)); // exactly full + 1
         assert!(!Maildir::would_exceed_quota(sz, 0, sz));
         assert!(Maildir::would_exceed_quota(sz, 100, 5));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_to_trash_preserves_body() {
+        let dir = std::env::temp_dir().join(format!("de_move_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let data = dir.to_str().unwrap();
+        let inbox = Maildir::open(data, "carol").unwrap();
+        let trash = Maildir::open(data, "carol/.Trash").unwrap();
+        let raw = b"From: a@b\r\nSubject: hello\r\n\r\nbody bytes 123";
+        inbox.deliver(raw, "a@b").unwrap();
+        let msgs = inbox.list_messages().unwrap();
+        assert_eq!(msgs.len(), 1);
+        let orig = inbox.read_message(&msgs[0].path).unwrap();
+        let moved = inbox.move_to(&msgs[0], &trash).unwrap();
+        assert!(moved.path.starts_with(trash.root()));
+        assert_eq!(inbox.list_messages().unwrap().len(), 0);
+        assert_eq!(trash.list_messages().unwrap().len(), 1);
+        let after = trash.read_message(&moved.path).unwrap();
+        assert_eq!(after, orig);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -301,6 +301,10 @@ fn handle_client(
                     reader.get_mut(),
                     "* LIST (\\HasNoChildren) \"/\" \"Drafts\"",
                 )?;
+                write_line(
+                    reader.get_mut(),
+                    "* LIST (\\HasNoChildren) \"/\" \"Trash\"",
+                )?;
                 write_line(reader.get_mut(), &format!("{} OK LIST completed", tag))?;
             }
             ("SELECT" | "EXAMINE", State::Auth { user } | State::Selected { user, .. }) => {
@@ -700,6 +704,8 @@ fn mailbox_path(user: &str, mbox_name: &str) -> String {
         format!("{}/.Sent", user)
     } else if mbox_name.eq_ignore_ascii_case("drafts") {
         format!("{}/.Drafts", user)
+    } else if mbox_name.eq_ignore_ascii_case("trash") {
+        format!("{}/.Trash", user)
     } else {
         format!("{}/{}", user, mbox_name)
     }
