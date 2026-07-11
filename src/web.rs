@@ -613,11 +613,15 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
                 None => return Response::redirect("/login"),
             };
             match (req.method.as_str(), req.path.as_str()) {
-                ("GET", "/") => page_inbox(cfg, &user),
+                ("GET", "/") => page_inbox(cfg, &user, req),
                 ("GET", "/msg") => page_message(cfg, &user, req),
                 ("GET", "/compose") => page_compose_for(&user, None, None),
                 ("POST", "/send") => handle_send(cfg, &user, req),
                 ("GET", "/sent") => page_sent(cfg, &user),
+                ("GET", "/dns") => page_dns(cfg, &user, None, None),
+                ("POST", "/dns/check") => handle_dns_check(cfg, &user, req, peer_ip),
+                ("POST", "/dns/dkim/generate") => handle_dns_dkim_generate(cfg, &user, req),
+                ("POST", "/dns/settings") => handle_dns_settings(cfg, &user, req),
                 ("GET", "/admin") => page_admin(cfg, &user, None),
                 ("POST", "/admin") => handle_admin_post(cfg, &user, req),
                 ("POST", "/admin/user/add") => handle_admin_user_add(cfg, &user, req),
@@ -820,7 +824,13 @@ fn handle_setup(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Res
                 "user" => user.as_str(),
                 "domain" => domain_owned.as_str()
             );
-            Response::redirect("/").with_cookie(&session_cookie(&token, secure))
+            // Real domains → DNS getting-started; localhost → inbox with banner.
+            let dest = if domain_owned.eq_ignore_ascii_case("localhost") {
+                "/?localhost_banner=1"
+            } else {
+                "/dns"
+            };
+            Response::redirect(dest).with_cookie(&session_cookie(&token, secure))
         }
         Err(e) => {
             ratelimit::record_failure(peer_ip);
@@ -958,9 +968,37 @@ ul li::before{content:"■ ";color:var(--accent)}
 code{background:var(--code-bg);color:var(--code-ink);padding:.1rem .35rem;font-size:.9em}
 .err{color:#b00000;font-weight:700}
 .ok{color:#2d6a1e;font-weight:700}
+.warn{color:#9a6b00;font-weight:700}
 @media (prefers-color-scheme: dark){
-  .err{color:#ff8a80}.ok{color:#81c784}
+  .err{color:#ff8a80}.ok{color:#81c784}.warn{color:#ffd54f}
 }
+.banner{
+  background:var(--panel);border:4px solid var(--border);
+  box-shadow:4px 4px 0 0 var(--accent-dark);padding:.75rem 1rem;margin:0 0 1rem;
+}
+.banner a.dismiss{float:right;border-bottom:none;font-size:.85rem}
+.dns-table{width:100%;border-collapse:collapse;font-size:.88rem}
+.dns-table th,.dns-table td{
+  border:2px solid var(--border);padding:.45rem .55rem;text-align:left;vertical-align:top;
+  word-break:break-word;
+}
+.dns-table th{background:var(--code-bg);color:var(--code-ink);text-transform:uppercase;font-size:.72rem;letter-spacing:.06em}
+.dns-table code,.dns-val{font-size:.82rem;word-break:break-all}
+.dns-status{font-weight:700;white-space:nowrap}
+.dns-status.ok{color:#2d6a1e}
+.dns-status.fail{color:#b00000}
+.dns-status.warn{color:#9a6b00}
+@media (prefers-color-scheme: dark){
+  .dns-status.ok{color:#81c784}.dns-status.fail{color:#ff8a80}.dns-status.warn{color:#ffd54f}
+}
+button.copy-btn,button.btn-secondary{
+  min-height:36px;padding:.3rem .65rem;font-size:.78rem;margin:.15rem .15rem .15rem 0;
+  background:var(--panel);color:var(--ink);border:3px solid var(--border);
+  box-shadow:2px 2px 0 0 var(--accent-dark);cursor:pointer;font-family:inherit;font-weight:700;
+  text-transform:uppercase;letter-spacing:.04em;
+}
+button.copy-btn:hover,button.btn-secondary:hover{background:var(--accent);color:#2a1a08}
+.inline-form{display:inline}
 
 /* --- sticky 8-bit navbar --- */
 .site-nav{
@@ -1172,6 +1210,7 @@ fn page_shell(title: &str, user: &str, body: &str) -> String {
              <li><a href=\"/\">Inbox</a></li>\
              <li><a href=\"/compose\">Compose</a></li>\
              <li><a href=\"/sent\">Sent</a></li>\
+             <li><a href=\"/dns\">DNS</a></li>\
              <li><a href=\"/admin\">Admin</a></li>\
              <li><a href=\"/logout\">Logout</a></li>\
              <li class=\"nav-user\">{}</li>\
@@ -1276,15 +1315,40 @@ fn user_from_addr(cfg: &Config, user: &str) -> String {
 // Inbox / Sent
 // ---------------------------------------------------------------------------
 
-fn page_inbox(cfg: &Config, user: &str) -> Response {
-    list_folder_page(cfg, user, "Inbox", false)
+fn page_inbox(cfg: &Config, user: &str, req: &Request) -> Response {
+    // Banner when redirected from setup (?localhost_banner=1) unless dismissed.
+    let dismissed = cookie_value(req, "dismiss_localhost").as_deref() == Some("1")
+        || req.query.get("dismiss_localhost").map(|s| s.as_str()) == Some("1");
+    let banner = if req.query.get("localhost_banner").map(|s| s.as_str()) == Some("1") && !dismissed
+    {
+        Some(
+            "<div class=\"banner\" id=\"localhost-banner\">\
+             <a class=\"dismiss\" href=\"/?dismiss_localhost=1\">dismiss</a>\
+             Using <strong>localhost</strong> — set a real domain in \
+             <a href=\"/dns\">DNS settings</a> to receive internet mail.\
+             </div>",
+        )
+    } else {
+        None
+    };
+    let mut resp = list_folder_page(cfg, user, "Inbox", false, banner);
+    if req.query.get("dismiss_localhost").map(|s| s.as_str()) == Some("1") {
+        resp = resp.with_cookie("dismiss_localhost=1; Path=/; SameSite=Lax; Max-Age=31536000");
+    }
+    resp
 }
 
 fn page_sent(cfg: &Config, user: &str) -> Response {
-    list_folder_page(cfg, user, "Sent", true)
+    list_folder_page(cfg, user, "Sent", true, None)
 }
 
-fn list_folder_page(cfg: &Config, user: &str, title: &str, sent: bool) -> Response {
+fn list_folder_page(
+    cfg: &Config,
+    user: &str,
+    title: &str,
+    sent: bool,
+    banner: Option<&str>,
+) -> Response {
     let mb = mailbox_name(cfg, user);
     let path = if sent {
         format!("{}/.Sent", mb)
@@ -1344,14 +1408,472 @@ fn list_folder_page(cfg: &Config, user: &str, title: &str, sent: bool) -> Respon
         }
     }
 
+    let banner_html = banner.unwrap_or("");
     let body = format!(
-        "<h1>{}</h1><table class=\"msg-list\"><thead><tr>\
+        "{}<h1>{}</h1><table class=\"msg-list\"><thead><tr>\
          <th>Subject</th><th>From</th><th>Date</th><th>Status</th></tr></thead>\
          <tbody>{}</tbody></table>",
+        banner_html,
         esc(title),
         rows
     );
     Response::html(200, "OK", page_shell(title, user, &body))
+}
+
+// ---------------------------------------------------------------------------
+// DNS / Getting started
+// ---------------------------------------------------------------------------
+
+/// One DNS record the operator should publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsRecordAdvice {
+    pub rtype: &'static str,
+    pub name: String,
+    pub value: String,
+    pub kind: &'static str,
+}
+
+/// Build the expected DNS records for a domain (pure; unit-tested).
+pub fn build_dns_records(
+    domain: &str,
+    mailhost: &str,
+    public_ip: Option<&str>,
+    selector: &str,
+    dkim_txt: Option<&str>,
+) -> Vec<DnsRecordAdvice> {
+    let domain = domain.trim().trim_end_matches('.').to_lowercase();
+    let mailhost = mailhost.trim().trim_end_matches('.').to_lowercase();
+    let selector = if selector.trim().is_empty() {
+        "mail".to_string()
+    } else {
+        selector.trim().to_lowercase()
+    };
+    let mut out = Vec::new();
+    out.push(DnsRecordAdvice {
+        rtype: "MX",
+        name: format!("{}.", domain),
+        value: format!("10 {}.", mailhost),
+        kind: "mx",
+    });
+    let a_val = public_ip
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "YOUR_PUBLIC_IP".into());
+    out.push(DnsRecordAdvice {
+        rtype: "A",
+        name: format!("{}.", mailhost),
+        value: a_val,
+        kind: "a",
+    });
+    out.push(DnsRecordAdvice {
+        rtype: "TXT",
+        name: format!("{}.", domain),
+        value: "v=spf1 mx ~all".into(),
+        kind: "spf",
+    });
+    let dkim_name = format!("{}._domainkey.{}.", selector, domain);
+    let dkim_val = dkim_txt
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "(generate a DKIM key below)".into());
+    out.push(DnsRecordAdvice {
+        rtype: "TXT",
+        name: dkim_name,
+        value: dkim_val,
+        kind: "dkim",
+    });
+    out.push(DnsRecordAdvice {
+        rtype: "TXT",
+        name: format!("_dmarc.{}.", domain),
+        value: format!("v=DMARC1; p=none; rua=mailto:admin@{}", domain),
+        kind: "dmarc",
+    });
+    out
+}
+
+fn page_dns(
+    cfg: &Config,
+    user: &str,
+    flash: Option<&str>,
+    checks: Option<&[crate::doctor::Check]>,
+) -> Response {
+    if !is_admin(cfg, user) {
+        let body = "<h1>DNS</h1><p class=\"err\">Access denied — admin only. \
+                    Ask your server admin to publish DNS records.</p>";
+        return Response::html(403, "Forbidden", page_shell("DNS", user, body));
+    }
+
+    let domains = cfg.domains_list();
+    let primary = cfg.primary_domain();
+    let mailhost = crate::doctor::mail_host_for_ui(cfg);
+    let public_ip = crate::doctor::suggest_public_ip(cfg);
+    let selector = cfg.dkim_selector();
+    let dkim_key = cfg.dkim_key_clone();
+    let dkim_txt = dkim_key.as_ref().map(|k| crate::dkim::dns_txt_record(k));
+    let has_dkim = dkim_key.is_some();
+
+    let flash_html = flash
+        .map(|f| {
+            if f.starts_with("error:") {
+                format!("<p class=\"err\">{}</p>", esc(f.trim_start_matches("error:")))
+            } else {
+                format!("<p class=\"ok\">{}</p>", esc(f))
+            }
+        })
+        .unwrap_or_default();
+
+    let ip_hint = match &public_ip {
+        Some(ip) => format!("Detected address (egress/A): <code>{}</code>", esc(ip)),
+        None => "Could not detect your public IP — fill in the real address from your VPS/router \
+                 when publishing the A record."
+            .to_string(),
+    };
+
+    let mut rows = String::new();
+    for domain in &domains {
+        let records = build_dns_records(
+            domain,
+            &mailhost,
+            public_ip.as_deref(),
+            &selector,
+            dkim_txt.as_deref(),
+        );
+        for rec in &records {
+            let status_cell = match checks {
+                Some(cs) => dns_status_for(cs, rec, domain),
+                None => "<span class=\"muted\">—</span>".to_string(),
+            };
+            let copy_payload = format!("{} {} {}", rec.rtype, rec.name, rec.value);
+            rows.push_str(&format!(
+                "<tr>\
+                 <td data-label=\"Domain\">{}</td>\
+                 <td data-label=\"Type\"><strong>{}</strong></td>\
+                 <td data-label=\"Name\"><code>{}</code></td>\
+                 <td data-label=\"Value\"><code class=\"dns-val\">{}</code></td>\
+                 <td data-label=\"Status\">{}</td>\
+                 <td><button type=\"button\" class=\"copy-btn\" data-copy=\"{}\">Copy</button></td>\
+                 </tr>",
+                esc(domain),
+                esc(rec.rtype),
+                esc(&rec.name),
+                esc(&rec.value),
+                status_cell,
+                esc(&copy_payload)
+            ));
+        }
+    }
+    if rows.is_empty() {
+        rows.push_str(
+            "<tr class=\"empty\"><td colspan=\"6\">No domains configured — add one below.</td></tr>",
+        );
+    }
+
+    let dkim_panel = if has_dkim {
+        let path = cfg
+            .dkim_key_file_path()
+            .unwrap_or_else(|| "(in memory)".into());
+        format!(
+            "<p class=\"ok\">DKIM key loaded (selector <code>{}</code>, file <code>{}</code>).</p>\
+             <form method=\"post\" action=\"/dns/dkim/generate\" class=\"inline-form\" \
+             onsubmit=\"return confirm('Regenerate DKIM key? You must re-publish the TXT record.');\">\
+             <input type=\"hidden\" name=\"confirm\" value=\"1\">\
+             <button type=\"submit\" class=\"btn-secondary\">Regenerate DKIM key</button></form>",
+            esc(&selector),
+            esc(&path)
+        )
+    } else {
+        "<p class=\"warn\">No DKIM key yet — generate one so outbound mail can be signed.</p>\
+         <form method=\"post\" action=\"/dns/dkim/generate\">\
+         <button type=\"submit\">Generate DKIM key</button></form>"
+            .to_string()
+    };
+
+    let body = format!(
+        "<h1>DNS</h1>{}\
+         <p>Add these records at your DNS provider (Cloudflare, Namecheap, Route&nbsp;53, …). \
+         Then click <strong>Check DNS</strong>. Propagation can take minutes to hours.</p>\
+         <p class=\"muted\">{}</p>\
+         <div class=\"pix-panel\">\
+         <h2>Records to publish</h2>\
+         <div class=\"table-scroll\">\
+         <table class=\"dns-table\"><thead><tr>\
+         <th>Domain</th><th>Type</th><th>Name</th><th>Value</th><th>Check</th><th></th>\
+         </tr></thead><tbody>{}</tbody></table></div>\
+         <form method=\"post\" action=\"/dns/check\" style=\"margin-top:1rem\">\
+         <button type=\"submit\">Check DNS</button></form>\
+         </div>\
+         <div class=\"pix-panel\"><h2>DKIM key</h2>{}</div>\
+         <div class=\"pix-panel\"><h2>Mail host &amp; domain</h2>\
+         <form method=\"post\" action=\"/dns/settings\">\
+         <label>Public mail hostname (MX target)</label>\
+         <input type=\"text\" name=\"public_host\" value=\"{}\" \
+         placeholder=\"mail.example.com\" autocomplete=\"off\">\
+         <label>Primary domain</label>\
+         <input type=\"text\" name=\"domain\" value=\"{}\" required autocomplete=\"off\">\
+         <p class=\"muted\">Changing the domain updates <code>domains</code> in config (live). \
+         User accounts on the old domain keep working if you still accept that domain.</p>\
+         <p><button type=\"submit\">Save settings</button></p></form>\
+         <p class=\"muted\">Also see <a href=\"/admin\">Admin</a> for users and queue.</p>\
+         </div>\
+         <script>(function(){{\
+         document.querySelectorAll('button.copy-btn').forEach(function(b){{\
+           b.addEventListener('click',function(){{\
+             var t=b.getAttribute('data-copy')||'';\
+             if(navigator.clipboard&&navigator.clipboard.writeText){{\
+               navigator.clipboard.writeText(t).then(function(){{b.textContent='Copied';\
+               setTimeout(function(){{b.textContent='Copy'}},1200)}});\
+             }} else {{\
+               var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);\
+               a.select();try{{document.execCommand('copy');b.textContent='Copied'}}catch(e){{}}\
+               document.body.removeChild(a);\
+               setTimeout(function(){{b.textContent='Copy'}},1200);\
+             }}\
+           }});\
+         }});\
+         }})();</script>",
+        flash_html,
+        ip_hint,
+        rows,
+        dkim_panel,
+        esc(&mailhost),
+        esc(&primary)
+    );
+    Response::html(200, "OK", page_shell("DNS", user, &body))
+}
+
+fn dns_status_for(
+    checks: &[crate::doctor::Check],
+    rec: &DnsRecordAdvice,
+    domain: &str,
+) -> String {
+    use crate::doctor::Status;
+    let needle = match rec.kind {
+        "mx" => format!("MX {}", domain),
+        "a" => format!("A/AAAA {}", rec.name.trim_end_matches('.')),
+        "spf" => format!("SPF {}", domain),
+        "dkim" => format!("DKIM {}", domain),
+        "dmarc" => format!("DMARC {}", domain),
+        _ => String::new(),
+    };
+    let found = checks.iter().find(|c| {
+        c.name == needle
+            || (rec.kind == "dkim" && c.name.starts_with(&format!("DKIM {}", domain)))
+            || (rec.kind == "a" && c.name.starts_with("A/AAAA "))
+    });
+    match found {
+        Some(c) => {
+            let cls = match c.status {
+                Status::Ok => "ok",
+                Status::Warn => "warn",
+                Status::Fail => "fail",
+            };
+            let label = match c.status {
+                Status::Ok => "OK",
+                Status::Warn => "WARN",
+                Status::Fail => "FAIL",
+            };
+            format!(
+                "<span class=\"dns-status {}\">{}</span><br><span class=\"muted\">{}</span>",
+                cls,
+                label,
+                esc(&truncate_str(&c.detail, 160))
+            )
+        }
+        None => "<span class=\"muted\">—</span>".to_string(),
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max])
+    }
+}
+
+fn handle_dns_check(cfg: &Config, user: &str, req: &Request, peer_ip: &str) -> Response {
+    if !is_admin(cfg, user) {
+        return page_dns(cfg, user, Some("error: access denied"), None);
+    }
+    if !same_origin_ok(req) {
+        return page_dns(cfg, user, Some("error: cross-origin request blocked"), None);
+    }
+    if !ratelimit::check_allowed(peer_ip) {
+        return page_dns(
+            cfg,
+            user,
+            Some("error: too many requests — wait a moment and retry"),
+            None,
+        );
+    }
+    // Light rate limit: count DNS check as a "failure" slot to throttle automated abuse.
+    ratelimit::record_failure(peer_ip);
+
+    let host = crate::doctor::mail_host_for_ui(cfg);
+    let public_ip = crate::doctor::suggest_public_ip(cfg);
+    let checks = crate::doctor::run_dns_checks_ui(cfg, &host, public_ip.as_deref());
+    page_dns(
+        cfg,
+        user,
+        Some("DNS check complete (failures are normal until records propagate)."),
+        Some(&checks),
+    )
+}
+
+fn handle_dns_dkim_generate(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_dns(cfg, user, Some("error: access denied"), None);
+    }
+    if !same_origin_ok(req) {
+        return page_dns(cfg, user, Some("error: cross-origin request blocked"), None);
+    }
+    let form = form_body(req);
+    let confirm = form.get("confirm").map(|s| s.as_str()) == Some("1");
+    let existing_path = cfg.dkim_key_file_path();
+    let key_already = cfg.dkim_key_clone().is_some()
+        || existing_path
+            .as_ref()
+            .map(|p| std::path::Path::new(p).is_file())
+            .unwrap_or(false);
+    if key_already && !confirm {
+        return page_dns(
+            cfg,
+            user,
+            Some("error: DKIM key already exists — use Regenerate (requires confirm)"),
+            None,
+        );
+    }
+
+    let key = match crypto::RsaKey::generate(2048) {
+        Ok(k) => k,
+        Err(e) => {
+            return page_dns(
+                cfg,
+                user,
+                Some(&format!("error: key generation failed: {}", e)),
+                None,
+            );
+        }
+    };
+    let pem = key.to_pem_pkcs1();
+    let key_path = match dkim_key_path_for_config(cfg) {
+        Ok(p) => p,
+        Err(e) => return page_dns(cfg, user, Some(&format!("error: {}", e)), None),
+    };
+    if let Some(parent) = key_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return page_dns(
+                cfg,
+                user,
+                Some(&format!("error: cannot create key dir: {}", e)),
+                None,
+            );
+        }
+    }
+    if let Err(e) = std::fs::write(&key_path, pem.as_bytes()) {
+        return page_dns(
+            cfg,
+            user,
+            Some(&format!("error: cannot write key: {}", e)),
+            None,
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let path_str = key_path.to_string_lossy().to_string();
+    let selector = {
+        let s = cfg.dkim_selector();
+        if s.is_empty() {
+            "mail".into()
+        } else {
+            s
+        }
+    };
+    let sel = selector.clone();
+    let path_for_edit = path_str.clone();
+    match persist_and_reload(cfg, |c| useredit::set_dkim_paths(c, &sel, &path_for_edit)) {
+        Ok(()) => {
+            // reload_users_quotas already reloads the key; ensure live even if path differs.
+            cfg.set_dkim_live(&selector, Some(path_str.clone()), Some(key));
+            page_dns(
+                cfg,
+                user,
+                Some(&format!(
+                    "DKIM key written to {} (selector {}). Publish the TXT record below.",
+                    path_str, selector
+                )),
+                None,
+            )
+        }
+        Err(e) => page_dns(cfg, user, Some(&format!("error: {}", e)), None),
+    }
+}
+
+fn dkim_key_path_for_config(cfg: &Config) -> Result<std::path::PathBuf, String> {
+    // Prefer existing path; else $config_dir/dkim.pem (installer PREFIX convention).
+    if let Some(p) = cfg.dkim_key_file_path() {
+        return Ok(std::path::PathBuf::from(p));
+    }
+    let config_path = cfg
+        .config_path
+        .as_ref()
+        .ok_or_else(|| "config_path not set".to_string())?;
+    let dir = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    Ok(dir.join("dkim.pem"))
+}
+
+fn handle_dns_settings(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_dns(cfg, user, Some("error: access denied"), None);
+    }
+    if !same_origin_ok(req) {
+        return page_dns(cfg, user, Some("error: cross-origin request blocked"), None);
+    }
+    let form = form_body(req);
+    let public_host = form
+        .get("public_host")
+        .map(|s| s.trim())
+        .unwrap_or("")
+        .to_string();
+    let domain = form
+        .get("domain")
+        .map(|s| s.trim())
+        .unwrap_or("")
+        .to_string();
+    if domain.is_empty() {
+        return page_dns(cfg, user, Some("error: domain required"), None);
+    }
+    let ph = public_host.clone();
+    let dom = domain.clone();
+    match persist_and_reload(cfg, |c| {
+        let mut out = useredit::set_primary_domain(c, &dom)?;
+        out = useredit::set_public_host(&out, &ph)?;
+        Ok(out)
+    }) {
+        Ok(()) => {
+            cfg.set_public_host_live(&public_host);
+            page_dns(
+                cfg,
+                user,
+                Some(&format!(
+                    "Saved domain={} public_host={}.",
+                    domain,
+                    if public_host.is_empty() {
+                        "(auto)"
+                    } else {
+                        public_host.as_str()
+                    }
+                )),
+                None,
+            )
+        }
+        Err(e) => page_dns(cfg, user, Some(&format!("error: {}", e)), None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1887,7 +2409,8 @@ fn page_admin(cfg: &Config, user: &str, flash: Option<&str>) -> Response {
 
     let body = format!(
         "<h1>Admin</h1>{}\
-         <div class=\"pix-panel\"><h2>Domains</h2><ul>{}</ul></div>\
+         <div class=\"pix-panel\"><h2>Domains</h2><ul>{}</ul>\
+         <p class=\"muted\"><a href=\"/dns\">DNS setup &amp; checks →</a></p></div>\
          <div class=\"pix-panel\"><h2>Users</h2><ul>{}</ul>\
          <h3>Add user</h3>\
          <form method=\"post\" action=\"/admin/user/add\">\
@@ -2085,5 +2608,41 @@ mod tests {
         assert!(is_loopback_peer("::ffff:127.0.0.1"));
         assert!(!is_loopback_peer("192.168.1.1"));
         assert!(!is_loopback_peer("10.0.0.2"));
+    }
+
+    #[test]
+    fn dns_records_for_sample_config() {
+        let recs = build_dns_records(
+            "example.test",
+            "mail.example.test",
+            Some("203.0.113.10"),
+            "mail",
+            Some("v=DKIM1; k=rsa; p=ABCDEF"),
+        );
+        assert_eq!(recs.len(), 5);
+        assert_eq!(recs[0].rtype, "MX");
+        assert_eq!(recs[0].name, "example.test.");
+        assert_eq!(recs[0].value, "10 mail.example.test.");
+        assert_eq!(recs[1].rtype, "A");
+        assert_eq!(recs[1].name, "mail.example.test.");
+        assert_eq!(recs[1].value, "203.0.113.10");
+        assert_eq!(recs[2].kind, "spf");
+        assert_eq!(recs[2].value, "v=spf1 mx ~all");
+        assert_eq!(recs[3].kind, "dkim");
+        assert_eq!(recs[3].name, "mail._domainkey.example.test.");
+        assert_eq!(recs[3].value, "v=DKIM1; k=rsa; p=ABCDEF");
+        assert_eq!(recs[4].kind, "dmarc");
+        assert_eq!(recs[4].name, "_dmarc.example.test.");
+        assert_eq!(
+            recs[4].value,
+            "v=DMARC1; p=none; rua=mailto:admin@example.test"
+        );
+    }
+
+    #[test]
+    fn dns_records_without_ip_or_dkim() {
+        let recs = build_dns_records("example.com", "example.com", None, "mail", None);
+        assert_eq!(recs[1].value, "YOUR_PUBLIC_IP");
+        assert!(recs[3].value.contains("generate"));
     }
 }

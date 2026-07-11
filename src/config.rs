@@ -32,11 +32,15 @@ pub struct Config {
     /// Live user map (username → password or pbkdf2 hash). Shared + reloadable.
     pub users: Arc<RwLock<HashMap<String, String>>>,
     /// DKIM selector (default "mail"). DNS: `<selector>._domainkey.<domain>`
-    pub dkim_selector: String,
-    /// Path to PEM RSA private key for DKIM (PKCS#1 or PKCS#8).
-    pub dkim_key_file: Option<String>,
-    /// Loaded at startup; None if missing/unparseable.
-    pub dkim_key: Option<RsaKey>,
+    /// Live-reloadable when generated/updated from the web DNS page.
+    pub dkim_selector: Arc<RwLock<String>>,
+    /// Path to PEM RSA private key for DKIM (PKCS#1 or PKCS#8). Live-reloadable.
+    pub dkim_key_file: Arc<RwLock<Option<String>>>,
+    /// Loaded at startup / on generate; None if missing/unparseable. Live-reloadable.
+    pub dkim_key: Arc<RwLock<Option<RsaKey>>>,
+    /// Public mail hostname for MX/A guidance (e.g. mail.example.com). Empty = auto.
+    /// Live-reloadable from the web DNS page.
+    pub public_host: Arc<RwLock<String>>,
     /// HTTP webmail/admin listen address. Empty string disables the web UI.
     pub web_listen: String,
     /// Login name allowed to access /admin. None or empty disables admin page.
@@ -136,9 +140,10 @@ impl Default for Config {
             default_password: "changeme".into(),
             allow_default_password_auth: false,
             users: Arc::new(RwLock::new(HashMap::new())),
-            dkim_selector: "mail".into(),
-            dkim_key_file: None,
-            dkim_key: None,
+            dkim_selector: Arc::new(RwLock::new("mail".into())),
+            dkim_key_file: Arc::new(RwLock::new(None)),
+            dkim_key: Arc::new(RwLock::new(None)),
+            public_host: Arc::new(RwLock::new(String::new())),
             web_listen: "0.0.0.0:8080".into(),
             admin_user: Arc::new(RwLock::new(None)),
             setup_token: String::new(),
@@ -252,8 +257,16 @@ impl Config {
                 ("", "allow_default_password_auth") => {
                     cfg.allow_default_password_auth = parse_bool(&val)
                 }
-                ("", "dkim_selector") => cfg.dkim_selector = val,
-                ("", "dkim_key_file") => cfg.dkim_key_file = Some(val),
+                ("", "dkim_selector") => {
+                    *cfg.dkim_selector.write().unwrap_or_else(|e| e.into_inner()) = val;
+                }
+                ("", "dkim_key_file") => {
+                    *cfg.dkim_key_file.write().unwrap_or_else(|e| e.into_inner()) = Some(val);
+                }
+                ("", "public_host") => {
+                    *cfg.public_host.write().unwrap_or_else(|e| e.into_inner()) =
+                        val.trim().trim_end_matches('.').to_lowercase();
+                }
                 ("", "web_listen") => cfg.web_listen = val,
                 ("", "admin_user") => {
                     let v = if val.is_empty() {
@@ -411,7 +424,9 @@ impl Config {
         self.user_names().is_empty()
     }
 
-    /// Reload users + quotas (+ admin_user + domains) from `config_path` (live, no restart).
+    /// Reload users + quotas (+ admin_user + domains + public_host + DKIM paths)
+    /// from `config_path` (live, no restart). Reloads the DKIM key from disk when
+    /// `dkim_key_file` is set.
     pub fn reload_users_quotas(&self) -> Result<(), String> {
         let path = self
             .config_path
@@ -431,6 +446,9 @@ impl Config {
             .clone();
         let domains = fresh.domains_list();
         let admin = fresh.admin_user_name();
+        let public_host = fresh.public_host_name();
+        let dkim_selector = fresh.dkim_selector();
+        let dkim_key_file = fresh.dkim_key_file_path();
         *self
             .users
             .write()
@@ -447,9 +465,87 @@ impl Config {
             .admin_user
             .write()
             .map_err(|_| "admin_user lock poisoned".to_string())? = admin;
+        *self
+            .public_host
+            .write()
+            .map_err(|_| "public_host lock poisoned".to_string())? = public_host;
+        *self
+            .dkim_selector
+            .write()
+            .map_err(|_| "dkim_selector lock poisoned".to_string())? = dkim_selector;
+        *self
+            .dkim_key_file
+            .write()
+            .map_err(|_| "dkim_key_file lock poisoned".to_string())? = dkim_key_file.clone();
+        // Reload key from disk when path is set (or clear when unset).
+        let loaded = if let Some(ref key_path) = dkim_key_file {
+            RsaKey::from_pem_file(Path::new(key_path)).ok()
+        } else {
+            None
+        };
+        *self
+            .dkim_key
+            .write()
+            .map_err(|_| "dkim_key lock poisoned".to_string())? = loaded;
         // setup_token is only needed while pending; clear live value after first user exists
         // by re-reading (token may still be on disk but is ignored once users exist).
         Ok(())
+    }
+
+    /// Configured public mail hostname (may be empty → auto-detect).
+    pub fn public_host_name(&self) -> String {
+        match self.public_host.read() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// Set public mail hostname live (does not persist).
+    pub fn set_public_host_live(&self, host: &str) {
+        let h = host.trim().trim_end_matches('.').to_lowercase();
+        if let Ok(mut g) = self.public_host.write() {
+            *g = h;
+        }
+    }
+
+    /// DKIM selector snapshot.
+    pub fn dkim_selector(&self) -> String {
+        match self.dkim_selector.read() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// DKIM key file path snapshot.
+    pub fn dkim_key_file_path(&self) -> Option<String> {
+        match self.dkim_key_file.read() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// Clone the loaded DKIM key if present.
+    pub fn dkim_key_clone(&self) -> Option<RsaKey> {
+        match self.dkim_key.read() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// Apply DKIM key + paths live (after generate / reload).
+    pub fn set_dkim_live(&self, selector: &str, key_file: Option<String>, key: Option<RsaKey>) {
+        if let Ok(mut g) = self.dkim_selector.write() {
+            *g = selector.trim().to_lowercase();
+            if g.is_empty() {
+                *g = "mail".into();
+            }
+        }
+        if let Ok(mut g) = self.dkim_key_file.write() {
+            *g = key_file;
+        }
+        if let Ok(mut g) = self.dkim_key.write() {
+            *g = key;
+        }
     }
 
     /// Sorted list of configured usernames (no passwords).

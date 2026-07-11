@@ -460,7 +460,7 @@ fn dkim_raw_for_send(cfg: &Config, msg: &QueueMessage) -> Vec<u8> {
     if has_dkim_signature(&msg.raw) {
         return msg.raw.clone();
     }
-    let key = match cfg.dkim_key.as_ref() {
+    let key = match cfg.dkim_key_clone() {
         Some(k) => k,
         None => return msg.raw.clone(),
     };
@@ -468,9 +468,10 @@ fn dkim_raw_for_send(cfg: &Config, msg: &QueueMessage) -> Vec<u8> {
     if domain.is_empty() || !cfg.is_our_domain(&domain) {
         return msg.raw.clone();
     }
-    match dkim::sign_and_prepend(&msg.raw, &domain, &cfg.dkim_selector, key) {
+    let selector = cfg.dkim_selector();
+    match dkim::sign_and_prepend(&msg.raw, &domain, &selector, &key) {
         Some(signed) => {
-            util::log!("queue: DKIM-signed {} (d={}, s={})", msg.id, domain, cfg.dkim_selector);
+            util::log!("queue: DKIM-signed {} (d={}, s={})", msg.id, domain, selector);
             signed
         }
         None => {

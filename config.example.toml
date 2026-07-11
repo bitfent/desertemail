@@ -57,9 +57,14 @@ spam_score_tag = 5           # score >= this => X-Spam-Flag: YES (0 disables tag
 spam_score_reject = 0        # score >= this => 550; 0 = reject disabled
 spam_check_ptr = true        # include missing/mismatched rDNS in spam score
 
+# Public mail hostname used for MX/A guidance in the web DNS page
+# (e.g. mail.example.com). Empty = derive from domain / detection.
+# public_host = "mail.example.com"
+
 # Optional DKIM signing for outbound mail (rsa-sha256, relaxed/relaxed).
 # Generate a key: openssl genrsa -out dkim.pem 2048
-# Publish DNS:    desertemail --dkim-dns example.com
+# Or use the web UI: /dns → Generate DKIM key
+# Publish DNS:    desertemail --dkim-dns example.com  (or copy from /dns)
 # dkim_selector = "mail"
 # dkim_key_file = "dkim.pem"
 

@@ -57,11 +57,13 @@ use_color() {
 
 print_logo() {
   # Figlet-style DESERTEMAIL + pixel cactus; ≤80 cols, ≤12 lines.
+  # POSIX printf %s does NOT interpret \033 in arguments — embed a real ESC byte.
   if use_color; then
-    _sand='\033[38;5;180m'
-    _orange='\033[38;5;208m'
-    _cactus='\033[38;5;107m'
-    _rst='\033[0m'
+    _esc=$(printf '\033')
+    _sand="${_esc}[38;5;180m"
+    _orange="${_esc}[38;5;208m"
+    _cactus="${_esc}[38;5;107m"
+    _rst="${_esc}[0m"
   else
     _sand=''
     _orange=''
@@ -1106,12 +1108,10 @@ print_summary() {
   info "  export PATH=\"${BIN_DIR}:\$PATH\""
   info ""
 
-  if [ -n "${DKIM_KEY:-}" ] && [ -f "${DKIM_KEY}" ]; then
-    info "DNS records to publish for domain '${DOMAIN}':"
-    info "  MX  ${DOMAIN}.  10  <your-server-hostname>."
-    info "  A   <your-server-hostname>.  <your-public-ip>"
-    info "  TXT ${DOMAIN}.  \"v=spf1 mx ~all\""
-    info ""
+  if [ -n "${WEB_LISTEN:-}" ]; then
+    info "Configure DNS in your browser: http://127.0.0.1:8080/dns"
+  elif [ -n "${DKIM_KEY:-}" ] && [ -f "${DKIM_KEY}" ]; then
+    info "DNS: publish MX + A/AAAA + SPF + DKIM for domain '${DOMAIN}'."
     info "DKIM TXT (from binary --dkim-dns):"
     if "${_bin}" --dkim-dns "${DOMAIN}" --config "${CONFIG_PATH}" 2>/dev/null; then
       :

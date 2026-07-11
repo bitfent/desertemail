@@ -90,7 +90,7 @@ pub fn complete_setup(
 }
 
 /// Set or replace a top-level string key (`key = "value"`). Preserves other lines.
-fn set_top_level_string(content: &str, key: &str, value: &str) -> String {
+pub fn set_top_level_string(content: &str, key: &str, value: &str) -> String {
     let key_l = key.to_lowercase();
     let mut out = String::with_capacity(content.len() + 64);
     let mut section = String::new();
@@ -136,7 +136,7 @@ fn set_top_level_string(content: &str, key: &str, value: &str) -> String {
 }
 
 /// Replace top-level `domains = [...]` with a single primary domain (or insert it).
-fn set_domains_primary(content: &str, domain: &str) -> String {
+pub fn set_domains_primary(content: &str, domain: &str) -> String {
     let mut out = String::with_capacity(content.len() + 64);
     let mut section = String::new();
     let mut replaced = false;
@@ -177,6 +177,45 @@ fn set_domains_primary(content: &str, domain: &str) -> String {
         out.push_str(&new_line);
     }
     out
+}
+
+/// Set `public_host` in config.toml.
+pub fn set_public_host(content: &str, host: &str) -> Result<String, String> {
+    let host = host.trim().trim_end_matches('.').to_lowercase();
+    if host.contains(|c: char| c.is_control() || c == '"' || c == '[' || c == ']') {
+        return Err("invalid public_host characters".into());
+    }
+    Ok(set_top_level_string(content, "public_host", &host))
+}
+
+/// Set primary domain (replaces `domains` array with a single entry).
+pub fn set_primary_domain(content: &str, domain: &str) -> Result<String, String> {
+    let domain = domain.trim().to_lowercase();
+    if domain.is_empty() {
+        return Err("domain required".into());
+    }
+    if domain.contains(|c: char| c.is_control() || c == '"' || c == '[' || c == ']') {
+        return Err("invalid domain characters".into());
+    }
+    Ok(set_domains_primary(content, &domain))
+}
+
+/// Set DKIM selector + key file paths in config.toml.
+pub fn set_dkim_paths(content: &str, selector: &str, key_file: &str) -> Result<String, String> {
+    let selector = selector.trim().to_lowercase();
+    if selector.is_empty() {
+        return Err("selector required".into());
+    }
+    if selector.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
+        return Err("invalid selector characters".into());
+    }
+    let key_file = key_file.trim();
+    if key_file.is_empty() {
+        return Err("key file path required".into());
+    }
+    let mut out = set_top_level_string(content, "dkim_selector", &selector);
+    out = set_top_level_string(&out, "dkim_key_file", key_file);
+    Ok(out)
 }
 
 /// Write config atomically (temp file in same directory + rename).

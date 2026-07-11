@@ -1443,8 +1443,8 @@ test_setup_pending_serves_setup() {
     return
   fi
 
-  # POST setup (loopback)
-  _post=$(curl -sS -o "${_dir}/post.out" -w '%{http_code}' -X POST \
+  # POST setup (loopback) — real domain should land on /dns
+  _post=$(curl -sS -D "${_dir}/post.hdr" -o "${_dir}/post.out" -w '%{http_code}' -X POST \
     -H 'Content-Type: application/x-www-form-urlencoded' \
     -H "Host: 127.0.0.1:${_port}" \
     -H "Origin: http://127.0.0.1:${_port}" \
@@ -1452,6 +1452,13 @@ test_setup_pending_serves_setup() {
     "http://127.0.0.1:${_port}/setup" 2>/dev/null || true)
   case "${_post}" in
     302|301)
+      if ! grep -qiE '^[Ll]ocation:[[:space:]]*/dns' "${_dir}/post.hdr"; then
+        kill "${_spid}" 2>/dev/null || true
+        wait "${_spid}" 2>/dev/null || true
+        SERVER_PID=""
+        fail "${_nn}" "setup-pending-serves-setup" "POST /setup should redirect to /dns; headers=$(tr '\n' ' ' <"${_dir}/post.hdr" | head -c 300)"
+        return
+      fi
       ;;
     *)
       kill "${_spid}" 2>/dev/null || true
@@ -1498,6 +1505,80 @@ test_setup_pending_serves_setup() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 29: print_logo emits real ESC bytes (not literal \033) under a PTY
+# ---------------------------------------------------------------------------
+test_logo_ansi_escapes() {
+  _nn=29
+  _harness="${TMP_ROOT}/logo-harness.sh"
+  _out="${TMP_ROOT}/logo-out.bin"
+  # Extract use_color + print_logo from template (source of truth for generated installers).
+  {
+    printf '%s\n' '#!/bin/sh'
+    # Force color branch: harness pretends stdout is a TTY-friendly TERM.
+    sed -n '/^use_color()/,/^}/p; /^print_logo()/,/^}/p' "${REPO}/installers/template.sh"
+    printf '%s\n' 'print_logo'
+  } >"${_harness}"
+
+  # Override use_color so we always exercise the color path even if script's
+  # outer stdout is not a TTY (script/PTY makes -t 1 true on the inner shell).
+  # Prefer real PTY via `script` so use_color's `[ -t 1 ]` succeeds.
+  rm -f "${_out}"
+  if command -v script >/dev/null 2>&1; then
+    # macOS: script -q outfile command...
+    # Linux: script -q -c 'cmd' outfile  OR script -q outfile -c 'cmd'
+    if script -q /dev/null true 2>/dev/null; then
+      # BSD/macOS style
+      TERM=xterm-256color script -q "${_out}" /bin/sh "${_harness}" >/dev/null 2>&1 || true
+    else
+      # GNU script
+      TERM=xterm-256color script -q -c "/bin/sh ${_harness}" "${_out}" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if [ ! -s "${_out}" ]; then
+    # Fallback: force color by patching harness use_color to always true
+    {
+      printf '%s\n' '#!/bin/sh'
+      printf '%s\n' 'use_color() { return 0; }'
+      sed -n '/^print_logo()/,/^}/p' "${REPO}/installers/template.sh"
+      printf '%s\n' 'print_logo'
+    } >"${_harness}"
+    TERM=xterm-256color /bin/sh "${_harness}" >"${_out}" 2>/dev/null || true
+  fi
+
+  if [ ! -s "${_out}" ]; then
+    fail "${_nn}" "logo-ansi-escapes" "no logo output captured"
+    return
+  fi
+
+  # Must contain real ESC (0x1b)
+  if ! LC_ALL=C grep -q $'\033' "${_out}" 2>/dev/null; then
+    # grep -a for binary; try od/hexdump fallback
+    if ! od -An -tx1 "${_out}" 2>/dev/null | tr -s ' \n' ' ' | grep -q ' 1b '; then
+      fail "${_nn}" "logo-ansi-escapes" "missing ESC byte (0x1b) in color logo output"
+      return
+    fi
+  fi
+
+  # Must NOT contain the 4-char literal sequence backslash-zero-three-three
+  if LC_ALL=C grep -qF '\033' "${_out}" 2>/dev/null; then
+    fail "${_nn}" "logo-ansi-escapes" "literal \\\\033 found — printf %s did not embed ESC"
+    return
+  fi
+
+  # Alignment smoke: cactus tip + DESERTEMAIL line present
+  if ! LC_ALL=C grep -q 'DESERTEMAIL\|____' "${_out}" 2>/dev/null; then
+    # strip ANSI and retry
+    if ! sed 's/\x1b\[[0-9;]*m//g' "${_out}" 2>/dev/null | grep -q '____'; then
+      fail "${_nn}" "logo-ansi-escapes" "logo text missing after capture"
+      return
+    fi
+  fi
+
+  ok "${_nn}" "logo-ansi-escapes"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
@@ -1533,6 +1614,7 @@ main() {
   test_reinstall_keeps_config
   test_express_interactive_empty_users
   test_setup_pending_serves_setup
+  test_logo_ansi_escapes
 
   printf '\n=== summary ===\n'
   printf '%s/%s passed\n' "${PASSED}" "${TOTAL}"

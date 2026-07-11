@@ -779,16 +779,19 @@ sudo systemctl restart desertemail
 
       <section class="pix-panel" aria-labelledby="dns">
         <div class="heading-wrap"><h2 id="dns">DNS setup</h2><a class="anchor" href="#dns" aria-label="Link to this section">#</a></div>
+        <div class="heading-wrap"><h3 id="dns-web-ui">DNS via the web UI</h3><a class="anchor" href="#dns-web-ui" aria-label="Link to this section">#</a></div>
+        <p>After first-run setup (or anytime as admin), open <strong><code>http://127.0.0.1:8080/dns</code></strong>. The page shows exactly which MX, A, SPF, DKIM, and DMARC records to publish at your registrar, with copy buttons. Generate a DKIM key in-browser (writes <code>dkim.pem</code> next to your config), then click <strong>Check DNS</strong> to verify live lookups. DesertEmail cannot create records at Cloudflare/Namecheap for you — it prepares and verifies them.</p>
+        <p class="note">Installer summary points here too: <code>Configure DNS in your browser: http://127.0.0.1:8080/dns</code>. CLI still works: <code>desertemail --dkim-dns example.com</code> and <code>desertemail doctor</code>.</p>
         <ol>
           <li><strong>A / AAAA</strong> — hostname of your mail server (e.g. <code>mail.example.com</code>) → public IP (DynDNS is fine for home).</li>
           <li><strong>MX</strong> — <code>example.com</code> → <code>mail.example.com</code> (priority 10 is typical).</li>
-          <li><strong>SPF (TXT)</strong> — e.g. <code>v=spf1 mx a:mail.example.com ~all</code> on the apex. Required for deliverability; DesertEmail also <em>checks</em> SPF on inbound mail.</li>
-          <li><strong>DKIM (TXT)</strong> — generate a key, set <code>dkim_key_file</code> / <code>dkim_selector</code>, then:
+          <li><strong>SPF (TXT)</strong> — e.g. <code>v=spf1 mx ~all</code> on the apex (starter from the UI). Required for deliverability; DesertEmail also <em>checks</em> SPF on inbound mail.</li>
+          <li><strong>DKIM (TXT)</strong> — use <strong>Generate DKIM key</strong> on <code>/dns</code>, or CLI:
             <pre><code>desertemail --dkim-dns example.com --config ~/.desertemail/config.toml</code></pre>
-            Publish the printed TXT at <code>&lt;selector&gt;._domainkey.example.com</code>. Inbound DKIM signatures are verified on arrival.
+            Publish the TXT at <code>&lt;selector&gt;._domainkey.example.com</code>. Inbound DKIM signatures are verified on arrival.
           </li>
           <li><strong>DMARC (TXT)</strong> — at <code>_dmarc.example.com</code>, start with
-            <code>v=DMARC1; p=none; rua=mailto:dmarc@example.com</code>, then tighten to <code>p=quarantine</code> / <code>p=reject</code> after reports look clean.
+            <code>v=DMARC1; p=none; rua=mailto:admin@example.com</code>, then tighten to <code>p=quarantine</code> / <code>p=reject</code> after reports look clean.
             Inbound DMARC is evaluated; enforcement is opt-in via <code>dmarc_enforce</code>.</li>
           <li><strong>rDNS / PTR</strong> — ask your host/VPS to set reverse DNS for your public IP to your mail hostname (e.g. <code>mail.example.com</code>). Many receivers require PTR that forward-confirms (FCrDNS). Home ISPs rarely allow useful PTR.</li>
           <li><strong>MTA-STS</strong> (optional) — TXT at <code>_mta-sts.example.com</code>:

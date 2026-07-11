@@ -95,10 +95,89 @@ impl Check {
     }
 }
 
+/// Detect local egress IP (UDP connect trick). Used by the web DNS page.
+pub fn detect_local_egress_ip() -> Option<String> {
+    detect_egress_ip()
+}
+
+/// Resolve the mail host for DNS guidance: config `public_host`, else first domain.
+pub fn mail_host_for_ui(cfg: &Config) -> String {
+    let configured = cfg.public_host_name();
+    if !configured.is_empty() {
+        return configured;
+    }
+    let domains = cfg.domains_list();
+    let opts = DoctorOpts::default();
+    resolve_host(cfg, &opts, &domains)
+}
+
+/// Best-effort public IP for A-record guidance (egress, may be private behind NAT).
+pub fn suggest_public_ip(cfg: &Config) -> Option<String> {
+    let host = mail_host_for_ui(cfg);
+    let domains = cfg.domains_list();
+    let opts = DoctorOpts::default();
+    let (expected, egress, _) = detect_ips(&opts, &host, &domains);
+    expected.or(egress)
+}
+
+/// DNS-only checks for the web UI (no TCP reachability probes). Short timeouts via dns module.
+/// Runs domain checks concurrently with std threads.
+pub fn run_dns_checks_ui(cfg: &Config, host: &str, public_ip: Option<&str>) -> Vec<Check> {
+    ensure_dkim_key_loaded(cfg);
+    let domains = cfg.domains_list();
+    let selector = cfg.dkim_selector();
+    let key = cfg.dkim_key_clone();
+    let public_ip_owned = public_ip.map(|s| s.to_string());
+    let host_owned = host.trim().trim_end_matches('.').to_lowercase();
+
+    let mut handles = Vec::new();
+    for domain in domains {
+        let sel = selector.clone();
+        let key_c = key.clone();
+        let pip = public_ip_owned.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut out = Vec::new();
+            out.push(check_mx(&domain, pip.as_deref()));
+            out.push(check_spf(&domain));
+            out.push(check_dkim(
+                &domain,
+                &sel,
+                key_c.as_ref(),
+                |name| lookup_dkim_txt(name),
+            ));
+            out.push(check_dmarc(&domain));
+            out
+        }));
+    }
+    let host_for_a = host_owned.clone();
+    let pip_a = public_ip_owned.clone();
+    handles.push(std::thread::spawn(move || {
+        vec![check_a_host(&host_for_a, pip_a.as_deref())]
+    }));
+    if let Some(ref ip) = public_ip_owned {
+        let ip = ip.clone();
+        let h = host_owned.clone();
+        handles.push(std::thread::spawn(move || vec![check_rdns(&ip, &h)]));
+    }
+
+    let mut checks = Vec::new();
+    for h in handles {
+        match h.join() {
+            Ok(part) => checks.extend(part),
+            Err(_) => checks.push(Check::warn(
+                "DNS check",
+                "worker thread panicked",
+                "Retry Check DNS",
+            )),
+        }
+    }
+    checks
+}
+
 /// Run all readiness checks. Returns the number of Fail blockers (exit code).
 pub fn run(cfg: &Config, opts: &DoctorOpts) -> i32 {
-    let mut cfg = cfg.clone();
-    ensure_dkim_key_loaded(&mut cfg);
+    let cfg = cfg.clone();
+    ensure_dkim_key_loaded(&cfg);
 
     let domains = resolve_domains(&cfg, opts);
     let host = resolve_host(&cfg, opts, &domains);
@@ -110,13 +189,15 @@ pub fn run(cfg: &Config, opts: &DoctorOpts) -> i32 {
     checks.extend(check_config_sanity(&cfg));
 
     // --- DNS (per domain + host) ---
+    let dkim_selector = cfg.dkim_selector();
+    let dkim_key = cfg.dkim_key_clone();
     for domain in &domains {
         checks.push(check_mx(domain, expected_public_ip.as_deref()));
         checks.push(check_spf(domain));
         checks.push(check_dkim(
             domain,
-            &cfg.dkim_selector,
-            cfg.dkim_key.as_ref(),
+            &dkim_selector,
+            dkim_key.as_ref(),
             |name| lookup_dkim_txt(name),
         ));
         checks.push(check_dmarc(domain));
@@ -181,14 +262,13 @@ pub fn run(cfg: &Config, opts: &DoctorOpts) -> i32 {
 // Setup helpers
 // ---------------------------------------------------------------------------
 
-fn ensure_dkim_key_loaded(cfg: &mut Config) {
-    if cfg.dkim_key.is_some() {
+fn ensure_dkim_key_loaded(cfg: &Config) {
+    if cfg.dkim_key_clone().is_some() {
         return;
     }
-    if let Some(ref key_path) = cfg.dkim_key_file.clone() {
-        match crypto::RsaKey::from_pem_file(Path::new(key_path)) {
-            Ok(key) => cfg.dkim_key = Some(key),
-            Err(_) => { /* warn via DKIM check */ }
+    if let Some(key_path) = cfg.dkim_key_file_path() {
+        if let Ok(key) = crypto::RsaKey::from_pem_file(Path::new(&key_path)) {
+            cfg.set_dkim_live(&cfg.dkim_selector(), Some(key_path), Some(key));
         }
     }
 }

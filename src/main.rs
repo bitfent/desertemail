@@ -98,7 +98,7 @@ fn main() {
     util::log!("desertemail starting");
     shutdown::install_handlers();
 
-    let mut cfg = match Config::load(Path::new(&config_path)) {
+    let cfg = match Config::load(Path::new(&config_path)) {
         Ok(c) => {
             util::log!("loaded config from {}", config_path);
             c
@@ -129,16 +129,16 @@ fn main() {
     limits::configure_io_timeout(cfg.io_timeout_secs);
 
     // Load DKIM private key if configured
-    if let Some(ref key_path) = cfg.dkim_key_file.clone() {
-        match crypto::RsaKey::from_pem_file(Path::new(key_path)) {
+    if let Some(key_path) = cfg.dkim_key_file_path() {
+        match crypto::RsaKey::from_pem_file(Path::new(&key_path)) {
             Ok(key) => {
                 util::log!(
                     "DKIM: loaded key from {} (selector={}, {}-bit)",
                     key_path,
-                    cfg.dkim_selector,
+                    cfg.dkim_selector(),
                     key.k * 8
                 );
-                cfg.dkim_key = Some(key);
+                cfg.set_dkim_live(&cfg.dkim_selector(), Some(key_path), Some(key));
             }
             Err(e) => {
                 util::log!(
@@ -383,7 +383,7 @@ fn parse_doctor_opts(args: &[String], start: usize) -> DoctorOpts {
 }
 
 fn run_doctor(config_path: &str, opts: DoctorOpts) {
-    let mut cfg = match Config::load(Path::new(config_path)) {
+    let cfg = match Config::load(Path::new(config_path)) {
         Ok(c) => c,
         Err(e) => {
             // Fall back like the server path, but prefer explicit failure when domains overridden.
@@ -395,9 +395,9 @@ fn run_doctor(config_path: &str, opts: DoctorOpts) {
         }
     };
     // Load DKIM key if configured (doctor compares published p= against this key).
-    if let Some(ref key_path) = cfg.dkim_key_file.clone() {
-        match crypto::RsaKey::from_pem_file(Path::new(key_path)) {
-            Ok(key) => cfg.dkim_key = Some(key),
+    if let Some(key_path) = cfg.dkim_key_file_path() {
+        match crypto::RsaKey::from_pem_file(Path::new(&key_path)) {
+            Ok(key) => cfg.set_dkim_live(&cfg.dkim_selector(), Some(key_path.clone()), Some(key)),
             Err(e) => {
                 eprintln!(
                     "warning: DKIM key file {} unreadable ({}): DKIM check will warn",
@@ -627,7 +627,7 @@ fn prompt_password(prompt: &str) -> String {
 }
 
 fn print_dkim_dns(cfg: &Config, domain: &str) {
-    let key = match cfg.dkim_key.as_ref() {
+    let key = match cfg.dkim_key_clone() {
         Some(k) => k,
         None => {
             eprintln!(
@@ -638,8 +638,8 @@ fn print_dkim_dns(cfg: &Config, domain: &str) {
             std::process::exit(1);
         }
     };
-    let selector = &cfg.dkim_selector;
-    let txt = dkim::dns_txt_record(key);
+    let selector = cfg.dkim_selector();
+    let txt = dkim::dns_txt_record(&key);
     println!("Publish this DNS TXT record:");
     println!();
     println!("  Name:  {}._domainkey.{}", selector, domain);

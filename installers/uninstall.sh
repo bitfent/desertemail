@@ -65,11 +65,13 @@ use_color() {
 
 print_logo() {
   # Figlet-style DESERTEMAIL + pixel cactus; ≤80 cols, ≤12 lines.
+  # POSIX printf %s does NOT interpret \033 in arguments — embed a real ESC byte.
   if use_color; then
-    _sand='\033[38;5;180m'
-    _orange='\033[38;5;208m'
-    _cactus='\033[38;5;107m'
-    _rst='\033[0m'
+    _esc=$(printf '\033')
+    _sand="${_esc}[38;5;180m"
+    _orange="${_esc}[38;5;208m"
+    _cactus="${_esc}[38;5;107m"
+    _rst="${_esc}[0m"
   else
     _sand=''
     _orange=''
