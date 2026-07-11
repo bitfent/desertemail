@@ -1105,6 +1105,20 @@ fn handle_connection(
     if should_add_hsts(secure) {
         resp = resp.with_header("Strict-Transport-Security", "max-age=15552000");
     }
+    // Defense-in-depth headers on every response. The UI is server-rendered
+    // with small inline scripts/handlers, so 'unsafe-inline' stays; the value
+    // is in what the policy forbids: loading any external script/style/media,
+    // embedding this UI in a frame (clickjacking), posting forms to foreign
+    // origins, <base> hijacking, and plugin content.
+    resp = resp
+        .with_header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+             img-src 'self' data:; connect-src 'self'; form-action 'self'; \
+             base-uri 'none'; frame-ancestors 'none'; object-src 'none'",
+        )
+        .with_header("X-Frame-Options", "DENY")
+        .with_header("Referrer-Policy", "no-referrer");
     resp.write_to(reader.get_mut())
 }
 
