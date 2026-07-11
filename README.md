@@ -6,19 +6,31 @@ Designed to run on the tiniest computers: Raspberry Pi Zero, old netbooks, VPS w
 
 Anyone can deploy it, configure DNS (or use simple auto-routing), and have their own private email.
 
+**Website:** [desertemail.org](https://desertemail.org) · **Docs:** [desertemail.org/docs.html](https://desertemail.org/docs.html)
+
+## Install
+
+Easiest — one command, a prebuilt static binary, no toolchain or compile:
+
+```bash
+curl -fsSL https://desertemail.org/install-linux-x86_64.sh | sh
+```
+
+Pick your platform at **[desertemail.org](https://desertemail.org)** — Linux (x86_64 / ARM64 / ARMv7 / ARMv6 Pi Zero), macOS (Intel & Apple Silicon), Windows (PowerShell), Android (Termux), or build-from-source. The installer downloads the matching binary, verifies its SHA-256, and runs a short config wizard. Prefer to build it yourself? See [Quick Start](#quick-start-raspberry-pi--any-linux).
+
 **Installer vs doctor:** the installer (or a manual `config.toml`) sets up the **software**. `desertemail doctor` verifies the **environment** — DNS, ports, rDNS, TLS, and config sanity — so mail actually delivers. Run doctor after DNS setup and before you announce the address.
 
 ## Why DesertEmail?
 
 - **From scratch**: SMTP (receive + submit), IMAP, webmail, DKIM, DNS, and HTTP are hand-rolled pure `std`. No lettre, no mail-parser crates, no async runtime (no tokio).
-- **TLS via rustls only**: The deliberate exception. Server STARTTLS + implicit SMTPS/IMAPS/HTTPS, and outbound opportunistic STARTTLS with webpki-roots validation. Binary is ~1.2MB stripped with rustls+ring.
+- **TLS via rustls only**: The deliberate exception. Server STARTTLS + implicit SMTPS/IMAPS/HTTPS, and outbound opportunistic STARTTLS with webpki-roots validation. Binary is ~2 MB stripped with rustls+ring.
 - **Low resource**: Perfect for always-on home servers. Uses threads (not async) for simplicity and tiny footprint.
 - **Open source**: MIT/Apache-2.0. Fork, improve, self-host forever.
 - **DNS ready**: Full instructions for MX/A/SPF. Or use the built-in **auto-routing** mode that accepts any address under your domain and maps to local mailboxes (or a catch-all).
 - **Maildir storage**: Standard, simple, filesystem-based. Easy to backup, rsync, or even mount remotely.
 - **Secure-ish by design**: PBKDF2-HMAC-SHA256 password hashes (`desertemail --hash-password`), AUTH PLAIN, auth lockout, connection limits, basic command validation. Built-in TLS when you supply a cert+key; optional `require_tls_for_auth` rejects AUTH on plaintext (538).
 
-> ⚠️ **This is an educational / personal-use MVP.** Tiers 1–4 are largely in tree (auth lockout, SPF/DKIM/DMARC, IMAP SEARCH/IDLE/APPEND/STORE/EXPUNGE, optional ACME, quotas, structured logs, user CLI/admin CRUD, health/metrics, backup helper) but TLS/ACME still need correct DNS + port 80 for issuance; no full Bayesian/ML spam filter. Great starting point to learn email protocols and extend!
+> ⚠️ **Status: self-hostable, but not yet third-party audited.** The full hardening roadmap (Tiers 1–4 below) is **complete and in tree** — password hashing, auth lockout, connection limits, inbound SPF/DKIM/DMARC + greylisting, full IMAP (SEARCH/IDLE/APPEND/STORE/EXPUNGE), ACME, quotas, structured logs, user CLI + admin CRUD, health/metrics. What's still open before high-stakes or large-scale public use: an **external security audit + sustained fuzzing** of the hand-rolled parsers, and there's no full Bayesian/ML spam filter. It's a great self-hosted mail server for tinkerers and a great way to learn the protocols — deploy it with eyes open.
 
 ## Features (v0.2)
 
@@ -50,7 +62,7 @@ git clone https://github.com/bitfent/desertemail
 cd desertemail
 cargo build --release
 
-# Binary is target/release/desertemail  (~1.2 MB with rustls)
+# Binary is target/release/desertemail  (~2 MB with rustls)
 
 # 3. Create config
 cp config.example.toml config.toml
@@ -343,33 +355,38 @@ Mail, IMAP, webmail, DKIM, DNS, and HTTP protocol handling is pure string matchi
 
 Storage is classic Maildir (cur/new/tmp) so any mail client or even `mutt`, `mbsync`, or file browser works.
 
-## Building for Raspberry Pi
+## Building & releases
 
-Cross-compile or build natively:
+Build natively anywhere Rust runs (including on a Pi):
 
 ```bash
-# On Pi itself (recommended for simplicity)
-cargo build --release
-
-# Or cross from x86:
-# rustup target add aarch64-unknown-linux-gnu
-# cargo build --release --target aarch64-unknown-linux-gnu
+cargo build --release        # target/release/desertemail (~2 MB, size-opt: opt-level "z", LTO, strip)
+cargo test                   # ~100 tests
 ```
 
-The release profile is size-optimized (`opt-level = "z"`, LTO, strip). With rustls+ring the binary is roughly **~1.2 MB**.
+**Release binaries (all platforms, no CI):** the prebuilt binaries served from
+[desertemail.org](https://desertemail.org) are built **locally** with
+`build-binaries.sh` — no GitHub Actions, no cloud. macOS is built natively with
+`cargo`; the Linux musl targets (x86_64, aarch64, armv7, armv6) and Windows are
+cross-built with [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)
+(Zig as the cross-linker, no Docker). One-time setup and the flow are in
+[`DEPLOY.md`](DEPLOY.md). The site itself is a static page hosted on Render; see
+DEPLOY.md for the full distribution pipeline (`bin-dist/` → `site-build.sh` → `/bin/`).
 
 ## Hardening roadmap (MVP → production self-hostable)
 
-DesertEmail is an educational / personal-use MVP today. The gap to a hardened,
-internet-facing mail server is tracked below, in priority order. **We intend to
-work through these as soon as possible.** Until Tier 1 is done, run it only on a
-LAN, over a VPN/Tailscale, or behind a TLS-terminating proxy — not on the open
-internet with real credentials.
+**All four tiers below are complete and in tree.** They took DesertEmail from a
+learning MVP to a self-hostable mail server. The one remaining gate before
+high-stakes or large-scale public use is an **external security audit + a
+sustained fuzzing campaign** of the hand-rolled parsers (the fuzz targets exist
+under `fuzz/`; they just need to be run long, ideally by fresh eyes). Until then:
+fine for personal / small self-hosted use with eyes open; behind a VPN/Tailscale
+or a TLS-terminating proxy if you want extra insulation.
 
 **Guiding principle:** keep the core hand-rolled and small, but shell out to
 battle-tested tools where rolling our own is a bad trade (spam filtering, TLS
-cert issuance). Treat a security audit + fuzzing of the hand-rolled parsers as a
-hard gate before pointing MX at it.
+cert issuance). A security audit + fuzzing of the hand-rolled parsers is the
+remaining hard gate before pointing MX at it in a high-stakes setting.
 
 ### Tier 1 — Security must-haves (block public exposure on these)
 - [x] **Password hashing** — PBKDF2-HMAC-SHA256 hashes (`desertemail --hash-password`); plaintext configs still work but warn at startup.
@@ -394,11 +411,21 @@ hard gate before pointing MX at it.
 - [x] Backup/restore docs, monitoring, alerting.
 - [x] User management without editing config + restart (add/remove users; optional web admin CRUD).
 
-## Extending / Contributing
+## Contributing
 
-This is intentionally minimal so you can read the SMTP/IMAP/DKIM RFCs alongside
-the code and extend it. See the hardening roadmap above for the highest-value
-work; PRs welcome, Tier 1 especially.
+PRs and issues welcome — this is intentionally small enough to read the
+SMTP/IMAP/DKIM RFCs alongside the code.
+
+- **Build & test:** `cargo build` and `cargo test` (~100 tests, all pure-std/rustls).
+- **Layout:** see the Architecture map above — one module per protocol/concern.
+- **Fuzzing:** `fuzz/` has `cargo-fuzz` targets for the network parsers
+  (`cargo +nightly fuzz run <target>`); running these long is the single
+  highest-value contribution right now (see the hardening roadmap).
+- **Highest-value work:** an external security audit + sustained fuzzing, an
+  MTA-STS policy responder, and a real spam-scoring integration (e.g. rspamd).
+- **Docs live** in this README, [`DEPLOY.md`](DEPLOY.md), and the site under `site/`.
+
+Questions? Open an issue, or reach [@bitfent on Telegram](https://t.me/bitfent).
 
 ## License
 
