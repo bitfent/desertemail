@@ -280,6 +280,24 @@ pub struct SpamScore {
     pub reasons: Vec<String>,
 }
 
+/// Decide whether an accepted inbound message should land in the recipient's
+/// Spam folder (`.Junk`) instead of the inbox root.
+///
+/// - `folder_threshold <= 0` disables auto-filing.
+/// - Reject is handled earlier (`score >= reject_threshold`); this only runs for
+///   messages that were accepted. If reject is enabled and score would reject,
+///   returns false (caller should not deliver).
+/// - Files when `score >= folder_threshold`.
+pub fn should_file_to_junk(score: i32, folder_threshold: i32, reject_threshold: i32) -> bool {
+    if folder_threshold <= 0 {
+        return false;
+    }
+    if reject_threshold > 0 && score >= reject_threshold {
+        return false;
+    }
+    score >= folder_threshold
+}
+
 impl SpamScore {
     pub fn compute(input: &SpamScoreInput<'_>) -> Self {
         let mut score = 0i32;
@@ -576,6 +594,24 @@ mod tests {
             check_ptr: false,
         };
         assert_eq!(SpamScore::compute(&clean).score, 0);
+    }
+
+    #[test]
+    fn spam_folder_filing_decision() {
+        // default-ish: folder=4, reject disabled
+        assert!(!should_file_to_junk(0, 4, 0));
+        assert!(!should_file_to_junk(3, 4, 0));
+        assert!(should_file_to_junk(4, 4, 0));
+        assert!(should_file_to_junk(10, 4, 0));
+        // disabled
+        assert!(!should_file_to_junk(99, 0, 0));
+        assert!(!should_file_to_junk(99, -1, 0));
+        // reject takes precedence (would not deliver)
+        assert!(!should_file_to_junk(20, 4, 15));
+        assert!(should_file_to_junk(10, 4, 15));
+        // missing Date + Message-ID scores 2 — files when threshold is 1
+        assert!(should_file_to_junk(2, 1, 0));
+        assert!(!should_file_to_junk(2, 3, 0));
     }
 
     #[test]

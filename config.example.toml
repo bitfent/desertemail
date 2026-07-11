@@ -55,6 +55,7 @@ dnsbls = []
 dnsbl_reject = false         # true: single DNSBL hit => 550 (harsh; keep false)
 spam_score_tag = 5           # score >= this => X-Spam-Flag: YES (0 disables tagging)
 spam_score_reject = 0        # score >= this => 550; 0 = reject disabled
+spam_folder_threshold = 4    # score >= this => deliver to Spam (.Junk); 0 = disabled
 spam_check_ptr = true        # include missing/mismatched rDNS in spam score
 
 # Public mail hostname used for MX/A guidance in the web DNS page

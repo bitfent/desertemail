@@ -44,6 +44,8 @@ fn main() {
     let mut hash_password_mode: Option<Option<String>> = None; // Some(None)=prompt, Some(Some(p))=non-interactive
     let mut user_cmd: Option<UserCmd> = None;
     let mut doctor_opts: Option<DoctorOpts> = None;
+    let mut restore_tar: Option<String> = None;
+    let mut restore_force = false;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--config" || args[i] == "-c" {
@@ -58,6 +60,16 @@ fn main() {
                 eprintln!("Usage: desertemail --dkim-dns <domain>");
                 std::process::exit(1);
             }
+        } else if args[i] == "--restore" {
+            if i + 1 < args.len() {
+                restore_tar = Some(args[i + 1].clone());
+                i += 1;
+            } else {
+                eprintln!("Usage: desertemail --restore <backup.tar> --config <target-config-path> [--force]");
+                std::process::exit(1);
+            }
+        } else if args[i] == "--force" {
+            restore_force = true;
         } else if args[i] == "--hash-password" {
             if i + 1 < args.len() && !args[i + 1].starts_with('-') {
                 hash_password_mode = Some(Some(args[i + 1].clone()));
@@ -77,6 +89,11 @@ fn main() {
             return;
         }
         i += 1;
+    }
+
+    if let Some(tar_path) = restore_tar {
+        run_restore(&tar_path, &config_path, restore_force);
+        return;
     }
 
     if let Some(maybe_plain) = hash_password_mode {
@@ -308,6 +325,7 @@ fn print_help() {
     println!("Usage: desertemail [--config path/to/config.toml]");
     println!("       desertemail --dkim-dns <domain> [--config path]");
     println!("       desertemail --hash-password [plaintext]");
+    println!("       desertemail --restore <backup.tar> --config <target-config-path> [--force]");
     println!("       desertemail user add <email> [--password <pw>] [--quota <mb>]");
     println!("       desertemail user remove <email>");
     println!("       desertemail user list");
@@ -326,6 +344,10 @@ fn print_help() {
     println!("  desertemail --hash-password 'my secret'");
     println!("  Paste the pbkdf2_sha256$... string into [users] in config.toml");
     println!();
+    println!("Backup restore (from Admin → Download backup, or deploy/backup.sh):");
+    println!("  desertemail --restore desertemail-backup-….tar --config /etc/desertemail/config.toml");
+    println!("  Adds --force to overwrite an existing config or non-empty data dir.");
+    println!();
     println!("User management (edits config.toml [users]/[quotas] in place):");
     println!("  desertemail user add alice@example.com");
     println!("  desertemail user add bob --password secret --quota 512");
@@ -341,6 +363,133 @@ fn print_help() {
     println!("  Exit code = number of blockers (Fail checks). 0 = ready.");
     println!();
     println!("See config.example.toml and README.md");
+}
+
+fn run_restore(tar_path: &str, config_path: &str, force: bool) {
+    use desertemail::tarball;
+    use std::fs;
+    use std::path::PathBuf;
+
+    let tar_bytes = match fs::read(tar_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {}", tar_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let config_dest = PathBuf::from(config_path);
+    let config_dir = config_dest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let extras_dir = config_dir.clone();
+    let data_dir = config_dir.join("data");
+
+    if config_dest.exists() && !force {
+        eprintln!(
+            "error: config already exists at {} (pass --force to overwrite)",
+            config_dest.display()
+        );
+        std::process::exit(1);
+    }
+    if data_dir.exists() {
+        let non_empty = fs::read_dir(&data_dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+        if non_empty && !force {
+            eprintln!(
+                "error: data dir {} is not empty (pass --force to overwrite)",
+                data_dir.display()
+            );
+            std::process::exit(1);
+        }
+    }
+
+    if let Err(e) = fs::create_dir_all(&config_dir) {
+        eprintln!("error: cannot create {}: {}", config_dir.display(), e);
+        std::process::exit(1);
+    }
+    if let Err(e) = fs::create_dir_all(&data_dir) {
+        eprintln!("error: cannot create {}: {}", data_dir.display(), e);
+        std::process::exit(1);
+    }
+
+    let summary = match tarball::extract_backup(&tar_bytes, &config_dest, &extras_dir, &data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: restore failed: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Rewrite data_dir in restored config to the new location.
+    let mut adjustments = Vec::new();
+    match fs::read_to_string(&config_dest) {
+        Ok(content) => {
+            let new_data = data_dir.display().to_string();
+            let rewritten = rewrite_config_data_dir(&content, &new_data);
+            if rewritten != content {
+                if let Err(e) = fs::write(&config_dest, &rewritten) {
+                    eprintln!("error: cannot rewrite config: {}", e);
+                    std::process::exit(1);
+                }
+                adjustments.push(format!("data_dir → {}", new_data));
+            } else {
+                // Ensure data_dir line exists / points correctly even if key missing.
+                adjustments.push(format!("data_dir set to {}", new_data));
+                if !content.lines().any(|l| {
+                    let t = l.trim();
+                    t.starts_with("data_dir") && t.contains('=')
+                }) {
+                    let mut c = content;
+                    if !c.ends_with('\n') {
+                        c.push('\n');
+                    }
+                    c.push_str(&format!("data_dir = \"{}\"\n", new_data));
+                    let _ = fs::write(&config_dest, c);
+                } else {
+                    let forced = rewrite_config_data_dir_force(&content, &new_data);
+                    let _ = fs::write(&config_dest, forced);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("error: restored config unreadable: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // Point relative dkim/tls paths at extras next to config when those files landed there.
+    println!("Restored {} files ({} bytes)", summary.files, summary.bytes);
+    println!("  config: {}", config_dest.display());
+    println!("  data:   {}", data_dir.display());
+    println!("  extras: {} (DKIM/TLS basenames if present)", extras_dir.display());
+    for a in &adjustments {
+        println!("  adjusted: {}", a);
+    }
+    println!();
+    println!("Start with: desertemail --config {}", config_dest.display());
+}
+
+/// Replace `data_dir = "..."` with a new path (preserves quoting style loosely).
+fn rewrite_config_data_dir(content: &str, new_path: &str) -> String {
+    let mut out = String::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("data_dir") && trimmed.contains('=') && !trimmed.starts_with('#') {
+            out.push_str(&format!("data_dir = \"{}\"", new_path));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn rewrite_config_data_dir_force(content: &str, new_path: &str) -> String {
+    rewrite_config_data_dir(content, new_path)
 }
 
 fn parse_doctor_opts(args: &[String], start: usize) -> DoctorOpts {

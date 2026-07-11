@@ -586,16 +586,27 @@ fn sort_maildir_flags(s: &str) -> String {
     out
 }
 
+/// Sanitize a mailbox path relative to data_dir.
+/// Allows `/` so folders like `user/.Trash` and `user/.Junk` nest correctly.
+/// Rejects empty / `.` / `..` segments and maps other unsafe chars to `_`.
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| {
+    let mut out = String::new();
+    for part in s.split(|c| c == '/' || c == '\\') {
+        if part.is_empty() || part == "." || part == ".." {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('/');
+        }
+        for c in part.chars() {
             if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '@' {
-                c
+                out.push(c);
             } else {
-                '_'
+                out.push('_');
             }
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 fn hostname_safe() -> String {
@@ -687,10 +698,20 @@ mod tests {
         let orig = inbox.read_message(&msgs[0].path).unwrap();
         let moved = inbox.move_to(&msgs[0], &trash).unwrap();
         assert!(moved.path.starts_with(trash.root()));
+        assert!(trash.root().ends_with("carol/.Trash") || trash.root().to_string_lossy().contains("carol/.Trash"));
         assert_eq!(inbox.list_messages().unwrap().len(), 0);
         assert_eq!(trash.list_messages().unwrap().len(), 1);
         let after = trash.read_message(&moved.path).unwrap();
         assert_eq!(after, orig);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitize_preserves_maildir_subfolders() {
+        assert_eq!(sanitize("alice"), "alice");
+        assert_eq!(sanitize("alice/.Junk"), "alice/.Junk");
+        assert_eq!(sanitize("alice/.Trash"), "alice/.Trash");
+        assert_eq!(sanitize("../evil"), "evil");
+        assert_eq!(sanitize("a/../../b"), "a/b");
     }
 }

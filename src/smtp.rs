@@ -485,6 +485,7 @@ fn handle_client(
                 // Inbound trust: SPF / DKIM / DMARC / spam score (annotate always;
                 // reject only when config explicitly enables enforcement).
                 let mut deliver_raw = data_buf.clone();
+                let mut spam_score = 0i32;
                 if !is_submission {
                     match inbound_trust_check(
                         &cfg,
@@ -501,8 +502,9 @@ fn handle_client(
                             state = State::Greeted;
                             continue;
                         }
-                        InboundAction::Accept(annotated) => {
+                        InboundAction::Accept(annotated, score) => {
                             deliver_raw = annotated;
+                            spam_score = score;
                         }
                     }
                 }
@@ -513,6 +515,7 @@ fn handle_client(
                     &deliver_raw,
                     is_submission,
                     &authenticated_user,
+                    spam_score,
                 );
                 match delivered {
                     Ok(n) => {
@@ -616,7 +619,8 @@ pub fn extract_angle(line: &str) -> String {
 
 /// Result of inbound SPF/DKIM/DMARC/spam processing.
 enum InboundAction {
-    Accept(Vec<u8>),
+    /// Annotated message octets and computed spam score (for folder filing).
+    Accept(Vec<u8>, i32),
     Reject(String),
 }
 
@@ -833,7 +837,7 @@ fn inbound_trust_check(
     let mut out = Vec::with_capacity(prefix.len() + raw.len());
     out.extend_from_slice(prefix.as_bytes());
     out.extend_from_slice(raw);
-    InboundAction::Accept(out)
+    InboundAction::Accept(out, spam.score)
 }
 
 fn deliver_mail(
@@ -842,6 +846,7 @@ fn deliver_mail(
     raw: &[u8],
     is_submission: bool,
     auth_user: &Option<String>,
+    spam_score: i32,
 ) -> Result<usize, String> {
     let (from, rcpts) = match state {
         State::Data { from, rcpts } => (from.as_str(), rcpts.as_slice()),
@@ -887,10 +892,26 @@ fn deliver_mail(
             count += remote.len();
         }
     } else {
+        let to_junk = crate::spamscore::should_file_to_junk(
+            spam_score,
+            cfg.spam_folder_threshold,
+            cfg.spam_score_reject,
+        );
         for r in rcpts {
             if let Some(mb) = cfg.resolve_mailbox(r) {
                 check_quota(cfg, &mb, raw.len() as u64)?;
-                let md = Maildir::open(&cfg.data_dir, &mb).map_err(|e| e.to_string())?;
+                let dest = if to_junk {
+                    util::log!(
+                        "filing to Junk (spam_score={} threshold={}) for {}",
+                        spam_score,
+                        cfg.spam_folder_threshold,
+                        mb
+                    );
+                    format!("{}/.Junk", mb)
+                } else {
+                    mb.clone()
+                };
+                let md = Maildir::open(&cfg.data_dir, &dest).map_err(|e| e.to_string())?;
                 md.deliver(raw, from).map_err(|e| e.to_string())?;
                 Maildir::invalidate_quota_cache(&cfg.data_dir, &mb);
                 count += 1;

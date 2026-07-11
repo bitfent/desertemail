@@ -303,6 +303,10 @@ fn handle_client(
                 )?;
                 write_line(
                     reader.get_mut(),
+                    "* LIST (\\HasNoChildren) \"/\" \"Junk\"",
+                )?;
+                write_line(
+                    reader.get_mut(),
                     "* LIST (\\HasNoChildren) \"/\" \"Trash\"",
                 )?;
                 write_line(reader.get_mut(), &format!("{} OK LIST completed", tag))?;
@@ -704,6 +708,8 @@ fn mailbox_path(user: &str, mbox_name: &str) -> String {
         format!("{}/.Sent", user)
     } else if mbox_name.eq_ignore_ascii_case("drafts") {
         format!("{}/.Drafts", user)
+    } else if mbox_name.eq_ignore_ascii_case("junk") || mbox_name.eq_ignore_ascii_case("spam") {
+        format!("{}/.Junk", user)
     } else if mbox_name.eq_ignore_ascii_case("trash") {
         format!("{}/.Trash", user)
     } else {

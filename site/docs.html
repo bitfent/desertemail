@@ -741,12 +741,26 @@ desertemail --config /etc/desertemail/config.toml user remove bob</code></pre>
         <div class="heading-wrap"><h3 id="ops-invites">Inviting users</h3><a class="anchor" href="#ops-invites" aria-label="Link to this section">#</a></div>
         <p>When you do not want to choose a password for someone, use <strong>Invite user</strong> on Admin. Enter <code>user@</code> one of your configured domains; the server stores a one-time token hash under <code>&lt;data_dir&gt;/invites.json</code> (7-day expiry) and shows a copyable <code>/invite?token=…</code> link once. Hand the link over any channel, or optionally email it to an <em>external</em> address they already read — not their new mailbox (they cannot log in until they set a password). They open the branded invite page, choose a password (≥8 characters), and land in their inbox. Pending invites can be regenerated (new link) or revoked; used links cannot be reused.</p>
 
-        <div class="heading-wrap"><h3 id="ops-backup">Backup &amp; restore</h3><a class="anchor" href="#ops-backup" aria-label="Link to this section">#</a></div>
+        <div class="heading-wrap"><h3 id="ops-backup">Backup &amp; migrate</h3><a class="anchor" href="#ops-backup" aria-label="Link to this section">#</a></div>
+        <p><strong>One-click web backup (admin):</strong> on the Admin page, use <strong>Download backup</strong>. That issues <code>GET /admin/backup</code> (session required; no state mutation) and returns a single uncompressed POSIX ustar file named <code>desertemail-backup-&lt;domain&gt;-&lt;YYYYMMDD-HHMM&gt;.tar</code>. Contents:</p>
+        <ul>
+          <li><code>desertemail-backup/config.toml</code></li>
+          <li><code>desertemail-backup/extras/</code> — DKIM key and TLS cert/key basenames when configured</li>
+          <li><code>desertemail-backup/data/…</code> — full data dir (maildirs including <code>.Junk</code>/<code>.Trash</code>/<code>.Sent</code>/<code>.Drafts</code>, queue, invites, greylist), excluding maildir <code>tmp/</code></li>
+        </ul>
+        <p>The download is built in memory and refused above ~512&nbsp;MiB (use the shell script for huge mailboxes).</p>
+        <p><strong>Restore on a new host:</strong></p>
+        <pre><code>desertemail --restore desertemail-backup-example.com-20260711-1200.tar \
+  --config /etc/desertemail/config.toml
+# overwrites existing config / non-empty data dir only with --force
+desertemail --config /etc/desertemail/config.toml</code></pre>
+        <p>Restore extracts config + extras next to the target config path and data under <code>&lt;config_dir&gt;/data</code>, rewriting <code>data_dir</code> in the restored config to that location.</p>
+        <p><strong>Large installs / rsync:</strong></p>
         <pre><code>./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail
 CONFIG=/etc/desertemail/config.toml DKIM=/etc/desertemail/dkim.pem \
   TLS_CERT=/etc/desertemail/tls.crt TLS_KEY=/etc/desertemail/tls.key \
   ./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail</code></pre>
-        <p><strong>Atomicity:</strong> Maildir is safe to rsync while the server runs (you may miss a message mid-write). For a perfectly consistent snapshot, stop the unit first. The script header documents restore steps (<code>rsync</code> data back, restore <code>extras/</code>, start service).</p>
+        <p><strong>Atomicity:</strong> Maildir is safe to rsync while the server runs (you may miss a message mid-write). For a perfectly consistent snapshot, stop the unit first. The script header documents rsync restore steps.</p>
 
         <div class="heading-wrap"><h3 id="ops-metrics">Health &amp; metrics</h3><a class="anchor" href="#ops-metrics" aria-label="Link to this section">#</a></div>
         <ul>

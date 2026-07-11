@@ -21,6 +21,7 @@ pub mod smtp;
 pub mod spamscore;
 pub mod spf;
 pub mod storage;
+pub mod tarball;
 pub mod tls;
 pub mod useredit;
 pub mod util;

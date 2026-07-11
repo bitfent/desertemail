@@ -830,6 +830,7 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
                 ("GET", "/starred") => page_folder(cfg, &user, "starred", req),
                 ("GET", "/sent") => page_folder(cfg, &user, "sent", req),
                 ("GET", "/drafts") => page_folder(cfg, &user, "drafts", req),
+                ("GET", "/spam") => page_folder(cfg, &user, "spam", req),
                 ("GET", "/trash") => page_folder(cfg, &user, "trash", req),
                 ("GET", "/search") => page_search(cfg, &user, req),
                 ("GET", "/msg") => page_message(cfg, &user, req),
@@ -840,11 +841,13 @@ fn route(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
                 ("POST", "/msg/star") => handle_star(cfg, &user, req),
                 ("POST", "/msg/bulk") => handle_bulk(cfg, &user, req),
                 ("POST", "/trash/empty") => handle_empty_trash(cfg, &user, req),
+                ("POST", "/spam/empty") => handle_empty_spam(cfg, &user, req),
                 ("GET", "/dns") => page_dns(cfg, &user, None, None),
                 ("POST", "/dns/check") => handle_dns_check(cfg, &user, req, peer_ip),
                 ("POST", "/dns/dkim/generate") => handle_dns_dkim_generate(cfg, &user, req),
                 ("POST", "/dns/settings") => handle_dns_settings(cfg, &user, req),
                 ("GET", "/admin") => page_admin(cfg, &user, None, None),
+                ("GET", "/admin/backup") => handle_admin_backup(cfg, &user),
                 ("POST", "/admin") => handle_admin_post(cfg, &user, req),
                 ("POST", "/admin/user/add") => handle_admin_user_add(cfg, &user, req),
                 ("POST", "/admin/user/remove") => handle_admin_user_remove(cfg, &user, req),
@@ -1313,15 +1316,28 @@ button.copy-btn:hover,button.btn-secondary:hover,.btn-ghost:hover{background:var
   display:none;position:fixed;inset:0;background:rgba(58,36,16,.35);z-index:45;
 }
 body.sidebar-open .sidebar-backdrop{display:block}
+body.sidebar-open{overflow:hidden;touch-action:none}
 @media (max-width:800px){
   .app-sidebar{
     position:fixed;left:0;top:0;transform:translateX(-105%);
     transition:transform .15s steps(3);box-shadow:6px 0 0 0 var(--accent-dark);
+    z-index:50;width:min(var(--sidebar-w),86vw);
   }
   body.sidebar-open .app-sidebar{transform:translateX(0)}
   .menu-toggle{display:inline-flex;align-items:center;justify-content:center}
-  .app-content{padding:.85rem .75rem 2rem}
+  .app-content{padding:.85rem .75rem 2rem;max-width:100%;overflow-x:clip}
+  .app-topbar{padding:.55rem .65rem}
   .app-topbar h1{font-size:.92rem}
+  .bulk-bar{gap:.3rem;padding:.35rem .4rem;flex-wrap:nowrap}
+  .bulk-bar button{min-height:40px;padding:.25rem .45rem;font-size:.7rem}
+  .bulk-bar .lbl-full{display:none}
+  .bulk-bar .lbl-short{display:inline}
+  .bulk-bar .pager{gap:.4rem;font-size:.75rem;flex:none}
+  .bulk-bar .pager .range{display:none}
+  .pix-panel{padding:.9rem .85rem;margin:.85rem 0}
+}
+@media (max-width:380px){
+  .bulk-bar{flex-wrap:wrap}
 }
 
 /* legacy top nav (login/setup only) */
@@ -1353,6 +1369,9 @@ button,.btn,input[type=submit]{
 }
 button:hover,.btn:hover,input[type=submit]:hover{background:var(--accent-light)}
 button:active,.btn:active,input[type=submit]:active{transform:translate(4px,4px);box-shadow:none}
+button:focus-visible,.btn:focus-visible,input[type=submit]:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,.star-btn:focus-visible{
+  outline:3px solid var(--accent);outline-offset:2px;
+}
 button.btn-primary{font-size:1rem;padding:.7rem 1.5rem;min-width:8rem}
 button.btn-danger{background:#c44;color:#fff}
 button.btn-danger:hover{background:#e66}
@@ -1371,54 +1390,101 @@ input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
   padding:.45rem .55rem;background:var(--panel);border:3px solid var(--border);
   box-shadow:3px 3px 0 0 var(--accent-dark);
 }
-.bulk-bar button{min-height:36px;padding:.3rem .7rem;font-size:.75rem}
-.bulk-bar .pager{margin-left:auto;font-size:.82rem;color:var(--muted);display:flex;gap:.65rem;align-items:center}
+.bulk-bar button{min-height:40px;padding:.3rem .7rem;font-size:.75rem}
+.bulk-bar .lbl-short{display:none}
+.bulk-bar .pager{margin-left:auto;font-size:.82rem;color:var(--muted);display:flex;gap:.65rem;align-items:center;flex-wrap:nowrap}
 .bulk-bar .pager a{border-bottom:none;min-height:auto;font-size:.82rem}
+.bulk-bar .pager .range{white-space:nowrap}
 
-/* --- gmail-like message list --- */
-table{border-collapse:collapse;width:100%;background:var(--panel)}
+/* --- message list (card rows; no horizontal scroll) --- */
+table{border-collapse:collapse;width:100%;background:var(--panel);max-width:100%}
 th,td{border-bottom:2px solid var(--border);padding:.55rem .6rem;text-align:left;vertical-align:top}
 th{
   background:var(--accent);color:#2a1a08;text-transform:uppercase;letter-spacing:.08em;
   font-size:.8rem;border-bottom:4px solid var(--border);
 }
-.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:.5rem 0}
-.msg-list{border:4px solid var(--border);box-shadow:6px 6px 0 0 var(--accent-dark);width:100%}
-.msg-list th{border-bottom:4px solid var(--border)}
-.msg-list td{border-bottom:2px solid var(--border);padding:.35rem .5rem;vertical-align:middle}
-.msg-list tr.msg-row{cursor:pointer}
-.msg-list tr.msg-row:hover td{background:var(--accent-light)}
-.msg-list tr.msg-row:last-child td{border-bottom:none}
-.msg-list tr.unread td{font-weight:700}
-.msg-list tr.unread{box-shadow:inset 4px 0 0 0 var(--accent)}
-.msg-list tr.focused td{outline:2px solid var(--accent);outline-offset:-2px}
-.msg-list .col-check,.msg-list .col-star{width:2.2rem;text-align:center}
-.msg-list .col-check input{width:auto;box-shadow:none;border:2px solid var(--border);min-height:auto}
-.msg-list .star-btn{
-  border:none;background:transparent;box-shadow:none;min-height:auto;padding:.2rem;
-  font-size:1.1rem;color:var(--muted);cursor:pointer;transform:none;
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:.5rem 0;max-width:100%}
+.msg-list-wrap{margin:.5rem 0;max-width:100%;overflow:hidden}
+.msg-list{
+  border:4px solid var(--border);box-shadow:6px 6px 0 0 var(--accent-dark);
+  width:100%;max-width:100%;background:var(--panel);display:flex;flex-direction:column;
 }
-.msg-list .star-btn:hover,.msg-list .star-btn:active{background:transparent;transform:none;box-shadow:none}
-.msg-list .star-btn.on{color:var(--accent)}
-.msg-list .msg-from{white-space:nowrap;max-width:11rem;overflow:hidden;text-overflow:ellipsis;font-size:.9rem}
-.msg-list .msg-subject{min-width:0}
-.msg-list .msg-subject a{
-  display:block;border-bottom:none;color:var(--ink);font-weight:inherit;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;
-  min-height:auto;padding:.15rem 0;
+.msg-row{
+  display:grid;
+  grid-template-columns:44px minmax(0,1fr) auto 44px;
+  grid-template-areas:
+    "check from date star"
+    "check subj subj star";
+  column-gap:.2rem;row-gap:.05rem;
+  align-items:center;
+  padding:.35rem .4rem;
+  border-bottom:2px solid var(--border);
+  cursor:pointer;min-width:0;max-width:100%;
 }
-.msg-list .msg-subject a:hover{background:transparent;color:var(--ink)}
-.msg-list .msg-snippet{color:var(--muted);font-weight:400;font-size:.88rem}
-.msg-list .msg-date{
-  white-space:nowrap;text-align:right;color:var(--muted);font-size:.82rem;
-  font-weight:600;width:5.5rem;
+.msg-row:last-child{border-bottom:none}
+.msg-row:hover{background:var(--accent-light)}
+.msg-row.unread{box-shadow:inset 4px 0 0 0 var(--accent)}
+.msg-row.unread .msg-from{font-weight:700}
+.msg-row.focused{outline:2px solid var(--accent);outline-offset:-2px}
+.msg-row .col-check{
+  grid-area:check;
+  display:flex;align-items:center;justify-content:center;
+  min-width:44px;min-height:44px;margin:0;padding:0;cursor:pointer;
 }
-.msg-list tr.unread .msg-date{color:var(--ink)}
-.msg-list tr.empty td{color:var(--muted);padding:1rem;text-align:center}
-@media (max-width:640px){
-  .msg-list .msg-from{max-width:7rem;font-size:.82rem}
-  .msg-list .msg-snippet{display:none}
-  .msg-list .msg-date{font-size:.75rem;width:4rem}
+.msg-row .col-check input{
+  width:1.15rem;height:1.15rem;margin:0;box-shadow:none;
+  border:2px solid var(--border);min-height:auto;accent-color:var(--accent);
+}
+.msg-row .col-star{
+  grid-area:star;
+  display:flex;align-items:center;justify-content:center;
+  min-width:44px;min-height:44px;
+}
+.msg-row .star-btn{
+  border:none;background:transparent;box-shadow:none;
+  min-width:44px;min-height:44px;padding:0;
+  font-size:1.25rem;color:var(--muted);cursor:pointer;transform:none;
+  display:inline-flex;align-items:center;justify-content:center;
+}
+.msg-row .star-btn:hover,.msg-row .star-btn:active{background:transparent;transform:none;box-shadow:none;color:var(--accent)}
+.msg-row .star-btn.on{color:var(--accent)}
+.msg-row .msg-from{
+  grid-area:from;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:.9rem;
+}
+.msg-row .msg-date{
+  grid-area:date;
+  white-space:nowrap;color:var(--muted);font-size:.78rem;font-weight:600;
+  justify-self:end;
+}
+.msg-row.unread .msg-date{color:var(--ink)}
+.msg-row .msg-line2{
+  grid-area:subj;display:flex;align-items:baseline;gap:.35rem;min-width:0;overflow:hidden;
+}
+.msg-row .msg-subject{
+  border-bottom:none;color:var(--ink);font-weight:inherit;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;max-width:100%;
+  min-height:auto;padding:0;flex:0 1 auto;
+}
+.msg-row .msg-subject:hover{background:transparent;color:var(--ink)}
+.msg-row .msg-snippet{
+  color:var(--muted);font-weight:400;font-size:.85rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 0;
+}
+.msg-row.empty{
+  display:block;color:var(--muted);padding:1rem;text-align:center;cursor:default;
+  border-bottom:none;
+}
+.msg-row.empty:hover{background:transparent}
+/* desktop: checkbox | from | subject+snippet | date | star */
+@media (min-width:801px){
+  .msg-row{
+    grid-template-columns:44px minmax(0,12rem) minmax(0,1fr) 5.5rem 44px;
+    grid-template-areas:"check from subj date star";
+    padding:.4rem .5rem;
+  }
+  .msg-row .msg-from{font-size:.9rem}
+  .msg-row .msg-date{font-size:.82rem}
 }
 
 /* --- message view --- */
@@ -1430,9 +1496,11 @@ th{
   text-transform:none;letter-spacing:0;font-size:1.2rem;text-shadow:none;
   margin:0 0 .75rem;line-height:1.35;word-break:break-word;
 }
-.msg-actions{display:flex;flex-wrap:wrap;gap:.4rem;margin:.75rem 0}
-.msg-actions form{display:inline}
-.msg-actions button,.msg-actions a.btn-ghost{min-height:40px;font-size:.78rem;padding:.35rem .75rem}
+.msg-actions{display:flex;flex-wrap:wrap;gap:.5rem;margin:.75rem 0;align-items:center}
+.msg-actions form{display:inline;margin:0}
+.msg-actions button,.msg-actions a.btn-ghost{
+  min-height:40px;font-size:.78rem;padding:.35rem .75rem;margin:0;
+}
 .msg-body{
   white-space:pre-wrap;word-break:break-word;
   font-size:1rem;line-height:1.65;color:var(--ink);
@@ -1467,10 +1535,16 @@ pre,.code,pre.code{
 .compose-cc-row{display:none}
 .compose-cc-row.is-open{display:block}
 @media (max-width:640px){
-  .compose-panel .compose-actions button{width:100%}
+  .compose-panel .compose-actions{flex-direction:column}
+  .compose-panel .compose-actions button{width:100%;max-width:100%}
   .pix-panel{box-shadow:5px 5px 0 0 var(--accent-dark);padding:1rem}
   h1{font-size:1.15rem}
   .wrap{padding:1rem .75rem 2.5rem}
+  .msg-actions{gap:.4rem}
+  .msg-actions button,.msg-actions a.btn-ghost{flex:1 1 auto;min-width:calc(50% - .3rem)}
+}
+@media (max-width:360px){
+  .msg-actions button,.msg-actions a.btn-ghost{min-width:100%}
 }
 
 /* --- admin queue cards on narrow --- */
@@ -1496,7 +1570,7 @@ pre,.code,pre.code{
 .user-row button{min-height:36px;padding:.35rem .7rem;font-size:.8rem;margin-left:.35rem}
 "#;
 
-/// Active sidebar folder key for highlighting: inbox|starred|sent|drafts|trash|dns|admin|compose|"".
+/// Active sidebar folder key for highlighting: inbox|starred|sent|drafts|spam|trash|dns|admin|compose|"".
 fn page_shell(title: &str, user: &str, body: &str) -> String {
     page_shell_nav(title, user, "", body)
 }
@@ -1561,6 +1635,7 @@ fn page_shell_app(
          <li><a class=\"{}\" href=\"/starred\">Starred</a></li>\
          <li><a class=\"{}\" href=\"/sent\">Sent</a></li>\
          <li><a class=\"{}\" href=\"/drafts\">Drafts</a></li>\
+         <li><a class=\"{}\" href=\"/spam\">Spam</a></li>\
          <li><a class=\"{}\" href=\"/trash\">Trash</a></li>\
          </ul>\
          <hr class=\"side-divider\">\
@@ -1580,6 +1655,7 @@ fn page_shell_app(
         act("starred"),
         act("sent"),
         act("drafts"),
+        act("spam"),
         act("trash"),
         act("dns"),
         format!(
@@ -1608,23 +1684,25 @@ fn page_shell_app(
 var b=document.body,t=document.getElementById("menu-toggle"),s=document.getElementById("app-sidebar"),
 bd=document.getElementById("sidebar-backdrop");
 function setOpen(o){b.classList.toggle("sidebar-open",o);if(t){t.setAttribute("aria-expanded",o?"true":"false");
-t.setAttribute("aria-label",o?"Close menu":"Open menu")}if(bd)bd.hidden=!o}
+t.setAttribute("aria-label",o?"Close menu":"Open menu")}if(bd)bd.hidden=!o;
+try{document.documentElement.style.overflow=o?"hidden":""}catch(e){}}
 if(t)t.addEventListener("click",function(){setOpen(!b.classList.contains("sidebar-open"))});
 if(bd)bd.addEventListener("click",function(){setOpen(false)});
 /* keyboard shortcuts */
 var focusIdx=-1;
-function rows(){return Array.prototype.slice.call(document.querySelectorAll("tr.msg-row[data-id]"))}
+function rows(){return Array.prototype.slice.call(document.querySelectorAll(".msg-row[data-id]"))}
 function setFocus(i){var r=rows();if(!r.length)return;r.forEach(function(x){x.classList.remove("focused")});
 if(i<0)i=0;if(i>=r.length)i=r.length-1;focusIdx=i;r[i].classList.add("focused");r[i].scrollIntoView({block:"nearest"})}
 document.addEventListener("keydown",function(e){
 var tag=(e.target&&e.target.tagName||"").toLowerCase();
 if(tag==="input"||tag==="textarea"||tag==="select"||(e.target&&e.target.isContentEditable)){
 if(e.key==="Escape"){e.target.blur();return}return}
+if(e.key==="Escape"&&b.classList.contains("sidebar-open")){setOpen(false);e.preventDefault();return}
 if(e.key==="c"){location.href="/compose";e.preventDefault()}
 else if(e.key==="/"){var sb=document.getElementById("search-box");if(sb){sb.focus();e.preventDefault()}}
 else if(e.key==="j"){setFocus(focusIdx<0?0:focusIdx+1);e.preventDefault()}
 else if(e.key==="k"){setFocus(focusIdx<0?0:focusIdx-1);e.preventDefault()}
-else if(e.key==="Enter"&&focusIdx>=0){var r=rows()[focusIdx];if(r){var a=r.querySelector("a");if(a)location.href=a.href;e.preventDefault()}}
+else if(e.key==="Enter"&&focusIdx>=0){var r=rows()[focusIdx];if(r){var href=r.getAttribute("data-href");if(href)location.href=href;e.preventDefault()}}
 else if(e.key==="x"&&focusIdx>=0){var r=rows()[focusIdx];if(r){var c=r.querySelector("input[type=checkbox]");if(c)c.checked=!c.checked;e.preventDefault()}}
 else if((e.key==="e"||e.key==="#")&&focusIdx>=0){var r=rows()[focusIdx];if(r){var c=r.querySelector("input[type=checkbox]");if(c)c.checked=true;
 var f=document.getElementById("bulk-form");var act=f&&f.querySelector("button[name=action][value=delete]");
@@ -1632,10 +1710,10 @@ if(act){act.click()}e.preventDefault()}}
 else if(e.key==="?"){alert("Shortcuts:\nc compose\n/ search\nj/k move\nEnter open\nx select\ne or # delete")}
 });
 /* row click opens message unless interactive target */
-document.querySelectorAll("tr.msg-row[data-href]").forEach(function(tr){
-tr.addEventListener("click",function(ev){
+document.querySelectorAll(".msg-row[data-href]").forEach(function(row){
+row.addEventListener("click",function(ev){
 var t=ev.target;if(t.closest("input,button,form,a,label"))return;
-location.href=tr.getAttribute("data-href");
+location.href=row.getAttribute("data-href");
 })});
 })();</script>"##;
     format!(
@@ -1751,6 +1829,7 @@ fn folder_maildir_rel(mb: &str, folder: &str) -> Option<String> {
         "" | "inbox" => Some(mb.to_string()),
         "sent" => Some(format!("{}/.Sent", mb)),
         "drafts" => Some(format!("{}/.Drafts", mb)),
+        "spam" => Some(format!("{}/.Junk", mb)),
         "trash" => Some(format!("{}/.Trash", mb)),
         "starred" => None,
         _ => Some(mb.to_string()),
@@ -1762,6 +1841,7 @@ fn folder_list_path(folder: &str) -> &'static str {
         "starred" => "/starred",
         "sent" => "/sent",
         "drafts" => "/drafts",
+        "spam" => "/spam",
         "trash" => "/trash",
         _ => "/",
     }
@@ -1772,6 +1852,7 @@ fn folder_title(folder: &str) -> &'static str {
         "starred" => "Starred",
         "sent" => "Sent",
         "drafts" => "Drafts",
+        "spam" => "Spam",
         "trash" => "Trash",
         _ => "Inbox",
     }
@@ -1932,7 +2013,7 @@ fn list_folder_page(
 
     let mut rows = String::new();
     if page.is_empty() {
-        rows.push_str("<tr class=\"empty\"><td colspan=\"5\">No messages</td></tr>");
+        rows.push_str("<div class=\"msg-row empty\">No messages</div>");
     } else {
         for (m, raw, src_folder) in page {
             let headers = extract_headers(raw);
@@ -1952,9 +2033,9 @@ fn list_folder_page(
             let unread = m.in_new || !m.flags.contains('S');
             let starred = m.flags.contains('F');
             let cls = if unread {
-                " class=\"msg-row unread\""
+                "msg-row unread"
             } else {
-                " class=\"msg-row\""
+                "msg-row"
             };
             let link = if src_folder == "drafts" {
                 format!("/compose?draft={}", m.uid)
@@ -1964,19 +2045,21 @@ fn list_folder_page(
             let star_char = if starred { "★" } else { "☆" };
             let star_cls = if starred { "star-btn on" } else { "star-btn" };
             rows.push_str(&format!(
-                "<tr{cls} data-id=\"{uid}\" data-href=\"{link}\">\
-                 <td class=\"col-check\" onclick=\"event.stopPropagation()\">\
-                 <input type=\"checkbox\" name=\"id\" value=\"{uid}\" form=\"bulk-form\"></td>\
-                 <td class=\"col-star\" onclick=\"event.stopPropagation()\">\
+                "<div class=\"{cls}\" data-id=\"{uid}\" data-href=\"{link}\" role=\"row\">\
+                 <label class=\"col-check\" onclick=\"event.stopPropagation()\">\
+                 <input type=\"checkbox\" name=\"id\" value=\"{uid}\" form=\"bulk-form\" \
+                 aria-label=\"Select message\"></label>\
+                 <span class=\"msg-from\">{from}</span>\
+                 <span class=\"msg-date\">{date}</span>\
+                 <div class=\"msg-line2\"><a class=\"msg-subject\" href=\"{link}\">{subj}</a>\
+                 <span class=\"msg-snippet\">{snip}</span></div>\
+                 <div class=\"col-star\" onclick=\"event.stopPropagation()\">\
                  <form method=\"post\" action=\"/msg/star\" class=\"inline-form\">\
                  <input type=\"hidden\" name=\"id\" value=\"{uid}\">\
                  <input type=\"hidden\" name=\"folder\" value=\"{folder}\">\
                  <input type=\"hidden\" name=\"redirect\" value=\"{redir}\">\
-                 <button type=\"submit\" class=\"{star_cls}\" title=\"Star\">{star}</button></form></td>\
-                 <td class=\"msg-from\">{from}</td>\
-                 <td class=\"msg-subject\"><a href=\"{link}\">{subj}\
-                 <span class=\"msg-snippet\"> — {snip}</span></a></td>\
-                 <td class=\"msg-date\">{date}</td></tr>",
+                 <button type=\"submit\" class=\"{star_cls}\" title=\"Star\" \
+                 aria-label=\"Star\">{star}</button></form></div></div>",
                 cls = cls,
                 uid = m.uid,
                 link = link,
@@ -2037,14 +2120,37 @@ fn list_folder_page(
          onsubmit=\"return confirm('Empty trash permanently?');\">\
          <button type=\"submit\" class=\"btn-danger\">Empty trash</button></form>"
             .to_string()
+    } else if folder == "spam" {
+        "<form method=\"post\" action=\"/spam/empty\" class=\"inline-form\" style=\"margin:.5rem 0\" \
+         onsubmit=\"return confirm('Empty spam permanently?');\">\
+         <button type=\"submit\" class=\"btn-danger\">Empty spam</button></form>"
+            .to_string()
     } else {
         String::new()
     };
 
-    let delete_label = if folder == "trash" {
+    let delete_label = if folder == "trash" || folder == "spam" {
         "Delete forever"
     } else {
         "Delete"
+    };
+    let delete_short = if folder == "trash" || folder == "spam" {
+        "Forever"
+    } else {
+        "Del"
+    };
+
+    // Spam / Not spam bulk buttons depending on folder.
+    let spam_bulk_btn = if folder == "spam" {
+        "<button type=\"submit\" name=\"action\" value=\"notspam\" class=\"btn-secondary\">\
+         <span class=\"lbl-full\">Not spam</span><span class=\"lbl-short\">Not spam</span></button>"
+            .to_string()
+    } else if folder == "inbox" || folder == "starred" || is_search {
+        "<button type=\"submit\" name=\"action\" value=\"spam\" class=\"btn-secondary\">\
+         <span class=\"lbl-full\">Spam</span><span class=\"lbl-short\">Spam</span></button>"
+            .to_string()
+    } else {
+        String::new()
     };
 
     let search_note = if !scan_note.is_empty() {
@@ -2067,16 +2173,16 @@ fn list_folder_page(
          <input type=\"hidden\" name=\"folder\" value=\"{folder}\">\
          <input type=\"hidden\" name=\"redirect\" value=\"{redir}\">\
          <div class=\"bulk-bar\">\
-         <button type=\"submit\" name=\"action\" value=\"delete\">{del}</button>\
-         <button type=\"submit\" name=\"action\" value=\"read\" class=\"btn-secondary\">Mark read</button>\
-         <button type=\"submit\" name=\"action\" value=\"unread\" class=\"btn-secondary\">Mark unread</button>\
-         <div class=\"pager\"><span>{range}</span>{newer}{older}</div>\
+         <button type=\"submit\" name=\"action\" value=\"delete\">\
+         <span class=\"lbl-full\">{del}</span><span class=\"lbl-short\">{del_short}</span></button>\
+         {spam_btn}\
+         <button type=\"submit\" name=\"action\" value=\"read\" class=\"btn-secondary\">\
+         <span class=\"lbl-full\">Mark read</span><span class=\"lbl-short\">Read</span></button>\
+         <button type=\"submit\" name=\"action\" value=\"unread\" class=\"btn-secondary\">\
+         <span class=\"lbl-full\">Mark unread</span><span class=\"lbl-short\">Unread</span></button>\
+         <div class=\"pager\"><span class=\"range\">{range}</span>{newer}{older}</div>\
          </div>\
-         <div class=\"table-scroll\">\
-         <table class=\"msg-list\"><thead><tr>\
-         <th class=\"col-check\"></th><th class=\"col-star\"></th>\
-         <th>From</th><th>Subject</th><th>Date</th></tr></thead>\
-         <tbody>{rows}</tbody></table></div></form>",
+         <div class=\"msg-list-wrap\"><div class=\"msg-list\" role=\"list\">{rows}</div></div></form>",
         banner = banner_html,
         q_note = q_note,
         search_note = search_note,
@@ -2095,6 +2201,8 @@ fn list_folder_page(
             folder_list_path(folder).to_string()
         }),
         del = delete_label,
+        del_short = delete_short,
+        spam_btn = spam_bulk_btn,
         range = range,
         newer = newer,
         older = older,
@@ -2361,7 +2469,7 @@ fn handle_bulk(cfg: &Config, user: &str, req: &Request) -> Response {
                 let _ = md.store_flags(&meta, "-FLAGS", &["\\Seen".into()]);
             }
             "delete" => {
-                if src_folder == "trash" {
+                if src_folder == "trash" || src_folder == "spam" {
                     let _ = md.expunge(&meta);
                 } else {
                     let trash = match Maildir::open(&cfg.data_dir, &format!("{}/.Trash", mb)) {
@@ -2369,6 +2477,24 @@ fn handle_bulk(cfg: &Config, user: &str, req: &Request) -> Response {
                         Err(_) => continue,
                     };
                     let _ = md.move_to(&meta, &trash);
+                }
+            }
+            "spam" => {
+                if src_folder != "spam" {
+                    let junk = match Maildir::open(&cfg.data_dir, &format!("{}/.Junk", mb)) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let _ = md.move_to(&meta, &junk);
+                }
+            }
+            "notspam" => {
+                if src_folder == "spam" {
+                    let inbox = match Maildir::open(&cfg.data_dir, &mb) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let _ = md.move_to(&meta, &inbox);
                 }
             }
             _ => {}
@@ -2424,6 +2550,21 @@ fn handle_empty_trash(cfg: &Config, user: &str, req: &Request) -> Response {
         }
     }
     Response::redirect("/trash")
+}
+
+fn handle_empty_spam(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !same_origin_ok(req) {
+        return Response::redirect("/spam");
+    }
+    let mb = mailbox_name(cfg, user);
+    if let Ok(md) = Maildir::open(&cfg.data_dir, &format!("{}/.Junk", mb)) {
+        if let Ok(msgs) = md.list_messages() {
+            for m in msgs {
+                let _ = md.expunge(&m);
+            }
+        }
+    }
+    Response::redirect("/spam")
 }
 
 // ---------------------------------------------------------------------------
@@ -3078,6 +3219,35 @@ fn page_message(cfg: &Config, user: &str, req: &Request) -> Response {
         from, date, subject, to, text_body
     );
 
+    let spam_action = if folder == "spam" {
+        format!(
+            "<form method=\"post\" action=\"/msg/bulk\">\
+             <input type=\"hidden\" name=\"folder\" value=\"spam\">\
+             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+             <input type=\"hidden\" name=\"redirect\" value=\"/\">\
+             <button type=\"submit\" name=\"action\" value=\"notspam\" class=\"btn-secondary\">Not spam</button></form>",
+            id = id
+        )
+    } else if folder == "inbox" || folder == "starred" {
+        format!(
+            "<form method=\"post\" action=\"/msg/bulk\">\
+             <input type=\"hidden\" name=\"folder\" value=\"{folder}\">\
+             <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+             <input type=\"hidden\" name=\"redirect\" value=\"{back}\">\
+             <button type=\"submit\" name=\"action\" value=\"spam\" class=\"btn-secondary\">Spam</button></form>",
+            folder = esc(folder),
+            id = id,
+            back = back
+        )
+    } else {
+        String::new()
+    };
+    let delete_label = if folder == "trash" || folder == "spam" {
+        "Delete forever"
+    } else {
+        "Delete"
+    };
+
     let body = format!(
         "<p class=\"back-link\"><a href=\"{back}\">&larr; Back to {title}</a></p>\
          <div class=\"pix-panel msg-headers\">\
@@ -3090,11 +3260,12 @@ fn page_message(cfg: &Config, user: &str, req: &Request) -> Response {
          <a class=\"btn-ghost\" href=\"/compose?mode=reply&to={rto}&subject={rsubj}&in_reply_to={mid}&references={refs}&body={qbody}\">Reply</a>\
          <a class=\"btn-ghost\" href=\"/compose?mode=replyall&to={rto}&cc={rall}&subject={rsubj}&in_reply_to={mid}&references={refs}&body={qbody}\">Reply all</a>\
          <a class=\"btn-ghost\" href=\"/compose?mode=forward&subject={fsubj}&body={fbody}\">Forward</a>\
+         {spam_action}\
          <form method=\"post\" action=\"/msg/bulk\">\
          <input type=\"hidden\" name=\"folder\" value=\"{folder}\">\
          <input type=\"hidden\" name=\"id\" value=\"{id}\">\
          <input type=\"hidden\" name=\"redirect\" value=\"{back}\">\
-         <button type=\"submit\" name=\"action\" value=\"delete\">Delete</button></form>\
+         <button type=\"submit\" name=\"action\" value=\"delete\">{del}</button></form>\
          <form method=\"post\" action=\"/msg/bulk\">\
          <input type=\"hidden\" name=\"folder\" value=\"{folder}\">\
          <input type=\"hidden\" name=\"id\" value=\"{id}\">\
@@ -3134,6 +3305,8 @@ fn page_message(cfg: &Config, user: &str, req: &Request) -> Response {
         folder = esc(folder),
         id = id,
         star = star_label,
+        spam_action = spam_action,
+        del = delete_label,
         html_note = html_note,
         body = esc(&text_body),
         attach = attach_html,
@@ -4267,6 +4440,19 @@ fn page_admin(
          <table class=\"queue-list\"><thead><tr><th>ID</th><th>Sender</th><th>Recipients</th>\
          <th>Retries</th><th>Next attempt</th><th></th></tr></thead>\
          <tbody>{}</tbody></table></div></div>\
+         <div class=\"pix-panel\"><h2>Backup &amp; migrate</h2>\
+         <p>One click downloads a single <strong>ustar</strong> archive with \
+         <code>config.toml</code>, TLS/DKIM keys (if configured), and the full \
+         <code>data_dir</code> (maildirs including Spam/Trash/Sent/Drafts, queue, \
+         invites, greylist). Maildir <code>tmp/</code> dirs are skipped. In-memory \
+         downloads are capped at ~512&nbsp;MiB — for huge mailboxes use \
+         <code>deploy/backup.sh</code> instead.</p>\
+         <p><a class=\"btn btn-primary\" href=\"/admin/backup\" style=\"display:inline-flex;text-decoration:none;border-bottom:none\">\
+         Download backup</a></p>\
+         <p class=\"muted\">Restore on a new host:</p>\
+         <pre class=\"code\">desertemail --restore desertemail-backup-….tar --config /path/to/config.toml</pre>\
+         <p class=\"muted\">Then start with <code>desertemail --config /path/to/config.toml</code>. \
+         The restore command rewrites <code>data_dir</code> next to the new config when needed.</p></div>\
          <p class=\"admin-ops\">Ops: <code>/healthz</code> · <code>/metrics</code></p>\
          <script>(function(){{\
          document.querySelectorAll('button.copy-btn').forEach(function(b){{\
@@ -4490,6 +4676,162 @@ fn handle_admin_user_quota(cfg: &Config, user: &str, req: &Request) -> Response 
         }
         Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
     }
+}
+
+/// Soft cap for in-memory backup builds (~512 MiB).
+const BACKUP_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+fn handle_admin_backup(cfg: &Config, user: &str) -> Response {
+    if !is_admin(cfg, user) {
+        return Response::html(
+            403,
+            "Forbidden",
+            page_shell_app(
+                "Admin",
+                user,
+                "admin",
+                count_inbox_unread(cfg, user),
+                None,
+                "<h1>Admin</h1><p class=\"err\">Access denied.</p>",
+            ),
+        );
+    }
+    let config_path = match cfg.config_path.as_ref() {
+        Some(p) => p.clone(),
+        None => {
+            return page_admin(
+                cfg,
+                user,
+                Some("error: config_path not set; cannot build backup"),
+                None,
+            );
+        }
+    };
+    let data_dir = std::path::PathBuf::from(&cfg.data_dir);
+    // Rough size guard before reading everything into memory.
+    let approx = dir_size_approx(&data_dir).unwrap_or(0)
+        + std::fs::metadata(&config_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+    if approx > BACKUP_MAX_BYTES {
+        return page_admin(
+            cfg,
+            user,
+            Some(&format!(
+                "error: mailbox data is about {} MiB — too large for in-browser download \
+                 (limit {} MiB). Use deploy/backup.sh for large installs.",
+                approx / (1024 * 1024),
+                BACKUP_MAX_BYTES / (1024 * 1024)
+            )),
+            None,
+        );
+    }
+
+    let dkim = cfg
+        .dkim_key_file_path()
+        .map(std::path::PathBuf::from);
+    let tls_cert = cfg.tls_cert_file.as_ref().map(std::path::PathBuf::from);
+    let tls_key = cfg.tls_key_file.as_ref().map(std::path::PathBuf::from);
+
+    let layout = crate::tarball::backup_layout(
+        &config_path,
+        &data_dir,
+        dkim.as_deref(),
+        tls_cert.as_deref(),
+        tls_key.as_deref(),
+    );
+    let tar = match crate::tarball::build_tar(&layout, |path, reason| {
+        util::log!("backup skip {}: {}", path, reason);
+    }) {
+        Ok(t) => t,
+        Err(e) => {
+            return page_admin(
+                cfg,
+                user,
+                Some(&format!("error: backup failed: {}", e)),
+                None,
+            );
+        }
+    };
+    if tar.len() as u64 > BACKUP_MAX_BYTES {
+        return page_admin(
+            cfg,
+            user,
+            Some("error: backup archive exceeded 512 MiB; use deploy/backup.sh"),
+            None,
+        );
+    }
+
+    let domain = cfg.primary_domain();
+    let domain_safe: String = domain
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stamp = backup_timestamp();
+    let filename = format!("desertemail-backup-{}-{}.tar", domain_safe, stamp);
+    Response::attachment(&filename, tar)
+}
+
+fn backup_timestamp() -> String {
+    let secs = util::now_secs();
+    let days = (secs / 86400) as i64;
+    let tod = secs % 86400;
+    let hh = tod / 3600;
+    let mm = (tod % 3600) / 60;
+    // Reuse civil date from message list helpers
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}{:02}{:02}-{:02}{:02}", y, m, d, hh, mm)
+}
+
+fn dir_size_approx(path: &std::path::Path) -> std::io::Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    if path.is_file() {
+        return Ok(std::fs::metadata(path)?.len());
+    }
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            let name = ent.file_name();
+            if name == "tmp" {
+                continue;
+            }
+            let ft = match ent.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ft.is_dir() {
+                stack.push(p);
+            } else if ft.is_file() {
+                if let Ok(m) = ent.metadata() {
+                    total = total.saturating_add(m.len());
+                }
+            }
+        }
+    }
+    Ok(total)
 }
 
 fn handle_queue_delete(cfg: &Config, user: &str, req: &Request) -> Response {

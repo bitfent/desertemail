@@ -269,7 +269,11 @@ scrape_configs:
     # authorization: { credentials: "change-me" }   # if metrics_token set
 ```
 
-### Backup
+### Backup & migrate
+
+- **Admin one-click:** Admin → **Download backup** (`GET /admin/backup`) returns one ustar with config, keys, and data (cap ~512 MiB).
+- **Restore:** `desertemail --restore backup.tar --config /path/to/config.toml` (add `--force` to overwrite).
+- **Large installs:** `./deploy/backup.sh` (rsync-friendly):
 
 ```bash
 ./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail
@@ -279,7 +283,7 @@ CONFIG=/etc/desertemail/config.toml DKIM=/etc/desertemail/dkim.pem \
   ./deploy/backup.sh /var/lib/desertemail /var/backups/desertemail
 ```
 
-See the script header for restore notes and the live-rsync consistency caveat.
+See docs (Backup & migrate) and the script header for consistency notes.
 
 ## DNS Setup (the "configure with DNS" path)
 

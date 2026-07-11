@@ -97,6 +97,10 @@ pub struct Config {
     pub spam_score_tag: i32,
     /// Score at/above which message is rejected 550. 0 or negative = disabled (default 0).
     pub spam_score_reject: i32,
+    /// Score at/above which inbound mail is delivered to the recipient's Spam
+    /// folder (Maildir `.Junk`) instead of the inbox. 0 or negative = disabled.
+    /// Default 4 (below typical reject thresholds; independent of tagging).
+    pub spam_folder_threshold: i32,
     /// Include PTR/FCrDNS in spam score (extra DNS). Default true when scoring runs.
     pub spam_check_ptr: bool,
 
@@ -170,6 +174,7 @@ impl Default for Config {
             dnsbl_reject: false,
             spam_score_tag: 5,
             spam_score_reject: 0, // disabled
+            spam_folder_threshold: 4,
             spam_check_ptr: true,
             default_quota_mb: 0,
             quotas: Arc::new(RwLock::new(HashMap::new())),
@@ -336,6 +341,9 @@ impl Config {
                 }
                 ("", "spam_score_reject") => {
                     cfg.spam_score_reject = parse_i32(&val, cfg.spam_score_reject)
+                }
+                ("", "spam_folder_threshold") => {
+                    cfg.spam_folder_threshold = parse_i32(&val, cfg.spam_folder_threshold)
                 }
                 ("", "spam_check_ptr") => cfg.spam_check_ptr = parse_bool(&val),
                 ("", "default_quota_mb") => {
@@ -780,6 +788,7 @@ dnsbls = ["zen.spamhaus.org", "bl.spamcop.net"]
 dnsbl_reject = false
 spam_score_tag = 4
 spam_score_reject = 20
+spam_folder_threshold = 6
 default_quota_mb = 100
 log_format = "json"
 acme = true
@@ -806,6 +815,7 @@ metrics_token = "secret"
         assert_eq!(cfg.dnsbls.len(), 2);
         assert_eq!(cfg.spam_score_tag, 4);
         assert_eq!(cfg.spam_score_reject, 20);
+        assert_eq!(cfg.spam_folder_threshold, 6);
         assert_eq!(cfg.default_quota_mb, 100);
         assert_eq!(cfg.log_format, "json");
         assert!(cfg.acme);
@@ -820,6 +830,7 @@ metrics_token = "secret"
         assert!(!def.dmarc_enforce);
         assert!(!def.greylist);
         assert_eq!(def.spam_score_reject, 0);
+        assert_eq!(def.spam_folder_threshold, 4);
         assert_eq!(def.default_quota_mb, 0);
         assert!(!def.acme);
         assert_eq!(def.max_message_bytes, DEFAULT_MAX_MESSAGE_BYTES);
