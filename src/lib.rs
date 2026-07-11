@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod dkim;
 pub mod dmarc;
 pub mod dns;
+pub mod doctor;
 pub mod imap;
 pub mod limits;
 pub mod metrics;

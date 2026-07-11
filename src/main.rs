@@ -14,6 +14,7 @@ use desertemail::acme;
 use desertemail::config::Config;
 use desertemail::crypto;
 use desertemail::dkim;
+use desertemail::doctor::{self, DoctorOpts};
 use desertemail::imap::ImapServer;
 use desertemail::limits;
 use desertemail::passwd;
@@ -42,6 +43,7 @@ fn main() {
     let mut dkim_dns_domain: Option<String> = None;
     let mut hash_password_mode: Option<Option<String>> = None; // Some(None)=prompt, Some(Some(p))=non-interactive
     let mut user_cmd: Option<UserCmd> = None;
+    let mut doctor_opts: Option<DoctorOpts> = None;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--config" || args[i] == "-c" {
@@ -67,6 +69,9 @@ fn main() {
             // desertemail user <add|remove|list|passwd> ...
             user_cmd = Some(parse_user_cmd(&args, i + 1));
             break;
+        } else if args[i] == "doctor" {
+            doctor_opts = Some(parse_doctor_opts(&args, i + 1));
+            break;
         } else if args[i] == "--help" || args[i] == "-h" {
             print_help();
             return;
@@ -81,6 +86,11 @@ fn main() {
 
     if let Some(cmd) = user_cmd {
         run_user_cmd(&config_path, cmd);
+        return;
+    }
+
+    if let Some(opts) = doctor_opts {
+        run_doctor(&config_path, opts);
         return;
     }
 
@@ -302,6 +312,8 @@ fn print_help() {
     println!("       desertemail user remove <email>");
     println!("       desertemail user list");
     println!("       desertemail user passwd <email>");
+    println!("       desertemail doctor [--config path] [--domain <d>] [--host <mail.hostname>]");
+    println!("                          [--public-ip <ip>] [--json] [--no-net]");
     println!();
     println!("DKIM setup:");
     println!("  1. Generate a key:  openssl genrsa -out dkim.pem 2048");
@@ -321,7 +333,81 @@ fn print_help() {
     println!("  desertemail user passwd alice");
     println!("  desertemail user remove bob");
     println!();
+    println!("Doctor (deployment readiness probe):");
+    println!("  desertemail doctor");
+    println!("  desertemail doctor --domain example.com --host mail.example.com");
+    println!("  desertemail doctor --public-ip 203.0.113.10 --json");
+    println!("  desertemail doctor --no-net   # DNS-only (skip TCP probes)");
+    println!("  Exit code = number of blockers (Fail checks). 0 = ready.");
+    println!();
     println!("See config.example.toml and README.md");
+}
+
+fn parse_doctor_opts(args: &[String], start: usize) -> DoctorOpts {
+    let mut opts = DoctorOpts::default();
+    let mut domains: Vec<String> = Vec::new();
+    let mut i = start;
+    while i < args.len() {
+        if (args[i] == "--config" || args[i] == "-c") && i + 1 < args.len() {
+            i += 2; // already applied globally
+        } else if args[i] == "--domain" && i + 1 < args.len() {
+            domains.push(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--host" && i + 1 < args.len() {
+            opts.host = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--public-ip" && i + 1 < args.len() {
+            opts.public_ip = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "--json" {
+            opts.json = true;
+            i += 1;
+        } else if args[i] == "--no-net" {
+            opts.no_net = true;
+            i += 1;
+        } else if args[i] == "--help" || args[i] == "-h" {
+            print_help();
+            std::process::exit(0);
+        } else {
+            eprintln!("Unknown doctor option: {}", args[i]);
+            eprintln!(
+                "Usage: desertemail doctor [--config path] [--domain <d>] [--host <h>] [--public-ip <ip>] [--json] [--no-net]"
+            );
+            std::process::exit(1);
+        }
+    }
+    if !domains.is_empty() {
+        opts.domains = Some(domains);
+    }
+    opts
+}
+
+fn run_doctor(config_path: &str, opts: DoctorOpts) {
+    let mut cfg = match Config::load(Path::new(config_path)) {
+        Ok(c) => c,
+        Err(e) => {
+            // Fall back like the server path, but prefer explicit failure when domains overridden.
+            eprintln!("warning: cannot load {}: {} — trying defaults", config_path, e);
+            match Config::load(Path::new("config.example.toml")) {
+                Ok(c) => c,
+                Err(_) => Config::default(),
+            }
+        }
+    };
+    // Load DKIM key if configured (doctor compares published p= against this key).
+    if let Some(ref key_path) = cfg.dkim_key_file.clone() {
+        match crypto::RsaKey::from_pem_file(Path::new(key_path)) {
+            Ok(key) => cfg.dkim_key = Some(key),
+            Err(e) => {
+                eprintln!(
+                    "warning: DKIM key file {} unreadable ({}): DKIM check will warn",
+                    key_path, e
+                );
+            }
+        }
+    }
+    let code = doctor::run(&cfg, &opts);
+    std::process::exit(code);
 }
 
 enum UserCmd {
