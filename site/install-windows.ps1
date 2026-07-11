@@ -9,14 +9,14 @@
 #
 # Placeholders substituted by site-build.sh:
 #   x86_64-pc-windows-msvc   rust triple (x86_64-pc-windows-msvc)
-#   https://desertemail.onrender.com site origin (e.g. https://example.onrender.com)
+#   https://desertemail.org site origin (e.g. https://example.onrender.com)
 
 $ErrorActionPreference = "Stop"
 
 $AppName = "desertemail"
 # Substituted at site-build time — do not edit by hand in generated files.
 $Target = "x86_64-pc-windows-msvc"
-$BaseUrl = "https://desertemail.onrender.com"
+$BaseUrl = "https://desertemail.org"
 $DefaultPrefix = Join-Path $env:USERPROFILE ".desertemail"
 if ($env:DESERTEMAIL_PREFIX) {
     $Prefix = $env:DESERTEMAIL_PREFIX

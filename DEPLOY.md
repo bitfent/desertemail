@@ -1,7 +1,8 @@
 # Deploying DesertEmail (binaries + install site)
 
-Operator guide. Binaries are **not** published to GitHub Releases. CI (or a
-maintainer) commits prebuilt binaries into `bin-dist/`; Render runs
+Operator guide. Binaries are **not** published to GitHub Releases and there is
+**no GitHub Actions / CI**. The maintainer builds every target **locally** with
+one script (`build-binaries.sh`) and commits them into `bin-dist/`; Render runs
 `site-build.sh` and serves them under `/bin/` next to the per-platform
 installers.
 
@@ -11,81 +12,59 @@ in `config.toml` (self-signed, certbot/acme.sh, etc.). There is no ACME in the
 binary and **no behavior change** to the install/site pipeline — installers and
 `site-build.sh` are unchanged.
 
-## (a) Build binaries into `bin-dist/`
+## (a) Build ALL binaries locally into `bin-dist/` — no GitHub, no cloud
 
-### Via GitHub Actions (recommended)
+`build-binaries.sh` builds every target on one machine (a Mac):
 
-The CI workflow lives at **`deploy/release.yml`** — it is NOT active there.
-GitHub only runs workflows from `.github/workflows/`, and pushing to that path
-needs a token with the `workflow` scope, so we ship it out-of-band. One-time
-activation via the GitHub web UI (your browser session has full permissions):
+- **macOS** (aarch64 + x86_64) natively via `cargo`.
+- **Linux musl** (x86_64, aarch64, armv7, armv6) and **Windows** via
+  [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild), which uses
+  **Zig** as the cross-compiler/linker — no Docker daemon, no CI.
 
-1. On github.com open the repo → **Add file → Create new file**.
-2. Name it `.github/workflows/release.yml`.
-3. Paste the contents of `deploy/release.yml` and commit.
+macOS binaries can only be built on macOS, so a Mac is the natural build host
+(it produces all the others too).
 
-From then on, GitHub Actions builds static binaries when you push a version tag
-or run **workflow_dispatch**:
+### One-time setup
 
 ```bash
-# from a clean main with the version you want
-git tag v0.1.0
-git push origin v0.1.0
+brew install zig                 # or https://ziglang.org/download/
+cargo install cargo-zigbuild
+rustup target add \
+  x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+  armv7-unknown-linux-musleabihf arm-unknown-linux-musleabihf \
+  x86_64-pc-windows-gnu \
+  x86_64-apple-darwin aarch64-apple-darwin
 ```
 
-The workflow:
-
-1. Builds the 4 Linux musl targets with `cross`, both macOS Darwin targets, and
-   Windows `x86_64-pc-windows-msvc` (artifact ends in `.exe`).
-2. Names each artifact `desertemail-<rust-triple>` (no version in the filename;
-   Windows adds `.exe`).
-3. Copies them into `bin-dist/` and commits + pushes to the default branch
-   (`CI: update prebuilt binaries`), using `GITHUB_TOKEN` with `contents: write`.
-4. Empty diffs are skipped (`git diff --cached --quiet`).
-
-Pushing `bin-dist/` triggers a Render redeploy, which publishes the binaries
-under `/bin/`.
-
-### Locally (macOS binaries, or offline)
-
-On a Mac with the Rust toolchain:
+### Build + publish
 
 ```bash
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-
-cargo build --release --target aarch64-apple-darwin
-cargo build --release --target x86_64-apple-darwin
-
-mkdir -p bin-dist
-cp target/aarch64-apple-darwin/release/desertemail \
-  bin-dist/desertemail-aarch64-apple-darwin
-cp target/x86_64-apple-darwin/release/desertemail \
-  bin-dist/desertemail-x86_64-apple-darwin
-
-# strip if desired
-strip -x bin-dist/desertemail-aarch64-apple-darwin 2>/dev/null || true
-strip -x bin-dist/desertemail-x86_64-apple-darwin 2>/dev/null || true
-
+sh build-binaries.sh             # all 7 binaries -> bin-dist/
 git add bin-dist
-git commit -m "update prebuilt macOS binaries"
-git push
+git commit -m "release binaries"
+git push                         # Render redeploys, serves them under /bin/
 ```
 
-Linux musl targets are easiest via the CI `cross` jobs (or install `cross`
-locally). Filenames must match exactly:
+Produced (names must match the installers exactly):
 
 ```text
 desertemail-x86_64-unknown-linux-musl
 desertemail-aarch64-unknown-linux-musl
 desertemail-armv7-unknown-linux-musleabihf
-desertemail-arm-unknown-linux-musleabihf
+desertemail-arm-unknown-linux-musleabihf        # ARMv6 (Pi Zero / Pi 1)
 desertemail-x86_64-apple-darwin
 desertemail-aarch64-apple-darwin
-desertemail-x86_64-pc-windows-msvc.exe
+desertemail-x86_64-pc-windows-msvc.exe          # built via windows-gnu; runs on stock Windows
 ```
 
-`site-build.sh` regenerates `site/bin/SHA256SUMS` from whatever is in
-`bin-dist/` — do not hand-maintain checksums under `site/`.
+Notes:
+- The Windows `.exe` is cross-built with the `windows-gnu` toolchain (self-contained,
+  runs on stock Windows) but named `...-msvc.exe` to match the installer's expected
+  asset name.
+- `site-build.sh` regenerates `site/bin/SHA256SUMS` from whatever is in `bin-dist/`
+  — do not hand-maintain checksums under `site/`.
+- No Rust toolchain, `cross`, Docker, or CI is required on Render — it only copies
+  the committed binaries and stamps the installers.
 
 ## (b) Host the landing page + installers on Render
 
