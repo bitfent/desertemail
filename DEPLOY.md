@@ -192,6 +192,12 @@ sudo systemctl restart desertemail   # ACME worker requests the cert at startup
 writing; `--yes` to write config even if checks fail). Same atomic config
 edits as the `/dns` web page.
 
+Note: generating production RSA keys (DKIM, ACME) requires the `openssl` CLI
+on the box — there is no *silent* in-repo fallback for real keys. Missing
+openssl yields a clear error with install instructions; operators can knowingly
+opt in to the unaudited built-in generator with
+`DESERTEMAIL_ALLOW_UNAUDITED_KEYGEN=1` (logged loudly).
+
 ### User management
 
 ```bash

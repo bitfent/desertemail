@@ -35,13 +35,12 @@ fn sessions() -> &'static Mutex<HashMap<String, String>> {
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 32 bytes from the OS CSPRNG (via util::fill_random). Timestamp/PID alone
-/// would be guessable; fill_random prefers /dev/urandom.
+/// 32 bytes from the OS CSPRNG (via util::fill_random, which panics rather
+/// than degrade to weak randomness).
 fn os_random_seed() -> [u8; 32] {
     let mut buf = [0u8; 32];
     util::fill_random(&mut buf);
-    // Fold in sha256(time+pid) so a weak fill_random fallback is strengthened
-    // the same way the previous web.rs path did.
+    // Fold in sha256(time+pid) as defense-in-depth (harmless with a strong CSPRNG).
     let material = format!("{}:{}", util::now_millis(), std::process::id());
     let dig = crypto::sha256(material.as_bytes());
     for i in 0..32 {

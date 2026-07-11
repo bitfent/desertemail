@@ -463,20 +463,50 @@ impl RsaKey {
         parse_rsa_private_key_der(&der)
     }
 
-    /// Generate an RSA key of `bits` (e.g. 2048). Slow with schoolbook arithmetic;
-    /// intended for one-shot ACME account/cert keys, not hot paths.
-    /// Prefers openssl CLI when available for speed; falls back to pure-Rust.
+    /// Generate an RSA key of `bits` (e.g. 2048).
+    ///
+    /// Production-sized keys (>= 2048 bits: DKIM, ACME account/cert) are
+    /// generated via the openssl CLI — well-tested prime generation beats
+    /// hand-rolled crypto for keys that protect real traffic. If openssl is
+    /// unavailable this returns an actionable error instead of silently
+    /// degrading to the in-repo keygen.
+    ///
+    /// Operators on boxes without openssl (stock Windows, minimal containers)
+    /// can explicitly opt in to the unaudited pure-Rust generator by setting
+    /// `DESERTEMAIL_ALLOW_UNAUDITED_KEYGEN=1`; a loud warning is logged.
+    ///
+    /// Smaller keys (< 2048 bits) are test-sized; they still try openssl first
+    /// and may fall back to the pure-Rust generator so the test suite runs on
+    /// machines without openssl.
     pub fn generate(bits: usize) -> Result<Self, String> {
         if bits < 512 || bits % 8 != 0 {
             return Err("RSA bits must be >= 512 and multiple of 8".into());
         }
-        // Prefer openssl for production-sized keys (fast + well-tested).
-        if bits >= 1024 {
-            if let Ok(key) = generate_via_openssl(bits) {
-                return Ok(key);
+        match generate_via_openssl(bits) {
+            Ok(key) => Ok(key),
+            Err(e) if bits >= 2048 => {
+                if unaudited_keygen_allowed() {
+                    util::log!(
+                        "WARNING: openssl unavailable ({}); generating {}-bit RSA key with the \
+                         UNAUDITED in-repo generator (DESERTEMAIL_ALLOW_UNAUDITED_KEYGEN=1). \
+                         Prefer installing openssl for production keys.",
+                        e,
+                        bits
+                    );
+                    return generate_rsa_pure(bits);
+                }
+                Err(format!(
+                    "RSA key generation requires the `openssl` command ({}). \
+                     Install it (apt/apk install openssl, brew install openssl) and retry — \
+                     or generate the key on another machine: `openssl genrsa -out dkim.pem {}` \
+                     and set dkim_key_file in config.toml. To knowingly use the unaudited \
+                     built-in generator instead, set DESERTEMAIL_ALLOW_UNAUDITED_KEYGEN=1",
+                    e, bits
+                ))
             }
+            // Test-sized keys only: pure-Rust fallback (never for production keys).
+            Err(_) => generate_rsa_pure(bits),
         }
-        generate_rsa_pure(bits)
     }
 
     /// PKCS#1 PEM (`BEGIN RSA PRIVATE KEY`).
@@ -911,6 +941,14 @@ fn der_name_cn(common_name: &str, san_dns: &[String]) -> Vec<u8> {
         rdns.extend_from_slice(&set);
     }
     der_tlv(0x30, &rdns)
+}
+
+/// Explicit opt-in to the unaudited in-repo RSA keygen for production-sized
+/// keys (accepts 1/true/yes/on, case-insensitive).
+fn unaudited_keygen_allowed() -> bool {
+    std::env::var("DESERTEMAIL_ALLOW_UNAUDITED_KEYGEN")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 fn generate_via_openssl(bits: usize) -> Result<RsaKey, String> {

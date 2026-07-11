@@ -292,6 +292,14 @@ prints the DNS TXT. `setup https` runs the same HTTPS readiness checks as the we
 enables ACME + `public_url` in config — restart desertemail so the server's ACME worker can
 request the cert (the CLI does not start that thread itself).
 
+> **Requires `openssl`:** production RSA keys (DKIM, ACME) are generated via the
+> `openssl` CLI — there is deliberately no *silent* fallback for real keys.
+> If it is missing you get a clear error; install it (`apt/apk install openssl`,
+> `brew install openssl`) or generate the key elsewhere and set `dkim_key_file`.
+> On boxes where openssl is not an option, you can knowingly opt in to the
+> unaudited built-in generator with `DESERTEMAIL_ALLOW_UNAUDITED_KEYGEN=1`
+> (a loud warning is logged).
+
 ### Health & metrics
 
 - `GET /healthz` — liveness (`200 ok`, no auth)

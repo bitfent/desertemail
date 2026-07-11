@@ -589,6 +589,8 @@ maybe_generate_dkim() {
     fi
   else
     warn "openssl not found; skipping DKIM key generation"
+    warn "later: install openssl, then run: ${BIN_DIR}/${APP_NAME} setup dkim --config ${CONFIG_PATH}"
+    warn "(no openssl possible? opt in to the unaudited built-in keygen with DESERTEMAIL_ALLOW_UNAUDITED_KEYGEN=1)"
     DKIM_KEY=""
   fi
 }

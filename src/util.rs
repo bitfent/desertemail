@@ -1,4 +1,4 @@
-//! Utility helpers: pure std (TLS lives in tls.rs).
+//! Utility helpers: std + ring's CSPRNG as randomness backstop (TLS lives in tls.rs).
 
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -33,8 +33,12 @@ pub fn now_millis() -> u128 {
 }
 
 /// Fill `buf` with random bytes from the OS CSPRNG (`/dev/urandom` or
-/// BCryptGenRandom). Falls back to a time+pid mix if unavailable (same idea
-/// as the web session seed fallback; prefer OS entropy).
+/// BCryptGenRandom), falling back to ring's audited SystemRandom.
+///
+/// This feeds security-critical material (RSA primes, password salts, session
+/// and invite tokens), so there is deliberately **no** weak fallback: if no
+/// CSPRNG is available at all the process aborts rather than silently using
+/// predictable randomness.
 pub fn fill_random(buf: &mut [u8]) {
     if buf.is_empty() {
         return;
@@ -72,18 +76,14 @@ pub fn fill_random(buf: &mut [u8]) {
             return;
         }
     }
-    // Last-resort fallback (CSPRNG unavailable): mix time + pid.
-    // Callers that need crypto-quality randomness should prefer passwd's
-    // path which can also hash via crypto::sha256 when available.
-    let mut state = (now_millis() as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(std::process::id() as u64);
-    for b in buf.iter_mut() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
-        *b = (state >> 33) as u8;
+    // OS path unavailable — use ring's audited CSPRNG (getrandom syscall etc.).
+    use ring::rand::SecureRandom;
+    if ring::rand::SystemRandom::new().fill(buf).is_ok() {
+        return;
     }
+    // No secure randomness anywhere: refuse to run rather than hand out
+    // predictable session tokens / RSA primes.
+    panic!("no secure random source available (/dev/urandom, BCrypt, and ring all failed)");
 }
 
 /// Hard cap on a single protocol line. Without it, a client sending an

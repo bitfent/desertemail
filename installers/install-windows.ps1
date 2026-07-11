@@ -380,6 +380,8 @@ function Invoke-Configure {
             }
         } else {
             Write-Warn "openssl.exe not found in PATH; skipping DKIM key generation"
+            Write-Warn "later: install openssl, then run: desertemail setup dkim --config `"$ConfigPath`""
+            Write-Warn "(no openssl possible? opt in to the unaudited built-in keygen with DESERTEMAIL_ALLOW_UNAUDITED_KEYGEN=1)"
             $script:DkimKey = ""
         }
     }
