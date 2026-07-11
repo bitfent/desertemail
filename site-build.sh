@@ -16,7 +16,11 @@ set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 cd "${ROOT}"
 
-BASE_URL="${RENDER_EXTERNAL_URL:-${SITE_BASE_URL:-}}"
+# SITE_BASE_URL is an explicit override and MUST win over Render's auto value:
+# on a custom domain, RENDER_EXTERNAL_URL is still the *.onrender.com host, so
+# checking it first would ignore SITE_BASE_URL and stamp the wrong origin into
+# the installers and OG tags.
+BASE_URL="${SITE_BASE_URL:-${RENDER_EXTERNAL_URL:-}}"
 if [ -z "${BASE_URL}" ]; then
   # Local / offline build: installers still need an absolute origin for curl|sh.
   warn_msg="SITE_BASE_URL and RENDER_EXTERNAL_URL unset; defaulting to http://127.0.0.1:4173 (local dev)"
