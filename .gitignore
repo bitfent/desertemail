@@ -2,4 +2,5 @@ target/
 *.swp
 .DS_Store
 site/install-*.sh
+site/install-windows.ps1
 site/bin/
