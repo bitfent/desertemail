@@ -3,4 +3,5 @@ target/
 .DS_Store
 site/install-*.sh
 site/install-windows.ps1
+site/uninstall.sh
 site/bin/

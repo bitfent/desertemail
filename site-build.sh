@@ -33,6 +33,7 @@ BASE_URL=$(printf '%s' "${BASE_URL}" | sed 's|/*$||')
 
 TEMPLATE="${ROOT}/installers/template.sh"
 SOURCE_INSTALLER="${ROOT}/installers/build-from-source.sh"
+UNINSTALLER="${ROOT}/installers/uninstall.sh"
 WIN_TEMPLATE="${ROOT}/installers/install-windows.ps1"
 SITE_DIR="${ROOT}/site"
 
@@ -42,6 +43,10 @@ if [ ! -f "${TEMPLATE}" ]; then
 fi
 if [ ! -f "${SOURCE_INSTALLER}" ]; then
   printf '%s\n' "error: missing ${SOURCE_INSTALLER}" >&2
+  exit 1
+fi
+if [ ! -f "${UNINSTALLER}" ]; then
+  printf '%s\n' "error: missing ${UNINSTALLER}" >&2
   exit 1
 fi
 if [ ! -f "${WIN_TEMPLATE}" ]; then
@@ -92,6 +97,10 @@ done
 # Build-from-source installer (no placeholders)
 cp "${SOURCE_INSTALLER}" "${SITE_DIR}/install-from-source.sh"
 printf '%s\n' "wrote ${SITE_DIR}/install-from-source.sh"
+
+# Uninstaller (no placeholders — platform-agnostic)
+cp "${UNINSTALLER}" "${SITE_DIR}/uninstall.sh"
+printf '%s\n' "wrote ${SITE_DIR}/uninstall.sh"
 
 # Windows PowerShell installer
 _win_out="${SITE_DIR}/install-windows.ps1"

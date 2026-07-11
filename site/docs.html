@@ -570,9 +570,13 @@ export PATH="$HOME/.desertemail/bin:$PATH"
 
       <section class="pix-panel" aria-labelledby="uninstall">
         <div class="heading-wrap"><h2 id="uninstall">How to uninstall</h2><a class="anchor" href="#uninstall" aria-label="Link to this section">#</a></div>
+        <p>Easiest — one command (shows a summary, asks before deleting; mail data is kept unless you confirm):</p>
+        <pre><code>curl -fsSL https://desertemail.org/uninstall.sh | sh</code></pre>
+        <p>Non-interactive (CI / scripts): set <code>DESERTEMAIL_NONINTERACTIVE=1</code> and <code>DESERTEMAIL_UNINSTALL=1</code>; add <code>DESERTEMAIL_PURGE_DATA=1</code> only if you also want mail data removed. Honor <code>DESERTEMAIL_PREFIX</code> if you installed elsewhere.</p>
+        <div class="heading-wrap"><h3 id="uninstall-manual">Manual steps (fallback)</h3><a class="anchor" href="#uninstall-manual" aria-label="Link to this section">#</a></div>
         <ol>
           <li>Stop the process: <code>systemctl stop desertemail</code> (Linux unit), <code>launchctl bootout gui/$(id -u)/org.desertemail</code> (macOS agent), or kill the background process.</li>
-          <li>Delete the prefix directory: <code>rm -rf ~/.desertemail</code> (or your <code>DESERTEMAIL_PREFIX</code>).</li>
+          <li>Delete the prefix directory: <code>rm -rf ~/.desertemail</code> (or your <code>DESERTEMAIL_PREFIX</code>). Keep <code>data/</code> if you want to preserve mail.</li>
           <li>Remove the PATH block between the markers in your shell rc (or remove the user PATH entry on Windows).</li>
           <li>If installed: <code>sudo systemctl disable --now desertemail</code> and <code>sudo rm /etc/systemd/system/desertemail.service</code>, then <code>sudo systemctl daemon-reload</code>.</li>
           <li>On macOS, also remove <code>~/Library/LaunchAgents/org.desertemail.plist</code> if present.</li>

@@ -7,6 +7,7 @@
 #   DESERTEMAIL_DATA_DIR, DESERTEMAIL_WEBMAIL=1|0, DESERTEMAIL_PORTS=high|privileged
 #   DESERTEMAIL_DKIM=1|0, DESERTEMAIL_SYSTEMD=1|0
 #   DESERTEMAIL_AUTOSTART=1|0  (default: 1 interactive, 0 non-interactive)
+#   (re-install) non-interactive keeps existing config; interactive offers keep/fresh
 #
 # Placeholders substituted by site-build.sh:
 #   __TARGET__   rust triple (e.g. x86_64-unknown-linux-musl)
@@ -266,6 +267,186 @@ web_url() {
 }
 
 # ---------------------------------------------------------------------------
+# Previous-instance detection / fresh-install cleanup
+# ---------------------------------------------------------------------------
+
+PATH_MARKER_BEGIN="# >>> desertemail PATH >>>"
+PATH_MARKER_END="# <<< desertemail PATH <<<"
+
+parse_existing_data_dir() {
+  # Sets EXISTING_DATA_DIR from config.toml (or default $PREFIX/data if present).
+  EXISTING_DATA_DIR=""
+  if [ -f "${CONFIG_PATH}" ]; then
+    _line=$(grep -E '^[[:space:]]*data_dir[[:space:]]*=' "${CONFIG_PATH}" 2>/dev/null | head -n 1 || true)
+    if [ -n "${_line}" ]; then
+      EXISTING_DATA_DIR=$(printf '%s' "${_line}" | sed \
+        -e 's/^[[:space:]]*data_dir[[:space:]]*=[[:space:]]*//' \
+        -e 's/^"//' -e 's/"[[:space:]]*$//' \
+        -e "s/^'//" -e "s/'[[:space:]]*$//" \
+        -e 's/[[:space:]]*$//')
+    fi
+  fi
+  if [ -z "${EXISTING_DATA_DIR}" ] && [ -d "${PREFIX}/data" ]; then
+    EXISTING_DATA_DIR="${PREFIX}/data"
+  fi
+}
+
+stop_existing_instance() {
+  # Stop launchd / residual process for this install prefix so the binary can be replaced.
+  _bin="${BIN_DIR}/${APP_NAME}"
+  if is_darwin && command -v launchctl >/dev/null 2>&1; then
+    _plist="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+    launchctl bootout "gui/$(id -u)/${LAUNCHD_LABEL}" 2>/dev/null || true
+    if [ -f "${_plist}" ]; then
+      launchctl unload "${_plist}" 2>/dev/null || true
+    fi
+  fi
+  # Best-effort systemd stop (do not remove unit here — fresh reinstall may reuse it)
+  if command -v systemctl >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then
+      systemctl stop desertemail 2>/dev/null || true
+      systemctl stop desertemail.service 2>/dev/null || true
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      sudo -n systemctl stop desertemail 2>/dev/null || true
+      sudo -n systemctl stop desertemail.service 2>/dev/null || true
+    fi
+  fi
+  if [ -e "${_bin}" ]; then
+    _me=$(id -u)
+    if command -v pgrep >/dev/null 2>&1; then
+      _pgrep_out=$(pgrep -u "${_me}" -f "${_bin}" 2>/dev/null || true)
+      if [ -n "${_pgrep_out}" ]; then
+        printf '%s\n' "${_pgrep_out}" | while IFS= read -r _pid || [ -n "${_pid}" ]; do
+          [ -n "${_pid}" ] || continue
+          case "${_pid}" in
+            ''|*[!0-9]*) continue ;;
+          esac
+          if [ "${_pid}" -eq "$$" ] 2>/dev/null; then
+            continue
+          fi
+          kill "${_pid}" 2>/dev/null || true
+          sleep 0.2 2>/dev/null || true
+          kill -9 "${_pid}" 2>/dev/null || true
+        done
+      fi
+    else
+      # shellcheck disable=SC2009
+      ps -ax -o pid=,uid=,command= 2>/dev/null | while IFS= read -r _line || [ -n "${_line}" ]; do
+        case "${_line}" in
+          *"${_bin}"*)
+            _pid=$(printf '%s' "${_line}" | awk '{print $1}')
+            _uid=$(printf '%s' "${_line}" | awk '{print $2}')
+            case "${_pid}" in
+              ''|*[!0-9]*) continue ;;
+            esac
+            if [ "${_uid}" = "${_me}" ] && [ "${_pid}" -ne "$$" ] 2>/dev/null; then
+              kill "${_pid}" 2>/dev/null || true
+              sleep 0.2 2>/dev/null || true
+              kill -9 "${_pid}" 2>/dev/null || true
+            fi
+            ;;
+        esac
+      done || true
+    fi
+  fi
+}
+
+fresh_install_cleanup() {
+  # Stop running instance, remove binary/config/plist (and optionally mail data).
+  # PATH markers are left alone — ensure_path is idempotent.
+  # Parse data_dir before config is deleted.
+  parse_existing_data_dir
+
+  info "Fresh install: stopping previous instance and clearing old files ..."
+  stop_existing_instance
+
+  _plist="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+  if [ -f "${_plist}" ]; then
+    rm -f "${_plist}"
+    info "Removed ${_plist}"
+  fi
+
+  _bin="${BIN_DIR}/${APP_NAME}"
+  if [ -e "${_bin}" ]; then
+    rm -f "${_bin}"
+    info "Removed ${_bin}"
+  fi
+  if [ -f "${CONFIG_PATH}" ]; then
+    rm -f "${CONFIG_PATH}"
+    info "Removed ${CONFIG_PATH}"
+  fi
+  if [ -f "${PREFIX}/dkim.pem" ]; then
+    rm -f "${PREFIX}/dkim.pem"
+    info "Removed ${PREFIX}/dkim.pem"
+  fi
+  if [ -f "${LOG_PATH}" ]; then
+    rm -f "${LOG_PATH}"
+  fi
+
+  if [ -z "${EXISTING_DATA_DIR}" ] && [ -d "${PREFIX}/data" ]; then
+    EXISTING_DATA_DIR="${PREFIX}/data"
+  fi
+
+  if [ -n "${EXISTING_DATA_DIR}" ] && [ -d "${EXISTING_DATA_DIR}" ]; then
+    if [ "${INTERACTIVE}" -eq 1 ]; then
+      yes_no "Also delete all mail data at ${EXISTING_DATA_DIR}?" "N"
+      if [ "${REPLY}" = "y" ]; then
+        rm -rf "${EXISTING_DATA_DIR}"
+        info "Removed mail data at ${EXISTING_DATA_DIR}"
+      else
+        info "Keeping mail data at ${EXISTING_DATA_DIR}"
+      fi
+    else
+      # Non-interactive never purges data silently
+      info "Keeping mail data at ${EXISTING_DATA_DIR}"
+    fi
+  fi
+}
+
+maybe_handle_existing_install() {
+  # Before download/configure: if an install already exists, offer keep vs fresh.
+  # Non-interactive: keep config (current behavior) and only update the binary later.
+  _bin="${BIN_DIR}/${APP_NAME}"
+  _has=0
+  if [ -e "${_bin}" ] || [ -f "${CONFIG_PATH}" ]; then
+    _has=1
+  fi
+  if [ "${_has}" -eq 0 ]; then
+    return 0
+  fi
+
+  info ""
+  info "Existing installation found at ${PREFIX}"
+  if [ -e "${_bin}" ]; then
+    info "  binary: ${_bin}"
+  fi
+  if [ -f "${CONFIG_PATH}" ]; then
+    info "  config: ${CONFIG_PATH}"
+  fi
+
+  if [ "${INTERACTIVE}" -eq 0 ]; then
+    info "Non-interactive: keeping config and updating binary."
+    # Still stop a running instance so the binary can be replaced safely.
+    stop_existing_instance
+    return 0
+  fi
+
+  info ""
+  info "  [k]eep config and update binary (default)"
+  info "  [f]resh install (stop services, remove old binary/config first)"
+  prompt "Existing installation found. keep or fresh?" "k"
+  case "${REPLY}" in
+    f|F|fresh|FRESH|Fresh)
+      fresh_install_cleanup
+      ;;
+    *)
+      info "Keeping existing config; will update binary only."
+      stop_existing_instance
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Download binary from this site's /bin/ (no GitHub Releases / API)
 # ---------------------------------------------------------------------------
 
@@ -324,9 +505,6 @@ install_binary() {
 # ---------------------------------------------------------------------------
 # PATH wiring
 # ---------------------------------------------------------------------------
-
-PATH_MARKER_BEGIN="# >>> desertemail PATH >>>"
-PATH_MARKER_END="# <<< desertemail PATH <<<"
 
 ensure_path() {
   case ":${PATH}:" in
@@ -997,6 +1175,8 @@ print_summary() {
 main() {
   print_logo
   info "Target: ${TARGET}"
+
+  maybe_handle_existing_install
 
   step "1" "Download"
   install_binary
