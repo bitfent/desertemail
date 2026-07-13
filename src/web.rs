@@ -1117,7 +1117,10 @@ fn handle_connection(
              base-uri 'none'; frame-ancestors 'none'; object-src 'none'",
         )
         .with_header("X-Frame-Options", "DENY")
-        .with_header("Referrer-Policy", "no-referrer");
+        // "same-origin" (not "no-referrer"): a no-referrer policy makes
+        // Chromium send "Origin: null" on same-origin form POSTs, which
+        // breaks the same_origin_ok CSRF check. Still leaks nothing cross-site.
+        .with_header("Referrer-Policy", "same-origin");
     resp.write_to(reader.get_mut())
 }
 
@@ -1490,6 +1493,13 @@ fn metrics_authorized(cfg: &Config, req: &Request) -> bool {
 /// Same-origin check for state-changing POSTs (CSRF-ish).
 /// When Origin or Referer is present, require it to match Host.
 fn same_origin_ok(req: &Request) -> bool {
+    // Prefer Sec-Fetch-Site when the browser sends it: with a restrictive
+    // Referrer-Policy, Chromium serializes Origin as "null" even for
+    // same-origin form POSTs, so Origin alone would reject legitimate forms.
+    // "none" = user-initiated navigation (typed URL / bookmark).
+    if let Some(sfs) = req.headers.get("sec-fetch-site") {
+        return matches!(sfs.trim().to_ascii_lowercase().as_str(), "same-origin" | "none");
+    }
     let host = match req.headers.get("host") {
         Some(h) if !h.is_empty() => h.as_str(),
         _ => return true, // no Host — cannot verify; allow (local/test)
@@ -6193,6 +6203,53 @@ mod tests {
             "mail.example.com"
         ));
         assert!(!origin_matches_host("https://evil.com", "mail.example.com"));
+    }
+
+    fn req_with_headers(pairs: &[(&str, &str)]) -> Request {
+        let mut headers = HashMap::new();
+        for (k, v) in pairs {
+            headers.insert(k.to_string(), v.to_string());
+        }
+        Request {
+            method: "POST".into(),
+            path: "/setup".into(),
+            query: HashMap::new(),
+            headers,
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn same_origin_ok_prefers_sec_fetch_site() {
+        // Chromium sends "Origin: null" on same-origin form POSTs when the
+        // page has a strict referrer policy; Sec-Fetch-Site must win.
+        assert!(same_origin_ok(&req_with_headers(&[
+            ("host", "localhost:8080"),
+            ("origin", "null"),
+            ("sec-fetch-site", "same-origin"),
+        ])));
+        assert!(same_origin_ok(&req_with_headers(&[
+            ("host", "localhost:8080"),
+            ("sec-fetch-site", "none"),
+        ])));
+        assert!(!same_origin_ok(&req_with_headers(&[
+            ("host", "localhost:8080"),
+            ("origin", "http://localhost:8080"),
+            ("sec-fetch-site", "cross-site"),
+        ])));
+        // No Sec-Fetch-Site (older clients): fall back to Origin/Referer.
+        assert!(same_origin_ok(&req_with_headers(&[
+            ("host", "localhost:8080"),
+            ("origin", "http://localhost:8080"),
+        ])));
+        assert!(!same_origin_ok(&req_with_headers(&[
+            ("host", "localhost:8080"),
+            ("origin", "null"),
+        ])));
+        assert!(!same_origin_ok(&req_with_headers(&[
+            ("host", "mail.example.com"),
+            ("origin", "https://evil.com"),
+        ])));
     }
 
     #[test]
