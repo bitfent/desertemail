@@ -1202,7 +1202,7 @@ fn route_inner(
     }
 
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/login") => page_login(None, 200),
+        ("GET", "/login") => page_login(None, 200, req.query.get("next").map(|s| s.as_str())),
         ("POST", "/login") => handle_login(cfg, req, secure, peer_ip),
         ("GET", "/invite") => page_invite(cfg, req, None, 200),
         ("POST", "/invite") => handle_invite_redeem(cfg, req, secure, peer_ip),
@@ -1213,7 +1213,16 @@ fn route_inner(
         _ => {
             let user = match user {
                 Some(u) => u,
-                None => return Response::redirect("/login"),
+                // Signed out (e.g. server restart cleared sessions): send to
+                // login and bring the user back to the page they were on.
+                None => {
+                    return match safe_return_path(&req.path) {
+                        Some(p) if p != "/" => {
+                            Response::redirect(&format!("/login?next={}", p))
+                        }
+                        _ => Response::redirect("/login"),
+                    };
+                }
             };
             match (req.method.as_str(), req.path.as_str()) {
                 ("GET", "/") | ("GET", "/inbox") => page_inbox(cfg, &user, req),
@@ -2135,6 +2144,7 @@ function rows(){return Array.prototype.slice.call(document.querySelectorAll(".ms
 function setFocus(i){var r=rows();if(!r.length)return;r.forEach(function(x){x.classList.remove("focused")});
 if(i<0)i=0;if(i>=r.length)i=r.length-1;focusIdx=i;r[i].classList.add("focused");r[i].scrollIntoView({block:"nearest"})}
 document.addEventListener("keydown",function(e){
+if(e.ctrlKey||e.metaKey||e.altKey)return;
 var tag=(e.target&&e.target.tagName||"").toLowerCase();
 if(tag==="input"||tag==="textarea"||tag==="select"||(e.target&&e.target.isContentEditable)){
 if(e.key==="Escape"){e.target.blur();return}return}
@@ -2180,22 +2190,54 @@ location.href=row.getAttribute("data-href");
     )
 }
 
-fn page_login(error: Option<&str>, status: u16) -> Response {
+/// Map any request path to the page users may safely return to after login
+/// (first path segment, allowlisted). Prevents open-redirect via `next`.
+fn safe_return_path(p: &str) -> Option<String> {
+    const PAGES: [&str; 11] = [
+        "/", "/inbox", "/starred", "/sent", "/drafts", "/spam", "/trash", "/search",
+        "/compose", "/dns", "/admin",
+    ];
+    let first = format!(
+        "/{}",
+        p.trim_start_matches('/').split(['/', '?', '#']).next().unwrap_or("")
+    );
+    let first = if first == "/" { "/".to_string() } else { first };
+    if PAGES.contains(&first.as_str()) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn page_login(error: Option<&str>, status: u16, next: Option<&str>) -> Response {
     let err = error
         .map(|e| format!("<p class=\"err\">{}</p>", esc(e)))
+        .unwrap_or_default();
+    let next_valid = next.and_then(|n| safe_return_path(n)).filter(|n| n != "/");
+    let subtitle = if next_valid.is_some() {
+        "You were signed out (this happens when the server restarts) — sign in to \
+         continue where you left off"
+    } else {
+        "Credentials were chosen during setup"
+    };
+    let next_field = next_valid
+        .as_ref()
+        .map(|n| format!("<input type=\"hidden\" name=\"next\" value=\"{}\">", esc(n)))
         .unwrap_or_default();
     let body = format!(
         "<div class=\"login-wrap\"><div class=\"pix-panel login-card\">\
          <div class=\"login-brand\">{}<span>DESERTEMAIL</span></div>\
          <h1>Login</h1>\
          <p class=\"muted\" style=\"text-align:center;margin-top:-.35rem;font-size:.85rem\">\
-         Credentials were chosen during setup</p>\
-         {}<form method=\"post\" action=\"/login\">\
+         {}</p>\
+         {}<form method=\"post\" action=\"/login\">{}\
          <label>Username</label><input type=\"text\" name=\"username\" autofocus required autocomplete=\"username\">\
          <label>Password</label><input type=\"password\" name=\"password\" required autocomplete=\"current-password\">\
          <p><button type=\"submit\">Sign in</button></p></form></div></div>",
         CACTUS_SVG,
-        err
+        esc(subtitle),
+        err,
+        next_field
     );
     let reason = if status == 429 {
         "Too Many Requests"
@@ -2206,14 +2248,15 @@ fn page_login(error: Option<&str>, status: u16) -> Response {
 }
 
 fn handle_login(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Response {
-    if !ratelimit::check_allowed(peer_ip) {
-        return page_login(Some("Too many failed attempts, try later"), 429);
-    }
     let form = form_body(req);
+    let next = form.get("next").map(|s| s.as_str());
+    if !ratelimit::check_allowed(peer_ip) {
+        return page_login(Some("Too many failed attempts, try later"), 429, next);
+    }
     let username = form.get("username").map(|s| s.trim()).unwrap_or("");
     let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
     if username.is_empty() {
-        return page_login(Some("Username required"), 200);
+        return page_login(Some("Username required"), 200, next);
     }
     if !auth::authenticate(cfg, username, password) {
         ratelimit::record_failure(peer_ip);
@@ -2227,14 +2270,17 @@ fn handle_login(cfg: &Config, req: &Request, secure: bool, peer_ip: &str) -> Res
             "proto" => "web",
             "result" => "fail"
         );
-        return page_login(Some("Invalid username or password"), 200);
+        return page_login(Some("Invalid username or password"), 200, next);
     }
     ratelimit::record_success(peer_ip);
     metrics::inc_auth_success();
     let user = username.to_lowercase();
     let token = make_session_token(&user);
     set_session(&token, &user);
-    Response::redirect("/").with_cookie(&session_cookie(&token, secure))
+    let dest = next
+        .and_then(safe_return_path)
+        .unwrap_or_else(|| "/".to_string());
+    Response::redirect(&dest).with_cookie(&session_cookie(&token, secure))
 }
 
 fn mailbox_name(cfg: &Config, user: &str) -> String {
@@ -3086,6 +3132,44 @@ pub fn build_dns_records(
     out
 }
 
+/// Registrar-form "Name"/"Host" field for a record: the short form every major
+/// provider (Namecheap, GoDaddy, Cloudflare, Porkbun) expects — `@` for the
+/// domain itself, the bare prefix otherwise (pure; unit-tested).
+pub fn registrar_name(fqdn: &str, domain: &str) -> String {
+    let n = fqdn.trim().trim_end_matches('.');
+    let d = domain.trim().trim_end_matches('.');
+    if n.eq_ignore_ascii_case(d) {
+        return "@".to_string();
+    }
+    match n.strip_suffix(&format!(".{}", d)) {
+        Some(prefix) if !prefix.is_empty() => prefix.to_string(),
+        _ => n.to_string(),
+    }
+}
+
+/// Registrar-form "Value" for a record, plus the MX priority when the value
+/// carries one (registrar forms ask for priority in its own field). Trailing
+/// dots are stripped: some providers reject them, all accept the bare form.
+pub fn registrar_value(rec: &DnsRecordAdvice) -> (String, Option<String>) {
+    if rec.rtype == "MX" {
+        if let Some((prio, target)) = rec.value.trim().split_once(' ') {
+            if prio.chars().all(|c| c.is_ascii_digit()) {
+                return (
+                    target.trim().trim_end_matches('.').to_string(),
+                    Some(prio.to_string()),
+                );
+            }
+        }
+    }
+    let v = rec.value.trim();
+    // Hostname-ish values lose the trailing dot; TXT payloads stay untouched.
+    if rec.rtype == "TXT" {
+        (v.to_string(), None)
+    } else {
+        (v.trim_end_matches('.').to_string(), None)
+    }
+}
+
 /// State for the "HTTPS with your own domain" panel after a verify/enable POST.
 struct HttpsPanelState {
     domain: String,
@@ -3183,14 +3267,29 @@ fn page_dns_full(
         wiz_cls(https_done, now_step == 3),
     );
 
-    // --- Step 1: domain --------------------------------------------------
+    // --- Step 1: domain + webmail subdomain --------------------------------
     let domain_value = if domain_done { primary.clone() } else { String::new() };
+    // Subdomain prefill: strip ".<domain>" from public_host; empty public_host
+    // (or one equal to the domain) means logins happen at the domain itself.
+    let sub_prefill = {
+        let ph = cfg.public_host_name();
+        if !domain_done || ph.is_empty() {
+            "mail".to_string()
+        } else if ph == primary {
+            String::new()
+        } else {
+            ph.strip_suffix(&format!(".{}", primary))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "mail".to_string())
+        }
+    };
     let step1_status = if domain_done {
         format!(
             "<p class=\"ok\">Your domain: <code>{}</code>. Email addresses look like \
-             <code>you@{}</code>.</p>",
+             <code>you@{}</code> — everyone logs in at <code>{}</code>.</p>",
             esc(&primary),
-            esc(&primary)
+            esc(&primary),
+            esc(&mailhost)
         )
     } else {
         "<p>Type the domain you bought (for example <code>sunnymail.com</code>) and press Save. \
@@ -3200,14 +3299,23 @@ fn page_dns_full(
     let step1 = format!(
         "<div class=\"pix-panel\"><h2>Step 1 · Your domain</h2>{}\
          <form method=\"post\" action=\"/dns/settings\">\
-         <input type=\"hidden\" name=\"public_host\" value=\"{}\">\
          <label>Domain</label>\
          <input type=\"text\" name=\"domain\" value=\"{}\" placeholder=\"yourdomain.com\" \
          required autocomplete=\"off\">\
+         <label>Login address (subdomain — recommended)</label>\
+         <div style=\"display:flex;align-items:center;gap:.4rem\">\
+         <input type=\"text\" name=\"webmail_sub\" value=\"{}\" placeholder=\"mail\" \
+         autocomplete=\"off\" style=\"max-width:9rem\">\
+         <code>.your-domain</code></div>\
+         <p class=\"muted\">Everyone — including people you invite — opens this address in a \
+         browser to log in and use their email, e.g. <code>mail.sunnymail.com</code>. A \
+         subdomain is the best choice: it works immediately and keeps \
+         <code>your-domain.com</code> itself free for a website. Keep <code>mail</code> \
+         if unsure.</p>\
          <p><button type=\"submit\">Save</button></p></form></div>",
         step1_status,
-        esc(&cfg.public_host_name()),
-        esc(&domain_value)
+        esc(&domain_value),
+        esc(&sub_prefill)
     );
 
     // --- Step 2: records at the provider ----------------------------------
@@ -3237,19 +3345,36 @@ fn page_dns_full(
                     Some(cs) => dns_status_for(cs, rec, domain),
                     None => "<span class=\"muted\">not checked yet</span>".to_string(),
                 };
-                let copy_payload = format!("{} {} {}", rec.rtype, rec.name, rec.value);
+                let name = registrar_name(&rec.name, domain);
+                let (value, mx_prio) = registrar_value(rec);
+                let prio_note = mx_prio
+                    .map(|p| {
+                        format!(
+                            "<br><span class=\"muted\">Priority: <code>{p}</code> \
+                             (its own field on most providers)</span> \
+                             <button type=\"button\" class=\"copy-btn\" data-copy=\"{p}\">\
+                             Copy</button>",
+                            p = esc(&p)
+                        )
+                    })
+                    .unwrap_or_default();
                 rows.push_str(&format!(
                     "<tr>\
-                     <td data-label=\"Type\"><strong>{}</strong></td>\
-                     <td data-label=\"Name\"><code>{}</code></td>\
-                     <td data-label=\"Value\"><code class=\"dns-val\">{}</code> \
+                     <td data-label=\"Type\"><strong>{}</strong> \
                      <button type=\"button\" class=\"copy-btn\" data-copy=\"{}\">Copy</button></td>\
+                     <td data-label=\"Name\"><code>{}</code> \
+                     <button type=\"button\" class=\"copy-btn\" data-copy=\"{}\">Copy</button></td>\
+                     <td data-label=\"Value\"><code class=\"dns-val\">{}</code> \
+                     <button type=\"button\" class=\"copy-btn\" data-copy=\"{}\">Copy</button>{}</td>\
                      <td data-label=\"Status\">{}</td>\
                      </tr>",
                     esc(rec.rtype),
-                    esc(&rec.name),
-                    esc(&rec.value),
-                    esc(&copy_payload),
+                    esc(rec.rtype),
+                    esc(&name),
+                    esc(&name),
+                    esc(&value),
+                    esc(&value),
+                    prio_note,
                     status_cell
                 ));
             }
@@ -3272,17 +3397,16 @@ fn page_dns_full(
              <table class=\"dns-table\"><thead><tr>\
              <th>Type</th><th>Name</th><th>Value</th><th>Status</th>\
              </tr></thead><tbody>{}</tbody></table></div>\
-             <p class=\"muted\">Provider won&rsquo;t accept a Name like <code>{d}.</code>? \
-             Use <code>@</code> instead. For <code>{sel}._domainkey.{d}.</code> enter just \
-             <code>{sel}._domainkey</code>.</p>\
+             <p class=\"muted\"><code>@</code> in the Name column means “the domain itself” — \
+             type it literally (or leave the field empty if your provider fills it in). If \
+             your provider wants full names instead, add <code>.{d}</code> to each Name.</p>\
              <form method=\"post\" action=\"/dns/check\" style=\"margin-top:1rem\">\
              <button type=\"submit\">Check my records</button></form>\
              <p class=\"muted\">New records can take a few minutes (sometimes hours) to become \
              visible. Check as often as you like.</p>",
             ip_note,
             rows,
-            d = esc(&primary),
-            sel = esc(&selector)
+            d = esc(&primary)
         )
     };
     let step2 = format!(
@@ -3347,7 +3471,8 @@ fn page_dns_full(
     let body = format!(
         "<h1>Connect your domain</h1>\
          <p class=\"muted\">Three steps: save your domain, copy a few records at your domain \
-         provider, then switch on HTTPS. You can redo any step safely.</p>\
+         provider, then switch on HTTPS. When you finish, you and your users log in at your \
+         own domain — Step 3 shows the exact address. You can redo any step safely.</p>\
          {wiz}{flash}{step1}{step2}{step3}{advanced}\
          <script>(function(){{\
          document.querySelectorAll('button.copy-btn').forEach(function(b){{\
@@ -3648,8 +3773,9 @@ fn tls_security_panel_html(cfg: &Config, mailhost: &str) -> String {
             exp
         )
     } else {
-        "<p class=\"warn\">No TLS — webmail is plain HTTP. Enable ACME below or set \
-         <code>tls_cert_file</code> / <code>tls_key_file</code> in config.</p>"
+        "<p class=\"warn\">No TLS — webmail is plain HTTP. Use <strong>Step 3 · Turn on \
+         HTTPS</strong> above, or set <code>tls_cert_file</code> / \
+         <code>tls_key_file</code> in config.</p>"
             .to_string()
     };
     let listener_line = if tls_listen_active {
@@ -3712,16 +3838,29 @@ fn https_step_panel_html(
     let mut out = String::new();
     if public_url.starts_with("https://") && tls_listen_active {
         out.push_str(&format!(
-            "<p class=\"ok\">Done — webmail is served securely at \
-             <a href=\"{u}\"><code>{u}</code></a>.</p>",
+            "<p class=\"ok\">Done — this is your webmail address:</p>\
+             <p><a href=\"{u}\"><code class=\"dns-val\">{u}</code></a> \
+             <button type=\"button\" class=\"copy-btn\" data-copy=\"{u}\">Copy</button></p>\
+             <p>Everyone logs in there — you and any users you add. Create accounts or \
+             send invite links from the <a href=\"/admin\">Admin</a> page; invites let \
+             people pick their own password.</p>",
             u = esc(&public_url)
         ));
+        if public_url.contains(":8443") {
+            out.push_str(
+                "<p class=\"muted\">Want the address without <code>:8443</code>? Forward \
+                 external port 443 to this machine&rsquo;s port 8443 on your \
+                 router/firewall, then set <code>public_url</code> in config to \
+                 <code>https://your-domain</code>.</p>",
+            );
+        }
         return out;
     }
     if public_url.starts_with("https://") && acme_on && cert_exists {
         out.push_str(&format!(
-            "<p class=\"warn\">Almost there — the certificate for <code>{}</code> is ready. \
-             <strong>Restart desertemail once</strong> and HTTPS goes live.</p>",
+            "<p class=\"warn\">Almost there — the certificate is ready. \
+             <strong>Restart desertemail once</strong>, then everyone logs in at \
+             <code>{}</code>.</p>",
             esc(&public_url)
         ));
         return out;
@@ -3754,9 +3893,10 @@ fn https_step_panel_html(
     }
 
     out.push_str(
-        "<p>HTTPS gives your webmail the padlock (a free Let&rsquo;s Encrypt certificate) so \
-         passwords are never sent in the clear. One click — we check everything first and \
-         tell you exactly what to fix if something isn&rsquo;t ready.</p>",
+        "<p>This step gives your webmail the padlock (a free Let&rsquo;s Encrypt certificate) \
+         and makes <strong>your domain the login address</strong> for you and your users. \
+         One click — we check everything first and tell you exactly what to fix if something \
+         isn&rsquo;t ready.</p>",
     );
 
     // Prefill: last submitted value, else host from public_url, else mail host.
@@ -3961,7 +4101,19 @@ fn handle_dns_https_setup(cfg: &Config, user: &str, req: &Request, peer_ip: &str
     } else {
         ""
     };
-    let url = format!("https://{}", domain);
+    // The login URL must carry the real TLS port: the listener defaults to
+    // 8443, so a bare https://domain (implying 443) would not answer unless
+    // the operator forwards 443 themselves.
+    let tls_port = if cfg.web_tls_listen.is_empty() {
+        8443
+    } else {
+        crate::portmap::port_of(&cfg.web_tls_listen).unwrap_or(8443)
+    };
+    let url = if tls_port == 443 {
+        format!("https://{}", domain)
+    } else {
+        format!("https://{}:{}", domain, tls_port)
+    };
     let domain_owned = domain.clone();
     let email_owned = email.clone();
     let cert_owned = cert_path.clone();
@@ -3998,9 +4150,10 @@ fn handle_dns_https_setup(cfg: &Config, user: &str, req: &Request, peer_ip: &str
                 cfg,
                 user,
                 Some(&format!(
-                    "HTTPS is being set up for {u} — the certificate is requested in the \
+                    "HTTPS is being set up — the certificate is requested in the \
                      background (usually under a minute). Keep the DNS records in place. \
-                     When it's ready, restart desertemail once and webmail moves to {u}.",
+                     When it's ready, restart desertemail once; after that, you and your \
+                     users log in at {u}.",
                     u = url
                 )),
                 None,
@@ -4091,19 +4244,43 @@ fn handle_dns_settings(cfg: &Config, user: &str, req: &Request) -> Response {
         return r;
     }
     let form = form_body(req);
-    let public_host = form
-        .get("public_host")
-        .map(|s| s.trim())
-        .unwrap_or("")
-        .to_string();
     let domain = form
         .get("domain")
-        .map(|s| s.trim())
+        .map(|s| s.trim().trim_end_matches('.'))
         .unwrap_or("")
-        .to_string();
+        .to_lowercase();
     if domain.is_empty() {
         return page_dns(cfg, user, Some("error: domain required"), None);
     }
+    // The wizard (Step 1) posts a `webmail_sub` prefix; the Advanced form posts
+    // a full `public_host`. A subdomain of "mail" means public_host = mail.<domain>;
+    // empty means logins happen at the domain itself (no separate host record).
+    let public_host = if let Some(sub) = form.get("webmail_sub") {
+        let sub = sub.trim().trim_end_matches('.').to_lowercase();
+        if sub.is_empty() {
+            String::new()
+        } else {
+            if sub.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '.') {
+                return page_dns(
+                    cfg,
+                    user,
+                    Some("error: the subdomain can only contain letters, digits and hyphens"),
+                    None,
+                );
+            }
+            // Accept both "mail" and an accidentally pasted full "mail.domain.com".
+            if sub == domain || sub.ends_with(&format!(".{}", domain)) {
+                sub
+            } else {
+                format!("{}.{}", sub, domain)
+            }
+        }
+    } else {
+        form.get("public_host")
+            .map(|s| s.trim())
+            .unwrap_or("")
+            .to_string()
+    };
     let ph = public_host.clone();
     let dom = domain.clone();
     match persist_and_reload(cfg, |c| {
@@ -4115,7 +4292,16 @@ fn handle_dns_settings(cfg: &Config, user: &str, req: &Request) -> Response {
             cfg.set_public_host_live(&public_host);
             // A real domain needs a DKIM signing key — create one automatically
             // so the records table is complete without an extra button press.
-            let mut flash = format!("Domain saved: {}.", domain);
+            let login_host = if public_host.is_empty() {
+                domain.clone()
+            } else {
+                public_host.clone()
+            };
+            let mut flash = format!(
+                "Domain saved: {}. Once Steps 2 and 3 are done, everyone logs in at \
+                 https://{}.",
+                domain, login_host
+            );
             let is_real_domain = !domain.eq_ignore_ascii_case("localhost");
             if is_real_domain && cfg.dkim_key_clone().is_none() {
                 match create_and_persist_dkim_key(cfg) {
@@ -5613,6 +5799,12 @@ fn fmt_unix_date(secs: u64) -> String {
 
 /// Base URL for invite links: `public_host` when set, else request Host.
 fn invite_url_base(cfg: &Config, req: &Request, secure: bool) -> String {
+    // The operator-facing login URL (set by the HTTPS wizard or by hand) is the
+    // canonical address invited users should land on.
+    let pu = cfg.public_url_get();
+    if !pu.is_empty() {
+        return pu.trim_end_matches('/').to_string();
+    }
     let ph = cfg.public_host_name();
     if !ph.is_empty() {
         let host = ph.trim().trim_end_matches('.');
@@ -6382,6 +6574,58 @@ mod tests {
             ("host", "mail.example.com"),
             ("origin", "https://evil.com"),
         ])));
+    }
+
+    #[test]
+    fn registrar_forms_for_records() {
+        // Names: @ for apex, bare prefix for subdomains, untouched foreign names.
+        assert_eq!(registrar_name("klausmail.com.", "klausmail.com"), "@");
+        assert_eq!(registrar_name("mail.klausmail.com.", "klausmail.com"), "mail");
+        assert_eq!(
+            registrar_name("mail._domainkey.klausmail.com.", "klausmail.com"),
+            "mail._domainkey"
+        );
+        assert_eq!(registrar_name("_dmarc.klausmail.com.", "klausmail.com"), "_dmarc");
+        assert_eq!(registrar_name("other.example.org.", "klausmail.com"), "other.example.org");
+
+        // Values: MX priority split out, hostname dots stripped, TXT untouched.
+        let mx = DnsRecordAdvice {
+            rtype: "MX",
+            name: "klausmail.com.".into(),
+            value: "10 mail.klausmail.com.".into(),
+            kind: "mx",
+        };
+        assert_eq!(
+            registrar_value(&mx),
+            ("mail.klausmail.com".to_string(), Some("10".to_string()))
+        );
+        let a = DnsRecordAdvice {
+            rtype: "A",
+            name: "mail.klausmail.com.".into(),
+            value: "1.2.3.4".into(),
+            kind: "a",
+        };
+        assert_eq!(registrar_value(&a), ("1.2.3.4".to_string(), None));
+        let spf = DnsRecordAdvice {
+            rtype: "TXT",
+            name: "klausmail.com.".into(),
+            value: "v=spf1 mx ~all".into(),
+            kind: "spf",
+        };
+        assert_eq!(registrar_value(&spf), ("v=spf1 mx ~all".to_string(), None));
+    }
+
+    #[test]
+    fn safe_return_path_allowlist() {
+        assert_eq!(safe_return_path("/dns"), Some("/dns".to_string()));
+        assert_eq!(safe_return_path("/dns/check"), Some("/dns".to_string()));
+        assert_eq!(safe_return_path("/admin?x=1"), Some("/admin".to_string()));
+        assert_eq!(safe_return_path("/"), Some("/".to_string()));
+        // Not open-redirectable and no odd paths.
+        assert_eq!(safe_return_path("//evil.com"), None);
+        assert_eq!(safe_return_path("/logout"), None);
+        assert_eq!(safe_return_path("/msg?id=1"), None);
+        assert_eq!(safe_return_path("http://evil.com"), None);
     }
 
     #[test]
