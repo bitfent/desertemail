@@ -108,16 +108,44 @@ pub fn mail_host_for_ui(cfg: &Config) -> String {
     }
     let domains = cfg.domains_list();
     let opts = DoctorOpts::default();
-    resolve_host(cfg, &opts, &domains)
+    let host = resolve_host(cfg, &opts, &domains);
+    // resolve_host follows the domain's currently-published MX. Freshly bought
+    // domains often carry registrar parking MX (or leftover Google MX) pointing
+    // at a foreign host — advising the user to publish records for someone
+    // else's hostname would be wrong. Only trust MX targets inside our domains.
+    let ours = domains
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{}", d)));
+    if ours {
+        host
+    } else {
+        domains
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "localhost".into())
+    }
 }
 
-/// Best-effort public IP for A-record guidance (egress, may be private behind NAT).
-pub fn suggest_public_ip(cfg: &Config) -> Option<String> {
-    let host = mail_host_for_ui(cfg);
-    let domains = cfg.domains_list();
-    let opts = DoctorOpts::default();
-    let (expected, egress, _) = detect_ips(&opts, &host, &domains);
-    expected.or(egress)
+/// Best-effort public IP for A-record guidance: this server's address, never a
+/// third party's. Priority: router WAN IP (port-mapping discovery) > public
+/// egress IP > what the mail host's A record already says.
+pub fn suggest_public_ip(_cfg: &Config) -> Option<String> {
+    if let Some(pa) = crate::portmap::current() {
+        if let Some(ip) = pa.external_ip {
+            if crate::portmap::is_public_ipv4(&ip) {
+                return Some(ip);
+            }
+        }
+    }
+    if let Some(egress) = crate::portmap::local_egress_ip() {
+        if crate::portmap::is_public_ipv4(&egress) {
+            return Some(egress);
+        }
+    }
+    // No trustworthy address (behind NAT without router discovery). Returning
+    // the domain's currently-published A record would suggest someone else's
+    // server — better to admit we don't know.
+    None
 }
 
 /// DNS-only checks for the web UI (no TCP reachability probes). Short timeouts via dns module.
@@ -188,7 +216,10 @@ pub fn run_https_checks_ui(cfg: &Config, host: &str) -> Vec<Check> {
         .and_then(|ips| first_v4(&ips))
         .or(public_ip);
     match probe_ip {
-        Some(ip) => checks.push(check_port_80(&ip, true)),
+        Some(ip) => {
+            checks.push(check_port_80(&ip, true));
+            checks.push(check_http01_selfcheck(&host, &ip));
+        }
         None => checks.push(Check::warn(
             "port 80 (ACME HTTP-01)",
             "no address to probe — publish the A record first",
@@ -199,6 +230,73 @@ pub fn run_https_checks_ui(cfg: &Config, host: &str) -> Vec<Check> {
         )),
     }
     checks
+}
+
+/// The decisive HTTPS-readiness probe: publish a one-off token on our own
+/// ACME challenge path, then fetch it via the domain's public address — the
+/// same round-trip Let's Encrypt will make. Passing proves the A record,
+/// routing, and port forwarding all reach *this* server (a parked or foreign
+/// domain answers on port 80 too, but can't serve our token).
+fn check_http01_selfcheck(host: &str, ip: &str) -> Check {
+    let name = "domain reaches this server";
+    let mut buf = [0u8; 16];
+    crate::util::fill_random(&mut buf);
+    let token: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+    let token = format!("selfcheck-{}", token);
+    let expected = format!("desertemail-{}", token);
+    crate::acme::set_http01(&token, &expected);
+    let result = http01_fetch(ip, host, &token);
+    crate::acme::clear_http01(&token);
+    match result {
+        Some(body) if body.trim() == expected => Check::ok(
+            name,
+            format!("{} → {} answers with this server's token", host, ip),
+        ),
+        Some(_) => Check::fail(
+            name,
+            format!(
+                "{} (via {}) answered on port 80, but with someone else's content — \
+                 the domain does not point at this server yet",
+                host, ip
+            ),
+            format!(
+                "Set the A record for {} to this server's public IP and remove any \
+                 parking/forwarding at your domain provider, then wait for DNS to update",
+                host
+            ),
+        ),
+        None => Check::fail(
+            name,
+            format!(
+                "could not fetch a test file from http://{}/ (via {})",
+                host, ip
+            ),
+            "Make sure the A record points at this server and external port 80 is \
+             forwarded to it"
+                .to_string(),
+        ),
+    }
+}
+
+/// Minimal HTTP/1.1 GET of our ACME challenge path via an explicit IP with a
+/// Host header (mirrors what Let's Encrypt does). Returns the response body.
+fn http01_fetch(ip: &str, host: &str, token: &str) -> Option<String> {
+    use std::io::Write;
+    let addr = socket_addr(ip, 80).ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).ok()?;
+    let _ = stream.set_read_timeout(Some(CONNECT_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CONNECT_TIMEOUT));
+    let req = format!(
+        "GET /.well-known/acme-challenge/{} HTTP/1.1\r\nHost: {}\r\n\
+         Connection: close\r\nUser-Agent: desertemail-selfcheck\r\n\r\n",
+        token, host
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut raw = Vec::new();
+    let _ = stream.take(64 * 1024).read_to_end(&mut raw);
+    let text = String::from_utf8_lossy(&raw);
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+    Some(body.to_string())
 }
 
 /// Run all readiness checks. Returns the number of Fail blockers (exit code).

@@ -1619,6 +1619,23 @@ code{background:var(--code-bg);color:var(--code-ink);padding:.1rem .35rem;font-s
   .banner.tls-warn{background:#3a1515;color:#ffc9c9;border-color:#ff8a80}
 }
 .banner a.dismiss{float:right;border-bottom:none;font-size:.85rem}
+.wiz{list-style:none;display:flex;gap:.5rem;flex-wrap:wrap;padding:0;margin:.75rem 0 1rem}
+.wiz li{
+  border:3px solid var(--border);padding:.35rem .7rem;font-size:.78rem;font-weight:700;
+  text-transform:uppercase;letter-spacing:.05em;background:var(--panel);color:var(--muted);
+  box-shadow:2px 2px 0 0 var(--accent-dark);
+}
+.wiz li.now{color:var(--ink);border-color:var(--accent);background:var(--accent);color:#2a1a08}
+.wiz li.done{color:var(--ink)}
+.wiz li.done::after{content:" ✓";color:#2d6a1e}
+@media (prefers-color-scheme: dark){.wiz li.done::after{color:#81c784}}
+details.adv{margin:1.25rem 0}
+details.adv>summary{
+  cursor:pointer;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+  font-size:.8rem;color:var(--muted);padding:.35rem 0;
+}
+details.adv>summary:hover{color:var(--ink)}
+details.adv h3{margin-top:1.25rem}
 .dns-table{width:100%;border-collapse:collapse;font-size:.88rem}
 .dns-table th,.dns-table td{
   border:2px solid var(--border);padding:.45rem .55rem;text-align:left;vertical-align:top;
@@ -1659,12 +1676,14 @@ button.copy-btn:hover,button.btn-secondary:hover,.btn-ghost:hover{background:var
 .app-brand:hover{background:transparent;color:var(--ink)}
 .nav-logo{width:22px;height:29px;flex:none;display:block}
 .btn-compose{
-  display:flex;align-items:center;justify-content:center;width:100%;
+  display:flex;align-items:center;justify-content:center;gap:.55rem;width:100%;
   font-family:inherit;font-weight:700;text-transform:uppercase;letter-spacing:.1em;font-size:.9rem;
   color:#2a1a08;background:var(--accent);border:4px solid var(--border);
   box-shadow:4px 4px 0 0 var(--accent-dark);padding:.65rem .5rem;cursor:pointer;
   min-height:48px;text-decoration:none;margin:0 0 .9rem;
 }
+/* Pixel envelope scales with the button text (the old ✉ glyph rendered tiny). */
+.compose-ico{width:1.5em;height:1.125em;flex:none;display:block}
 .btn-compose:hover{background:var(--accent-light);color:#2a1a08}
 .btn-compose:active{transform:translate(3px,3px);box-shadow:1px 1px 0 0 var(--accent-dark)}
 .side-nav{list-style:none;padding:0;margin:0;flex:1}
@@ -2038,7 +2057,20 @@ fn page_shell_app(
         "<aside class=\"app-sidebar\" id=\"app-sidebar\" aria-label=\"Mailbox\">\
          <a class=\"app-brand\" href=\"/\">{}\
          <span>DESERTEMAIL</span></a>\
-         <a class=\"btn-compose\" href=\"/compose\">✉ Compose</a>\
+         <a class=\"btn-compose\" href=\"/compose\">\
+         <svg class=\"compose-ico\" viewBox=\"0 0 16 12\" shape-rendering=\"crispEdges\" \
+         fill=\"currentColor\" role=\"img\" aria-hidden=\"true\">\
+         <rect x=\"0\" y=\"0\" width=\"16\" height=\"1\"/>\
+         <rect x=\"0\" y=\"11\" width=\"16\" height=\"1\"/>\
+         <rect x=\"0\" y=\"1\" width=\"1\" height=\"10\"/>\
+         <rect x=\"15\" y=\"1\" width=\"1\" height=\"10\"/>\
+         <rect x=\"1\" y=\"1\" width=\"1\" height=\"1\"/><rect x=\"14\" y=\"1\" width=\"1\" height=\"1\"/>\
+         <rect x=\"2\" y=\"2\" width=\"1\" height=\"1\"/><rect x=\"13\" y=\"2\" width=\"1\" height=\"1\"/>\
+         <rect x=\"3\" y=\"3\" width=\"1\" height=\"1\"/><rect x=\"12\" y=\"3\" width=\"1\" height=\"1\"/>\
+         <rect x=\"4\" y=\"4\" width=\"1\" height=\"1\"/><rect x=\"11\" y=\"4\" width=\"1\" height=\"1\"/>\
+         <rect x=\"5\" y=\"5\" width=\"1\" height=\"1\"/><rect x=\"10\" y=\"5\" width=\"1\" height=\"1\"/>\
+         <rect x=\"6\" y=\"6\" width=\"4\" height=\"1\"/>\
+         </svg><span>Compose</span></a>\
          <ul class=\"side-nav\">\
          <li><a class=\"{}\" href=\"/\">Inbox{}</a></li>\
          <li><a class=\"{}\" href=\"/starred\">Starred</a></li>\
@@ -3102,6 +3134,7 @@ fn page_dns_full(
     let dkim_key = cfg.dkim_key_clone();
     let dkim_txt = dkim_key.as_ref().map(|k| crate::dkim::dns_txt_record(k));
     let has_dkim = dkim_key.is_some();
+    let domain_done = !primary.is_empty() && primary != "localhost";
 
     let flash_html = flash
         .map(|f| {
@@ -3113,58 +3146,165 @@ fn page_dns_full(
         })
         .unwrap_or_default();
 
-    let ip_hint = match &public_ip {
-        Some(ip) => format!("Detected address (egress/A): <code>{}</code>", esc(ip)),
-        None => "Could not detect your public IP — fill in the real address from your VPS/router \
-                 when publishing the A record."
-            .to_string(),
-    };
-
-    let mut rows = String::new();
-    for domain in &domains {
-        let records = build_dns_records(
-            domain,
-            &mailhost,
-            public_ip.as_deref(),
-            &selector,
-            dkim_txt.as_deref(),
-        );
-        for rec in &records {
-            let status_cell = match checks {
-                Some(cs) => dns_status_for(cs, rec, domain),
-                None => "<span class=\"muted\">—</span>".to_string(),
-            };
-            let copy_payload = format!("{} {} {}", rec.rtype, rec.name, rec.value);
-            rows.push_str(&format!(
-                "<tr>\
-                 <td data-label=\"Domain\">{}</td>\
-                 <td data-label=\"Type\"><strong>{}</strong></td>\
-                 <td data-label=\"Name\"><code>{}</code></td>\
-                 <td data-label=\"Value\"><code class=\"dns-val\">{}</code></td>\
-                 <td data-label=\"Status\">{}</td>\
-                 <td><button type=\"button\" class=\"copy-btn\" data-copy=\"{}\">Copy</button></td>\
-                 </tr>",
-                esc(domain),
-                esc(rec.rtype),
-                esc(&rec.name),
-                esc(&rec.value),
-                status_cell,
-                esc(&copy_payload)
-            ));
+    // --- progress strip -------------------------------------------------
+    let records_done = checks
+        .map(|cs| !cs.is_empty() && cs.iter().all(|c| c.status == crate::doctor::Status::Ok))
+        .unwrap_or(false);
+    let public_url = cfg.public_url_get();
+    let tls_listen_active =
+        web_tls_listener_active().load(std::sync::atomic::Ordering::SeqCst);
+    let https_done = public_url.starts_with("https://") && tls_listen_active;
+    let wiz_cls = |done: bool, is_now: bool| {
+        if done {
+            "done"
+        } else if is_now {
+            "now"
+        } else {
+            ""
         }
-    }
-    if rows.is_empty() {
-        rows.push_str(
-            "<tr class=\"empty\"><td colspan=\"6\">No domains configured — add one below.</td></tr>",
-        );
-    }
+    };
+    let now_step = if !domain_done {
+        1
+    } else if !https_done && !records_done {
+        2
+    } else if !https_done {
+        3
+    } else {
+        4
+    };
+    let wiz = format!(
+        "<ul class=\"wiz\">\
+         <li class=\"{}\">1 · Domain</li>\
+         <li class=\"{}\">2 · DNS records</li>\
+         <li class=\"{}\">3 · HTTPS</li>\
+         </ul>",
+        wiz_cls(domain_done, now_step == 1),
+        wiz_cls(records_done || https_done, now_step == 2),
+        wiz_cls(https_done, now_step == 3),
+    );
 
-    let dkim_panel = if has_dkim {
+    // --- Step 1: domain --------------------------------------------------
+    let domain_value = if domain_done { primary.clone() } else { String::new() };
+    let step1_status = if domain_done {
+        format!(
+            "<p class=\"ok\">Your domain: <code>{}</code>. Email addresses look like \
+             <code>you@{}</code>.</p>",
+            esc(&primary),
+            esc(&primary)
+        )
+    } else {
+        "<p>Type the domain you bought (for example <code>sunnymail.com</code>) and press Save. \
+         Your email address becomes <code>you@your-domain</code>.</p>"
+            .to_string()
+    };
+    let step1 = format!(
+        "<div class=\"pix-panel\"><h2>Step 1 · Your domain</h2>{}\
+         <form method=\"post\" action=\"/dns/settings\">\
+         <input type=\"hidden\" name=\"public_host\" value=\"{}\">\
+         <label>Domain</label>\
+         <input type=\"text\" name=\"domain\" value=\"{}\" placeholder=\"yourdomain.com\" \
+         required autocomplete=\"off\">\
+         <p><button type=\"submit\">Save</button></p></form></div>",
+        step1_status,
+        esc(&cfg.public_host_name()),
+        esc(&domain_value)
+    );
+
+    // --- Step 2: records at the provider ----------------------------------
+    let step2_inner = if !domain_done {
+        "<p class=\"muted\">Finish Step 1 first — your records will appear here, ready to \
+         copy.</p>"
+            .to_string()
+    } else {
+        let mut rows = String::new();
+        let show_domain_headers = domains.len() > 1;
+        for domain in &domains {
+            if show_domain_headers {
+                rows.push_str(&format!(
+                    "<tr><th colspan=\"5\" style=\"text-align:left\">{}</th></tr>",
+                    esc(domain)
+                ));
+            }
+            let records = build_dns_records(
+                domain,
+                &mailhost,
+                public_ip.as_deref(),
+                &selector,
+                dkim_txt.as_deref(),
+            );
+            for rec in &records {
+                let status_cell = match checks {
+                    Some(cs) => dns_status_for(cs, rec, domain),
+                    None => "<span class=\"muted\">not checked yet</span>".to_string(),
+                };
+                let copy_payload = format!("{} {} {}", rec.rtype, rec.name, rec.value);
+                rows.push_str(&format!(
+                    "<tr>\
+                     <td data-label=\"Type\"><strong>{}</strong></td>\
+                     <td data-label=\"Name\"><code>{}</code></td>\
+                     <td data-label=\"Value\"><code class=\"dns-val\">{}</code> \
+                     <button type=\"button\" class=\"copy-btn\" data-copy=\"{}\">Copy</button></td>\
+                     <td data-label=\"Status\">{}</td>\
+                     </tr>",
+                    esc(rec.rtype),
+                    esc(&rec.name),
+                    esc(&rec.value),
+                    esc(&copy_payload),
+                    status_cell
+                ));
+            }
+        }
+        let ip_note = if public_ip.is_none() {
+            "<p class=\"warn\">Could not detect this server&rsquo;s public IP — replace \
+             <code>YOUR_PUBLIC_IP</code> in the A record with the real address of your \
+             server (your VPS provider or router shows it).</p>"
+                .to_string()
+        } else {
+            String::new()
+        };
+        format!(
+            "<p>Log in where you bought the domain (Namecheap, GoDaddy, Cloudflare, Porkbun, …) \
+             and open its <strong>DNS settings</strong> (may be called “DNS records”, “Manage \
+             DNS” or “Advanced DNS”). Add one record per row — the Copy button gives the exact \
+             text.</p>\
+             {}\
+             <div class=\"table-scroll\">\
+             <table class=\"dns-table\"><thead><tr>\
+             <th>Type</th><th>Name</th><th>Value</th><th>Status</th>\
+             </tr></thead><tbody>{}</tbody></table></div>\
+             <p class=\"muted\">Provider won&rsquo;t accept a Name like <code>{d}.</code>? \
+             Use <code>@</code> instead. For <code>{sel}._domainkey.{d}.</code> enter just \
+             <code>{sel}._domainkey</code>.</p>\
+             <form method=\"post\" action=\"/dns/check\" style=\"margin-top:1rem\">\
+             <button type=\"submit\">Check my records</button></form>\
+             <p class=\"muted\">New records can take a few minutes (sometimes hours) to become \
+             visible. Check as often as you like.</p>",
+            ip_note,
+            rows,
+            d = esc(&primary),
+            sel = esc(&selector)
+        )
+    };
+    let step2 = format!(
+        "<div class=\"pix-panel\"><h2>Step 2 · Copy these records to your domain provider</h2>{}</div>",
+        step2_inner
+    );
+
+    // --- Step 3: HTTPS -----------------------------------------------------
+    let step3 = format!(
+        "<div class=\"pix-panel\" id=\"https-domain\"><h2>Step 3 · Turn on HTTPS</h2>{}</div>",
+        https_step_panel_html(cfg, &mailhost, https, domain_done)
+    );
+
+    // --- Advanced (collapsed) ----------------------------------------------
+    let access_panel = public_access_panel_html();
+    let dkim_advanced = if has_dkim {
         let path = cfg
             .dkim_key_file_path()
             .unwrap_or_else(|| "(in memory)".into());
         format!(
-            "<p class=\"ok\">DKIM key loaded (selector <code>{}</code>, file <code>{}</code>).</p>\
+            "<p class=\"ok\">DKIM signing key loaded (selector <code>{}</code>, file \
+             <code>{}</code>).</p>\
              <form method=\"post\" action=\"/dns/dkim/generate\" class=\"inline-form\" \
              onsubmit=\"return confirm('Regenerate DKIM key? You must re-publish the TXT record.');\">\
              <input type=\"hidden\" name=\"confirm\" value=\"1\">\
@@ -3173,35 +3313,17 @@ fn page_dns_full(
             esc(&path)
         )
     } else {
-        "<p class=\"warn\">No DKIM key yet — generate one so outbound mail can be signed.</p>\
+        "<p class=\"muted\">No DKIM signing key yet — it is created automatically when you \
+         save a domain in Step 1.</p>\
          <form method=\"post\" action=\"/dns/dkim/generate\">\
-         <button type=\"submit\">Generate DKIM key</button></form>"
+         <button type=\"submit\" class=\"btn-secondary\">Generate DKIM key now</button></form>"
             .to_string()
     };
-
-    let tls_panel = tls_security_panel_html(cfg, &mailhost);
-    let access_panel = public_access_panel_html();
-    let https_panel = https_domain_panel_html(cfg, &mailhost, public_ip.as_deref(), https);
-
-    let body = format!(
-        "<h1>DNS</h1>{}\
-         <div class=\"pix-panel\"><h2>Remote access</h2>{}</div>\
-         <p>Add these records at your DNS provider (Cloudflare, Namecheap, Route&nbsp;53, …). \
-         Then click <strong>Check DNS</strong>. Propagation can take minutes to hours.</p>\
-         <p class=\"muted\">{}</p>\
-         <div class=\"pix-panel\">\
-         <h2>Records to publish</h2>\
-         <div class=\"table-scroll\">\
-         <table class=\"dns-table\"><thead><tr>\
-         <th>Domain</th><th>Type</th><th>Name</th><th>Value</th><th>Check</th><th></th>\
-         </tr></thead><tbody>{}</tbody></table></div>\
-         <form method=\"post\" action=\"/dns/check\" style=\"margin-top:1rem\">\
-         <button type=\"submit\">Check DNS</button></form>\
-         </div>\
-         <div class=\"pix-panel\"><h2>DKIM key</h2>{}</div>\
-         <div class=\"pix-panel\" id=\"https-domain\"><h2>HTTPS with your own domain</h2>{}</div>\
-         <div class=\"pix-panel\"><h2>Security / TLS</h2>{}</div>\
-         <div class=\"pix-panel\"><h2>Mail host &amp; domain</h2>\
+    let tls_advanced = tls_security_panel_html(cfg, &mailhost);
+    let advanced = format!(
+        "<details class=\"adv\"><summary>Advanced settings</summary><div class=\"pix-panel\">\
+         <h3>Remote access</h3>{}\
+         <h3>Mail host &amp; domain</h3>\
          <form method=\"post\" action=\"/dns/settings\">\
          <label>Public mail hostname (MX target)</label>\
          <input type=\"text\" name=\"public_host\" value=\"{}\" \
@@ -3210,9 +3332,23 @@ fn page_dns_full(
          <input type=\"text\" name=\"domain\" value=\"{}\" required autocomplete=\"off\">\
          <p class=\"muted\">Changing the domain updates <code>domains</code> in config (live). \
          User accounts on the old domain keep working if you still accept that domain.</p>\
-         <p><button type=\"submit\">Save settings</button></p></form>\
+         <p><button type=\"submit\" class=\"btn-secondary\">Save settings</button></p></form>\
+         <h3>DKIM signing key</h3>{}\
+         <h3>TLS status</h3>{}\
          <p class=\"muted\">Also see <a href=\"/admin\">Admin</a> for users and queue.</p>\
-         </div>\
+         </div></details>",
+        access_panel,
+        esc(&mailhost),
+        esc(&primary),
+        dkim_advanced,
+        tls_advanced
+    );
+
+    let body = format!(
+        "<h1>Connect your domain</h1>\
+         <p class=\"muted\">Three steps: save your domain, copy a few records at your domain \
+         provider, then switch on HTTPS. You can redo any step safely.</p>\
+         {wiz}{flash}{step1}{step2}{step3}{advanced}\
          <script>(function(){{\
          document.querySelectorAll('button.copy-btn').forEach(function(b){{\
            b.addEventListener('click',function(){{\
@@ -3229,15 +3365,12 @@ fn page_dns_full(
            }});\
          }});\
          }})();</script>",
-        flash_html,
-        access_panel,
-        ip_hint,
-        rows,
-        dkim_panel,
-        https_panel,
-        tls_panel,
-        esc(&mailhost),
-        esc(&primary)
+        wiz = wiz,
+        flash = flash_html,
+        step1 = step1,
+        step2 = step2,
+        step3 = step3,
+        advanced = advanced
     );
     Response::html(
         200,
@@ -3356,40 +3489,23 @@ fn handle_dns_dkim_generate(cfg: &Config, user: &str, req: &Request) -> Response
         );
     }
 
-    let key = match crypto::RsaKey::generate(2048) {
-        Ok(k) => k,
-        Err(e) => {
-            return page_dns(
-                cfg,
-                user,
-                Some(&format!("error: key generation failed: {}", e)),
-                None,
-            );
-        }
-    };
+    match create_and_persist_dkim_key(cfg) {
+        Ok(msg) => page_dns(cfg, user, Some(&msg), None),
+        Err(e) => page_dns(cfg, user, Some(&format!("error: {}", e)), None),
+    }
+}
+
+/// Generate a 2048-bit DKIM key, write it next to the config, and persist the
+/// selector/key-file paths. Returns a human-readable success message.
+fn create_and_persist_dkim_key(cfg: &Config) -> Result<String, String> {
+    let key = crypto::RsaKey::generate(2048)
+        .map_err(|e| format!("key generation failed: {}", e))?;
     let pem = key.to_pem_pkcs1();
-    let key_path = match useredit::dkim_key_path_for_config(cfg) {
-        Ok(p) => p,
-        Err(e) => return page_dns(cfg, user, Some(&format!("error: {}", e)), None),
-    };
+    let key_path = useredit::dkim_key_path_for_config(cfg)?;
     if let Some(parent) = key_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return page_dns(
-                cfg,
-                user,
-                Some(&format!("error: cannot create key dir: {}", e)),
-                None,
-            );
-        }
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create key dir: {}", e))?;
     }
-    if let Err(e) = std::fs::write(&key_path, pem.as_bytes()) {
-        return page_dns(
-            cfg,
-            user,
-            Some(&format!("error: cannot write key: {}", e)),
-            None,
-        );
-    }
+    std::fs::write(&key_path, pem.as_bytes()).map_err(|e| format!("cannot write key: {}", e))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -3407,22 +3523,13 @@ fn handle_dns_dkim_generate(cfg: &Config, user: &str, req: &Request) -> Response
     };
     let sel = selector.clone();
     let path_for_edit = path_str.clone();
-    match persist_and_reload(cfg, |c| useredit::set_dkim_paths(c, &sel, &path_for_edit)) {
-        Ok(()) => {
-            // reload_users_quotas already reloads the key; ensure live even if path differs.
-            cfg.set_dkim_live(&selector, Some(path_str.clone()), Some(key));
-            page_dns(
-                cfg,
-                user,
-                Some(&format!(
-                    "DKIM key written to {} (selector {}). Publish the TXT record below.",
-                    path_str, selector
-                )),
-                None,
-            )
-        }
-        Err(e) => page_dns(cfg, user, Some(&format!("error: {}", e)), None),
-    }
+    persist_and_reload(cfg, |c| useredit::set_dkim_paths(c, &sel, &path_for_edit))?;
+    // reload_users_quotas already reloads the key; ensure live even if path differs.
+    cfg.set_dkim_live(&selector, Some(path_str.clone()), Some(key));
+    Ok(format!(
+        "DKIM key written to {} (selector {}). Publish the TXT record below.",
+        path_str, selector
+    ))
 }
 
 fn tls_state_from_disk(cfg: &Config) -> (bool, String, Vec<String>, Option<String>, Option<String>) {
@@ -3571,7 +3678,7 @@ fn tls_security_panel_html(cfg: &Config, mailhost: &str) -> String {
     } else {
         acme_email
     };
-    let form = if acme_on {
+    let extra = if acme_on {
         format!(
             "<p class=\"muted\">ACME domains: <code>{}</code> · contact <code>{}</code>. \
              Background renewal runs every 12h when &lt;30 days remain.</p>",
@@ -3579,79 +3686,90 @@ fn tls_security_panel_html(cfg: &Config, mailhost: &str) -> String {
             esc(&email_prefill)
         )
     } else {
-        format!(
-            "<p>One-click Let’s Encrypt (ACME HTTP-01). Requirements:</p>\
-             <ul>\
-             <li>A/AAAA for <code>{}</code> pointing at this host</li>\
-             <li>Port <strong>80</strong> reachable from the internet (challenge path \
-             <code>/.well-known/acme-challenge/…</code> on <code>web_listen</code>)</li>\
-             <li>After the cert is written, <strong>restart desertemail</strong> so the \
-             HTTPS listener loads it (and binds <code>web_tls_listen</code>)</li>\
-             </ul>\
-             <form method=\"post\" action=\"/dns/acme/enable\">\
-             <label>Contact email (Let’s Encrypt account)</label>\
-             <input type=\"email\" name=\"email\" value=\"{}\" required autocomplete=\"email\">\
-             <p class=\"muted\">Certificate domain: <code>{}</code> (mail host). \
-             Writes <code>acme=true</code>, <code>acme_email</code>, \
-             <code>acme_domains</code>, and default cert paths atomically.</p>\
-             <p><button type=\"submit\">Enable ACME / Let’s Encrypt</button></p></form>",
-            esc(mailhost),
-            esc(&email_prefill),
-            esc(mailhost)
-        )
+        "<p class=\"muted\">Use <strong>Step 3 · Turn on HTTPS</strong> above to request a \
+         Let’s Encrypt certificate, or set <code>tls_cert_file</code> / \
+         <code>tls_key_file</code> in config for your own certificate.</p>"
+            .to_string()
     };
-    format!("{}{}{}", state_line, listener_line, form)
+    format!("{}{}{}", state_line, listener_line, extra)
 }
 
-/// Guided wizard: point a purchased domain at this server, verify DNS + port 80,
-/// then enable Let's Encrypt and set `public_url` — all from the UI.
-fn https_domain_panel_html(
+/// Step 3 panel: one button that checks the domain and enables Let's Encrypt.
+fn https_step_panel_html(
     cfg: &Config,
     mailhost: &str,
-    public_ip: Option<&str>,
     state: Option<&HttpsPanelState>,
+    domain_done: bool,
 ) -> String {
     let public_url = cfg.public_url_get();
     let tls_listen_active = web_tls_listener_active().load(std::sync::atomic::Ordering::SeqCst);
+    let (acme_on, _, _, cert_path, _) = tls_state_from_disk(cfg);
+    let cert_exists = cert_path
+        .as_ref()
+        .map(|p| std::path::Path::new(p).is_file())
+        .unwrap_or(false);
 
     let mut out = String::new();
     if public_url.starts_with("https://") && tls_listen_active {
         out.push_str(&format!(
-            "<p class=\"ok\">Webmail is served over HTTPS at \
+            "<p class=\"ok\">Done — webmail is served securely at \
              <a href=\"{u}\"><code>{u}</code></a>.</p>",
             u = esc(&public_url)
         ));
-    } else if public_url.starts_with("https://") {
+        return out;
+    }
+    if public_url.starts_with("https://") && acme_on && cert_exists {
         out.push_str(&format!(
-            "<p class=\"warn\">Configured URL <code>{}</code> — HTTPS is not live yet \
-             (waiting for certificate and/or a restart; see Security / TLS below).</p>",
+            "<p class=\"warn\">Almost there — the certificate for <code>{}</code> is ready. \
+             <strong>Restart desertemail once</strong> and HTTPS goes live.</p>",
             esc(&public_url)
         ));
-    } else {
-        out.push_str(
-            "<p>Bought a domain? Point it at this server and get a free \
-             Let&rsquo;s Encrypt certificate, so webmail is served at \
-             <code>https://your-domain</code> with no browser warnings.</p>",
-        );
+        return out;
+    }
+    if public_url.starts_with("https://") && acme_on {
+        let host = public_url.trim_start_matches("https://").to_string();
+        out.push_str(&format!(
+            "<p class=\"warn\">Working on it — the certificate for <code>{u}</code> is being \
+             requested in the background. Keep the DNS records in place; once the certificate \
+             arrives, restart desertemail and HTTPS goes live. Reload this page to see \
+             progress.</p>\
+             <form method=\"post\" action=\"/dns/https/setup\">\
+             <input type=\"hidden\" name=\"action\" value=\"enable\">\
+             <input type=\"hidden\" name=\"domain\" value=\"{h}\">\
+             <input type=\"hidden\" name=\"email\" value=\"{e}\">\
+             <p><button type=\"submit\" class=\"btn-secondary\">Retry now</button></p></form>",
+            u = esc(&public_url),
+            h = esc(&host),
+            e = esc(&tls_state_from_disk(cfg).1)
+        ));
+        return out;
     }
 
+    if !domain_done {
+        out.push_str(
+            "<p class=\"muted\">Finish Steps 1 and 2 first, then switch on HTTPS here with \
+             one click.</p>",
+        );
+        return out;
+    }
+
+    out.push_str(
+        "<p>HTTPS gives your webmail the padlock (a free Let&rsquo;s Encrypt certificate) so \
+         passwords are never sent in the clear. One click — we check everything first and \
+         tell you exactly what to fix if something isn&rsquo;t ready.</p>",
+    );
+
     // Prefill: last submitted value, else host from public_url, else mail host.
-    let domain_prefill = state.map(|s| s.domain.clone()).unwrap_or_else(|| {
-        let from_url = public_url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        if !from_url.is_empty() {
-            from_url
-        } else if mailhost != "localhost" {
-            mailhost.to_string()
-        } else {
-            String::new()
-        }
-    });
+    let domain_prefill = state
+        .map(|s| s.domain.clone())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| {
+            if mailhost != "localhost" {
+                mailhost.to_string()
+            } else {
+                String::new()
+            }
+        });
     let email_prefill = state
         .map(|s| s.email.clone())
         .filter(|e| !e.is_empty())
@@ -3665,68 +3783,44 @@ fn https_domain_panel_html(
         })
         .unwrap_or_default();
 
-    // Step 1: the record to create at the registrar.
-    let ip_disp = public_ip.unwrap_or("<your-public-IP>");
-    let a_name = if domain_prefill.is_empty() {
-        "your-domain".to_string()
-    } else {
-        domain_prefill.clone()
-    };
-    out.push_str(&format!(
-        "<p><strong>Step 1 — DNS.</strong> At your registrar (Namecheap, Cloudflare, \
-         Porkbun, …), create an <strong>A</strong> record pointing your domain at this \
-         server:</p>\
-         <p><code class=\"dns-val\">A &nbsp; {n} &nbsp; {ip}</code> \
-         <button type=\"button\" class=\"copy-btn\" data-copy=\"A {n} {ip}\">Copy</button></p>",
-        n = esc(&a_name),
-        ip = esc(ip_disp)
-    ));
-    let web_port = cfg
-        .web_listen
-        .rsplit(':')
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let web_port = cfg.web_listen.rsplit(':').next().unwrap_or("");
     if !web_port.is_empty() && web_port != "80" {
         out.push_str(&format!(
-            "<p class=\"muted\">Let&rsquo;s Encrypt validates over port <strong>80</strong>, \
-             but this server listens on port {p}. Forward external port 80 to this \
-             machine&rsquo;s port {p} on your router/firewall (or run on port 80).</p>",
-            p = esc(&web_port)
+            "<p class=\"muted\">Note: the certificate check arrives on port <strong>80</strong>, \
+             but this server listens on port {p}. Forward external port 80 to this machine&rsquo;s \
+             port {p} on your router/firewall first.</p>",
+            p = esc(web_port)
         ));
     }
 
-    // Steps 2 + 3: one form, two submit buttons.
+    let failed_before = state.map(|s| !s.checks.is_empty()).unwrap_or(false);
+    let force_btn = if failed_before {
+        "<button type=\"submit\" name=\"action\" value=\"force\" class=\"btn-secondary\">\
+         Enable anyway (skip checks)</button>"
+    } else {
+        ""
+    };
     out.push_str(&format!(
-        "<p><strong>Step 2 — verify</strong>, then <strong>Step 3 — enable HTTPS</strong>:</p>\
-         <form method=\"post\" action=\"/dns/https/setup\">\
-         <label>Your domain</label>\
-         <input type=\"text\" name=\"domain\" value=\"{}\" placeholder=\"mail.example.com\" \
+        "<form method=\"post\" action=\"/dns/https/setup\">\
+         <input type=\"hidden\" name=\"action\" value=\"enable\">\
+         <label>Domain for webmail</label>\
+         <input type=\"text\" name=\"domain\" value=\"{}\" placeholder=\"yourdomain.com\" \
          required autocomplete=\"off\">\
-         <label>Contact email (Let&rsquo;s Encrypt account)</label>\
+         <label>Your email (only for the certificate — expiry notices)</label>\
          <input type=\"email\" name=\"email\" value=\"{}\" placeholder=\"you@example.com\" \
-         autocomplete=\"email\">\
-         <p>\
-         <button type=\"submit\" name=\"action\" value=\"verify\" class=\"btn-secondary\">\
-         Verify DNS &amp; port 80</button> \
-         <button type=\"submit\" name=\"action\" value=\"enable\">\
-         Enable HTTPS (Let&rsquo;s Encrypt)</button>\
-         </p></form>",
+         required autocomplete=\"email\">\
+         <p><button type=\"submit\">Turn on HTTPS</button> {}</p></form>",
         esc(&domain_prefill),
-        esc(&email_prefill)
+        esc(&email_prefill),
+        force_btn
     ));
 
     if let Some(s) = state {
         if !s.checks.is_empty() {
-            out.push_str("<h3>Verification results</h3>");
+            out.push_str("<h3>What we found</h3>");
             out.push_str(&https_checks_html(&s.checks));
         }
     }
-    out.push_str(
-        "<p class=\"muted\">Enabling writes <code>acme=true</code> and \
-         <code>public_url</code> to config, requests the certificate in the background, \
-         and needs one restart once the certificate arrives so HTTPS can bind.</p>",
-    );
     out
 }
 
@@ -3783,7 +3877,7 @@ fn handle_dns_https_setup(cfg: &Config, user: &str, req: &Request, peer_ip: &str
         .unwrap_or("")
         .to_string();
 
-    if action != "enable" {
+    if action == "verify" {
         if !ratelimit::check_allowed(peer_ip) {
             return page_dns(
                 cfg,
@@ -3811,7 +3905,42 @@ fn handle_dns_https_setup(cfg: &Config, user: &str, req: &Request, peer_ip: &str
         return page_dns_full(cfg, user, Some(flash), None, Some(&state));
     }
 
-    // action == enable
+    // "enable" runs the readiness checks first and refuses on failure, so one
+    // button is safe to press blind; "force" skips them (shown after a failure).
+    if action == "enable" {
+        if !ratelimit::check_allowed(peer_ip) {
+            return page_dns(
+                cfg,
+                user,
+                Some("error: too many requests — wait a moment and retry"),
+                None,
+            );
+        }
+        ratelimit::record_failure(peer_ip);
+        let checks = crate::doctor::run_https_checks_ui(cfg, &domain);
+        let blocked = checks
+            .iter()
+            .any(|c| c.status == crate::doctor::Status::Fail);
+        if blocked {
+            let state = HttpsPanelState {
+                domain,
+                email,
+                checks,
+            };
+            return page_dns_full(
+                cfg,
+                user,
+                Some(
+                    "error: not switched on yet — something below isn't ready. Fix the FAIL \
+                     items (new DNS records can take a while), then press the button again.",
+                ),
+                None,
+                Some(&state),
+            );
+        }
+    }
+
+    // action == enable (checks passed) or force
     if email.is_empty() || !email.contains('@') {
         let state = HttpsPanelState {
             domain,
@@ -3869,10 +3998,9 @@ fn handle_dns_https_setup(cfg: &Config, user: &str, req: &Request, peer_ip: &str
                 cfg,
                 user,
                 Some(&format!(
-                    "HTTPS setup started for {u} — the Let's Encrypt certificate request is \
-                     running in the background. Keep DNS and port 80 in place; once the \
-                     certificate is written, restart desertemail and webmail will be served \
-                     at {u}.",
+                    "HTTPS is being set up for {u} — the certificate is requested in the \
+                     background (usually under a minute). Keep the DNS records in place. \
+                     When it's ready, restart desertemail once and webmail moves to {u}.",
                     u = url
                 )),
                 None,
@@ -3985,20 +4113,24 @@ fn handle_dns_settings(cfg: &Config, user: &str, req: &Request) -> Response {
     }) {
         Ok(()) => {
             cfg.set_public_host_live(&public_host);
-            page_dns(
-                cfg,
-                user,
-                Some(&format!(
-                    "Saved domain={} public_host={}.",
-                    domain,
-                    if public_host.is_empty() {
-                        "(auto)"
-                    } else {
-                        public_host.as_str()
-                    }
-                )),
-                None,
-            )
+            // A real domain needs a DKIM signing key — create one automatically
+            // so the records table is complete without an extra button press.
+            let mut flash = format!("Domain saved: {}.", domain);
+            let is_real_domain = !domain.eq_ignore_ascii_case("localhost");
+            if is_real_domain && cfg.dkim_key_clone().is_none() {
+                match create_and_persist_dkim_key(cfg) {
+                    Ok(_) => flash.push_str(
+                        " A mail signing key (DKIM) was created for you — \
+                         its record is in the table below.",
+                    ),
+                    Err(e) => flash.push_str(&format!(
+                        " Note: could not create the DKIM signing key automatically ({}). \
+                         You can retry under Advanced settings.",
+                        e
+                    )),
+                }
+            }
+            page_dns(cfg, user, Some(&flash), None)
         }
         Err(e) => page_dns(cfg, user, Some(&format!("error: {}", e)), None),
     }
