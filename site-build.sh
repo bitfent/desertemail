@@ -161,7 +161,7 @@ fi
 # Social crawlers (WhatsApp especially) require ABSOLUTE og:image URLs, so the
 # committed HTML keeps a __OG_BASE__ placeholder that we replace at build time.
 # In place is fine: Render builds a throwaway checkout; local runs restore via git.
-for _html in "${SITE_DIR}/index.html" "${SITE_DIR}/docs.html"; do
+for _html in "${SITE_DIR}/index.html" "${SITE_DIR}/docs.html" "${SITE_DIR}/desertbox.html"; do
   if [ -f "${_html}" ] && grep -q '__OG_BASE__' "${_html}"; then
     _tmp="${_html}.tmp.$$"
     sed "s|__OG_BASE__|${BASE_URL}|g" "${_html}" > "${_tmp}" && mv "${_tmp}" "${_html}"

@@ -505,6 +505,7 @@
       <li><a href="/">Home</a></li>
       <li><a href="/#install">Install</a></li>
       <li><a href="/docs.html" class="is-current" aria-current="page">Docs</a></li>
+      <li><a href="/desertbox.html">DesertBox</a></li>
       <li><a href="https://github.com/bitfent/desertemail">GitHub</a></li>
     </ul>
   </div>
@@ -1014,24 +1015,24 @@ web_tls_listen = "0.0.0.0:8443"</code></pre>
 
       <section class="pix-panel" aria-labelledby="security">
         <div class="heading-wrap"><h2 id="security">Security notes &amp; current limitations</h2><a class="anchor" href="#security" aria-label="Link to this section">#</a></div>
-        <p>DesertEmail is an <strong>educational / personal-use</strong> MVP — not a hardened production MTA. Be explicit about what it does and does <em>not</em> do.</p>
+        <p>DesertEmail is a <strong>full self-hostable mail server</strong> for personal and small-team use. The remaining gate before large-scale or high-stakes deployment is an external security audit plus a sustained fuzzing campaign of the hand-rolled parsers. Be explicit about what it does and does <em>not</em> do.</p>
         <ul>
           <li><strong>TLS is built in</strong> (rustls): STARTTLS on SMTP (RFC 3207) and IMAP (RFC 2595), optional implicit SMTPS/IMAPS, HTTPS webmail, and opportunistic outbound STARTTLS with webpki-roots validation. Supply <code>tls_cert_file</code> + <code>tls_key_file</code> to enable. Without them the server runs plaintext — fine for LAN/localhost/VPN; for any internet-facing deploy, configure TLS and consider <code>require_tls_for_auth = true</code>.</li>
-          <li><strong>No automatic cert renewal.</strong> Bring your own certificate (self-signed for testing, Let’s Encrypt via certbot/acme.sh externally, or a TLS-terminating reverse proxy). See <a href="#tls">TLS / encryption setup</a>.</li>
+          <li><strong>Automatic certs via built-in ACME</strong> (<code>acme = true</code>, HTTP-01; needs public DNS + port 80) — or bring your own certificate (self-signed for testing, certbot/acme.sh externally, or a TLS-terminating reverse proxy). See <a href="#tls">TLS / encryption setup</a>.</li>
           <li><strong>Passwords:</strong> prefer PBKDF2 hashes (<code>desertemail --hash-password</code> or <code>user add</code>). Plaintext still works but logs a startup WARNING. Keep <code>config.toml</code> <code>chmod 600</code>.</li>
           <li><strong>Catch-all vs auth:</strong> <code>catch_all</code> only routes mail; authentication requires a <code>[users]</code> entry unless <code>allow_default_password_auth = true</code> (keep false).</li>
           <li><strong>Webmail sessions:</strong> cookie is <code>HttpOnly</code>, <code>SameSite=Lax</code>; on HTTPS (<code>web_tls_listen</code>) the cookie also gets <code>Secure</code>. Admin POSTs check Origin/Referer when present. Tokens are derived from OS CSPRNG material.</li>
           <li><strong>DKIM:</strong> pure-std RSA-SHA256, relaxed/relaxed; signing path verified against <code>dkimpy</code> in project tests.</li>
           <li><strong>Missing for “real MTA” use:</strong> no full Bayesian/ML spam filter (basic SPF/DKIM/DMARC + greylist/DNSBL score only); ACME is optional and needs correct DNS + port 80.</li>
         </ul>
-        <p class="warn">If you need a production mail gateway today, use Postfix/OpenSMTPD/etc. Use DesertEmail when you want ownership, tiny footprint, and a codebase you can actually finish reading.</p>
+        <p class="warn">If you need a high-volume mail gateway with decades of audit history, use Postfix/OpenSMTPD/etc. Use DesertEmail when you want ownership, tiny footprint, and a codebase you can actually finish reading.</p>
       </section>
 
       <section class="pix-panel" aria-labelledby="faq">
         <div class="heading-wrap"><h2 id="faq">FAQ</h2><a class="anchor" href="#faq" aria-label="Link to this section">#</a></div>
         <dl class="faq">
           <dt>Does it support TLS / encryption?</dt>
-          <dd>Yes — built in via <strong>rustls</strong>. Set <code>tls_cert_file</code> and <code>tls_key_file</code> (both required). You get STARTTLS on SMTP/IMAP, optional implicit ports (465/993), HTTPS webmail, and opportunistic outbound STARTTLS. There is no ACME auto-cert; bring your own files (self-signed, certbot, acme.sh, or a reverse proxy). See <a href="#tls">TLS / encryption setup</a>.</dd>
+          <dd>Yes — built in via <strong>rustls</strong>. Set <code>tls_cert_file</code> and <code>tls_key_file</code> (both required). You get STARTTLS on SMTP/IMAP, optional implicit ports (465/993), HTTPS webmail, and opportunistic outbound STARTTLS. Certs can be auto-issued and renewed via built-in ACME (<code>acme = true</code>), or bring your own files (self-signed, certbot, acme.sh, or a reverse proxy). See <a href="#tls">TLS / encryption setup</a>.</dd>
           <dt>Will Gmail accept my mail?</dt>
           <dd>Maybe. SPF + DKIM + sensible rDNS help a lot. New or residential IPs still have low reputation; expect spam folders or rejects until reputation builds — or send via a smarthost with good standing.</dd>
           <dt>Can I run it on my phone?</dt>

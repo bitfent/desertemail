@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DesertBox — your email server in a box</title>
+<meta name="description" content="A palm-sized appliance running DesertEmail. Plug it into power and your router; every message, key and account lives on hardware you own. No account, no subscription.">
+<!-- Open Graph / social preview. __OG_BASE__ is stamped with the site origin by site-build.sh. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="DesertEmail">
+<meta property="og:title" content="DesertBox — your email server in a box">
+<meta property="og:description" content="Plug it into power and your router; every message, key and account lives on hardware you own. No account, no subscription, and it keeps working if this website disappears.">
+<meta property="og:url" content="__OG_BASE__/desertbox.html">
+<meta property="og:image" content="__OG_BASE__/og.png">
+<meta property="og:image:secure_url" content="__OG_BASE__/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="DesertEmail — pixel-art cactus with the tagline: your own email server, one command, runs on a $5 Pi.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="DesertBox — your email server in a box">
+<meta name="twitter:description" content="A palm-sized appliance running the open-source DesertEmail server. Buy it once, own your email.">
+<meta name="twitter:image" content="__OG_BASE__/og.png">
+<meta name="twitter:image:alt" content="DesertEmail — pixel-art cactus and value proposition.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2012%2016'%20shape-rendering='crispEdges'%3E%3Crect%20x='6'%20y='0'%20width='1'%20height='1'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='3'%20height='15'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='1'%20height='15'%20fill='%23FFB03A'/%3E%3Crect%20x='7'%20y='1'%20width='1'%20height='15'%20fill='%23B35E00'/%3E%3Crect%20x='1'%20y='4'%20width='2'%20height='5'%20fill='%23E8850C'/%3E%3Crect%20x='1'%20y='4'%20width='1'%20height='5'%20fill='%23FFB03A'/%3E%3Crect%20x='3'%20y='7'%20width='2'%20height='2'%20fill='%23E8850C'/%3E%3Crect%20x='3'%20y='8'%20width='2'%20height='1'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='2'%20height='6'%20fill='%23E8850C'/%3E%3Crect%20x='10'%20y='5'%20width='1'%20height='6'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='1'%20height='1'%20fill='%23FFB03A'/%3E%3Crect%20x='8'%20y='9'%20width='1'%20height='2'%20fill='%23E8850C'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f5e3c0;          /* desert day sand */
+    --panel: #fdf3dd;
+    --ink: #3a2410;
+    --muted: #7a5c38;
+    --accent: #e8850c;
+    --accent-dark: #b35e00;
+    --accent-light: #ffb03a;
+    --border: #3a2410;
+    --code-bg: #2a1a08;
+    --code-ink: #ffd591;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17110a;        /* desert night */
+      --panel: #211809;
+      --ink: #f2e3c8;
+      --muted: #b99a6e;
+      --accent: #e8850c;
+      --accent-dark: #B35E00;
+      --accent-light: #ffb03a;
+      --border: #e8850c;
+      --code-bg: #0d0904;
+      --code-ink: #ffd591;
+    }
+  }
+  :root { --nav-h: 56px; }
+  * { box-sizing: border-box; }
+  html {
+    -webkit-text-size-adjust: 100%;
+    /* No overflow-x here: non-visible overflow on html/body/.wrap turns them
+       into scroll containers, which silently breaks position: sticky (navbar). */
+    scroll-behavior: smooth;
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Courier New", Courier, ui-monospace, monospace;
+    font-size: 16px;
+    line-height: 1.65;
+    image-rendering: pixelated;
+    /* clip (unlike hidden) does not create a scroll container, so the sticky
+       navbar keeps working while stray shadow bleed is still clipped. */
+    overflow-x: clip;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+
+  /* --- sticky navbar ---------------------------------------------------- */
+  .site-nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--panel);
+    border-bottom: 4px solid var(--border);
+    box-shadow: 0 4px 0 0 var(--accent-dark);
+  }
+  .site-nav-inner {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 0 1rem;
+    min-height: var(--nav-h);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.85rem;
+    color: var(--ink);
+    border-bottom: none;
+    text-decoration: none;
+  }
+  .nav-brand:hover { background: transparent; color: var(--ink); }
+  .nav-logo { width: 22px; height: 29px; flex: none; display: block; }
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem 1rem;
+    margin-left: auto;
+    list-style: none;
+    padding: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+  }
+  .nav-links li { margin: 0; }
+  .nav-links li::before { content: none; }
+  .nav-links a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0.2rem 0.15rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.78rem;
+    color: var(--ink);
+    border-bottom: 3px solid transparent;
+    text-decoration: none;
+  }
+  .nav-links a:hover,
+  .nav-links a.is-current {
+    background: transparent;
+    color: var(--accent-dark);
+    border-bottom-color: var(--accent);
+  }
+  @media (prefers-color-scheme: dark) {
+    .nav-links a:hover,
+    .nav-links a.is-current { color: var(--accent-light); }
+  }
+  .nav-toggle {
+    display: none;
+    margin-left: auto;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 1.25rem;
+    line-height: 1;
+    color: var(--ink);
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 3px 3px 0 0 var(--accent-dark);
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .nav-toggle:hover { background: var(--accent-light); color: #2a1a08; }
+  .nav-toggle:active { transform: translate(2px, 2px); box-shadow: none; }
+
+  @media (max-width: 700px) {
+    .nav-toggle { display: inline-flex; align-items: center; justify-content: center; }
+    .nav-links {
+      display: none;
+      flex-direction: column;
+      align-items: stretch;
+      width: 100%;
+      margin-left: 0;
+      margin-bottom: 0.6rem;
+      background: var(--panel);
+      border: 4px solid var(--border);
+      box-shadow: 4px 4px 0 0 var(--accent-dark);
+      padding: 0.35rem 0;
+    }
+    .site-nav.is-open .nav-links { display: flex; }
+    .nav-links a {
+      min-height: 44px;
+      padding: 0.55rem 1rem;
+      border-bottom: none;
+      width: 100%;
+    }
+    .nav-links a:hover,
+    .nav-links a.is-current {
+      background: var(--accent);
+      color: #2a1a08;
+    }
+  }
+
+  /* --- 8-bit chrome --------------------------------------------------- */
+  .pix-panel {
+    background: var(--panel);
+    border: 4px solid var(--border);
+    box-shadow: 8px 8px 0 0 var(--accent-dark);
+    padding: 1.25rem 1.25rem 1.4rem;
+    margin: 2rem 0;
+  }
+  h1, h2 {
+    font-family: "Courier New", Courier, ui-monospace, monospace;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    line-height: 1.25;
+  }
+  h1 { font-size: 2rem; margin: 0.4rem 0 0.2rem; text-shadow: 3px 3px 0 var(--accent-dark); }
+  h2 { font-size: 1.05rem; margin: 0 0 0.8rem; color: var(--accent); scroll-margin-top: calc(var(--nav-h) + 16px); }
+  h2::before { content: "▶ "; color: var(--accent-dark); }
+  h3 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.1em; margin: 1.1rem 0 0.3rem; }
+  p { margin: 0.5rem 0; }
+  .tagline { color: var(--muted); max-width: 46ch; }
+
+  header { text-align: left; display: flex; gap: 1.2rem; align-items: center; flex-wrap: nowrap; padding-top: 0.5rem; }
+  .logo { width: 96px; height: 92px; flex: none; image-rendering: pixelated; }
+  header > div { min-width: 0; }
+
+  /* --- lists / code ------------------------------------------------------ */
+  ul { padding-left: 1.1rem; margin: 0.4rem 0; list-style: none; }
+  ul li { margin: 0.35rem 0; }
+  ul li::before { content: "■ "; color: var(--accent); }
+  code {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 0.08rem 0.35rem;
+    font-size: 0.9em;
+  }
+  .note { color: var(--muted); font-size: 0.9rem; }
+
+  a { color: var(--accent-dark); text-decoration: none; border-bottom: 3px solid var(--accent); font-weight: 700; }
+  @media (prefers-color-scheme: dark) { a { color: var(--accent-light); } }
+  a:hover { background: var(--accent); color: #2a1a08; }
+
+  .stats { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.9rem; }
+  .stat {
+    border: 3px solid var(--border);
+    background: var(--panel);
+    box-shadow: 4px 4px 0 0 var(--accent-dark);
+    padding: 0.3rem 0.7rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* --- promise list ------------------------------------------------------ */
+  .promise { margin: 0.9rem 0; padding-left: 0; }
+  .promise dt {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.85rem;
+    color: var(--accent-dark);
+    margin-top: 0.9rem;
+  }
+  @media (prefers-color-scheme: dark) { .promise dt { color: var(--accent-light); } }
+  .promise dt::before { content: "■ "; color: var(--accent); }
+  .promise dd { margin: 0.15rem 0 0 1.1rem; }
+
+  /* --- deliverability report card ----------------------------------------- */
+  .grade {
+    border: 3px solid var(--border);
+    background: var(--bg);
+    box-shadow: 4px 4px 0 0 var(--accent-dark);
+    padding: 0.8rem 0.9rem;
+    margin: 0.9rem 0;
+  }
+  .grade p { margin: 0.4rem 0 0; }
+  .badge {
+    display: inline-block;
+    border: 3px solid var(--border);
+    padding: 0.05rem 0.5rem;
+    font-weight: 700;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-right: 0.5rem;
+  }
+  .badge.green  { background: #7bc96f; color: #0c2a08; }
+  .badge.yellow { background: #ffd24d; color: #332a00; }
+  .badge.red    { background: #ff6b6b; color: #330404; }
+  .grade-title { font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.85rem; }
+
+  footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.9rem; }
+  .slogan {
+    margin: 2.5rem 0 0;
+    padding: 1.6rem 1rem 0;
+    border-top: 4px solid var(--border);
+    text-align: center;
+  }
+  .slogan p {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 700;
+    font-style: italic;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+  .slogan cite {
+    display: block;
+    margin-top: 0.55rem;
+    font-style: normal;
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* --- mobile (360–414px) ----------------------------------------------- */
+  @media (max-width: 480px) {
+    h1 {
+      font-size: clamp(1.15rem, 6vw, 2rem);
+      letter-spacing: 0.06em;
+      text-shadow: 2px 2px 0 var(--accent-dark);
+    }
+    header { gap: 0.9rem; }
+    .logo { width: 64px; height: 61px; }
+    .tagline { font-size: 0.88rem; }
+    .pix-panel {
+      box-shadow: 5px 5px 0 0 var(--accent-dark);
+      margin-left: 0;
+      margin-right: 0;
+    }
+  }
+</style>
+</head>
+<body>
+
+<nav class="site-nav" id="site-nav" aria-label="Site">
+  <div class="site-nav-inner">
+    <a class="nav-brand" href="/">
+      <svg class="nav-logo" viewBox="0 0 12 16" shape-rendering="crispEdges" role="img" aria-hidden="true">
+        <rect x="6" y="0" width="1" height="1" fill="#E8850C"/>
+        <rect x="5" y="1" width="3" height="15" fill="#E8850C"/>
+        <rect x="5" y="1" width="1" height="15" fill="#FFB03A"/>
+        <rect x="7" y="1" width="1" height="15" fill="#B35E00"/>
+        <rect x="1" y="4" width="2" height="5" fill="#E8850C"/>
+        <rect x="1" y="4" width="1" height="5" fill="#FFB03A"/>
+        <rect x="3" y="7" width="2" height="2" fill="#E8850C"/>
+        <rect x="3" y="8" width="2" height="1" fill="#B35E00"/>
+        <rect x="9" y="5" width="2" height="6" fill="#E8850C"/>
+        <rect x="10" y="5" width="1" height="6" fill="#B35E00"/>
+        <rect x="9" y="5" width="1" height="1" fill="#FFB03A"/>
+        <rect x="8" y="9" width="1" height="2" fill="#E8850C"/>
+      </svg>
+      <span>DESERTEMAIL</span>
+    </a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-menu" aria-label="Open menu">☰</button>
+    <ul class="nav-links" id="nav-menu">
+      <li><a href="/">Home</a></li>
+      <li><a href="/#install">Install</a></li>
+      <li><a href="/docs.html">Docs</a></li>
+      <li><a href="/desertbox.html" class="is-current" aria-current="page">DesertBox</a></li>
+      <li><a href="https://github.com/bitfent/desertemail">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="wrap">
+
+  <header>
+    <!-- 8-bit mascot: clay mail appliance with a face -->
+    <picture>
+      <source srcset="mascot-front.png" media="(prefers-reduced-motion: reduce)">
+      <img class="logo" src="mascot.gif" width="96" height="92"
+           alt="DesertBox mascot — a smiling clay mail appliance delivering an envelope">
+    </picture>
+    <div>
+      <h1>DesertBox</h1>
+      <p class="tagline">Your email server in a box. Plug it in, own your email.</p>
+    </div>
+  </header>
+
+  <section class="pix-panel" aria-labelledby="what-h">
+    <h2 id="what-h">What it is</h2>
+    <p>A palm-sized appliance. Plug it into power and your router; minutes later you
+    have your own email address on your own domain — and every message, every key,
+    every account lives on hardware in your house. Not synced to a cloud. Not
+    &ldquo;encrypted at rest&rdquo; in someone else&rsquo;s datacenter. <strong>In your house.</strong></p>
+    <p>Inside is <a href="/">DesertEmail</a>, a from-scratch pure-Rust mail server:
+    SMTP, IMAP, webmail, DKIM signing, a full outbound queue and TLS in a single
+    ~1.2&nbsp;MB static binary. The box is the binary plus a case, a network jack,
+    and opinions about who owns your mail.</p>
+    <div class="stats">
+      <span class="stat">your house, your mail</span>
+      <span class="stat">~1.2 MB server binary</span>
+      <span class="stat">~1–2 W idle</span>
+    </div>
+  </section>
+
+  <section class="pix-panel" aria-labelledby="promises-h">
+    <h2 id="promises-h">The promises</h2>
+    <dl class="promise">
+      <dt>No account</dt>
+      <dd>There is nothing to register and nobody to sign in with. The box does not
+      know who you are, and neither do we.</dd>
+
+      <dt>No subscription</dt>
+      <dd>Buy it once. Nothing renews, nothing expires, nothing is held hostage
+      behind a monthly payment.</dd>
+
+      <dt>Works even if this website disappears</dt>
+      <dd>The box contacts this site for exactly one thing: signed software updates.
+      That is the whole relationship. If this website goes dark forever, your email
+      keeps working — a dead website means &ldquo;no updates&rdquo;, never
+      &ldquo;no email&rdquo;.</dd>
+
+      <dt>Updates you can verify — and refuse</dt>
+      <dd>Every release is signed with a key that lives offline. Your box checks the
+      signature against a public key baked into its own binary, so a hijacked website
+      or DNS cannot push code onto it. And you can switch updates off entirely:
+      <code>auto_update = false</code>.</dd>
+
+      <dt>One-click exit — that is the point</dt>
+      <dd>Your domain, your DNS, your maildir in a
+      <a href="/docs.html#ops-backup">standard on-disk format</a>, an open-source
+      server anyone can run. Move it all to another machine, another provider, or
+      another product whenever you like. A product you cannot leave is a product
+      that owns <em>you</em>.</dd>
+    </dl>
+  </section>
+
+  <section class="pix-panel" id="deliverability" aria-labelledby="deliv-h">
+    <h2 id="deliv-h">Deliverability, honestly</h2>
+    <p>Whether the big providers accept mail from your connection is decided by your
+    <em>connection</em>, not by our software. Residential IP ranges sit on spam
+    blocklists by default; carrier-grade NAT makes inbound connections impossible.
+    No box — ours or anyone&rsquo;s — can fix that with software, and any product
+    that claims otherwise is quietly routing your mail through its own cloud.</p>
+    <p>So DesertBox tells you the truth instead. During setup, the built-in
+    <a href="/docs.html#doctor"><strong>doctor</strong></a> probes your line and
+    hands you a report card:</p>
+
+    <div class="grade">
+      <span class="badge green">green</span><span class="grade-title">Clean line — send and receive directly</span>
+      <p>Static IP, port 25 open, reverse DNS you control (a business line, or the
+      box living on your own colo/VPS). The box talks to the world with no
+      intermediary at all. This is the full promise, unmediated.</p>
+    </div>
+
+    <div class="grade">
+      <span class="badge yellow">yellow</span><span class="grade-title">Blocked residential line — bring your own smarthost</span>
+      <p>Inbound mail usually works; outbound from your IP will land in spam folders
+      no matter what the software does. Fix: relay outbound through a smarthost
+      <strong>you</strong> choose and pay for — your ISP&rsquo;s relay or any relay
+      account. Two lines of config, swappable any day, and DesertBox is not in the
+      loop. Your mail archive still never leaves your house.
+      <a href="/docs.html#faq">Smarthost setup →</a></p>
+    </div>
+
+    <div class="grade">
+      <span class="badge red">red</span><span class="grade-title">CGNAT — bring your own VPS tunnel</span>
+      <p>Behind carrier-grade NAT nothing can reach your box from outside. Fix: rent
+      the cheapest VPS you can find (a few euros a month, any provider), point MX at
+      it, and run a tunnel from the box out to it. The VPS forwards raw connections
+      down the tunnel; the mail — and the TLS that protects it — still terminates in
+      your house. You own both ends and can swap the VPS in an afternoon.</p>
+    </div>
+
+    <p class="note">We could have sold you a relay subscription and called it a
+    cloud. That would put a company back inside your mail path — the exact thing
+    this product exists to remove. The report card tells you which line you have;
+    the escape hatches are documented and belong to you.</p>
+  </section>
+
+  <section class="pix-panel" id="get-it" aria-labelledby="get-h">
+    <h2 id="get-h">Get it</h2>
+    <h3>The box &amp; the flashable image — coming soon</h3>
+    <p>An SD-card image for Raspberry Pi–class boards: flash, plug in, open
+    <code>http://desertbox.local</code>, and a setup wizard walks you through domain,
+    DNS records and the doctor report card. No terminal required.</p>
+    <h3>Today: run the same server yourself</h3>
+    <p>The box runs the exact server this site distributes. Any Linux machine, Mac,
+    or Raspberry Pi works — <a href="/#install">pick your platform on the home page</a>
+    and you are one command away. Full walk-through and config reference:
+    <a href="/docs.html">the docs</a>.</p>
+  </section>
+
+  <footer>
+    <p>DesertBox is built on the open-source
+    <a href="https://github.com/bitfent/desertemail">DesertEmail</a> server. This
+    page loads nothing from anyone else — no fonts, no analytics, no trackers.
+    View source and check.</p>
+  </footer>
+
+  <blockquote class="slogan">
+    <p>Own your email for the electricity cost of a doorbell.</p>
+    <cite>— the whole idea</cite>
+  </blockquote>
+</div>
+
+<script>
+(function () {
+  var nav = document.getElementById("site-nav");
+  var toggle = document.getElementById("nav-toggle");
+  if (toggle && nav) {
+    toggle.addEventListener("click", function () {
+      var open = !nav.classList.contains("is-open");
+      nav.classList.toggle("is-open", open);
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      toggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+    });
+  }
+})();
+</script>
+</body>
+</html>

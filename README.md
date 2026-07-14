@@ -28,6 +28,23 @@ Stops services, removes the binary/config/PATH block, and asks before deleting m
 
 **Installer vs doctor:** the installer (or a manual `config.toml`) sets up the **software**. `desertemail doctor` verifies the **environment** — DNS, ports, rDNS, TLS, and config sanity — so mail actually delivers. Run doctor after DNS setup and before you announce the address.
 
+## DesertBox — the plug-in appliance
+
+Don't want to install anything? **DesertBox** is DesertEmail as hardware: a
+palm-sized Raspberry Pi–class appliance running this exact server. Plug it into
+power and your router, open `http://desertbox.local`, and a setup wizard walks
+you through domain, DNS records and a deliverability report card — no terminal
+required. No account, no subscription; the box contacts the release site for
+exactly one thing, signed software updates (Ed25519, public key baked into the
+binary), so a dead website means "no updates", never "no email".
+
+The **flashable SD-card image** for Pi-class boards is coming soon. The
+appliance layer that builds it — image builder, first-boot provisioning,
+systemd units, signed self-update — is being folded into this repository so
+the server and the box always release from the same tree.
+
+Meet the box: [desertemail.org/desertbox.html](https://desertemail.org/desertbox.html)
+
 ## Why DesertEmail?
 
 - **From scratch**: SMTP (receive + submit), IMAP, webmail, DKIM, DNS, and HTTP are hand-rolled pure `std`. No lettre, no mail-parser crates, no async runtime (no tokio).
@@ -38,7 +55,7 @@ Stops services, removes the binary/config/PATH block, and asks before deleting m
 - **Maildir storage**: Standard, simple, filesystem-based. Easy to backup, rsync, or even mount remotely.
 - **Secure-ish by design**: PBKDF2-HMAC-SHA256 password hashes (`desertemail --hash-password`), AUTH PLAIN, auth lockout, connection limits, basic command validation. Built-in TLS when you supply a cert+key; optional `require_tls_for_auth` rejects AUTH on plaintext (538).
 
-> ⚠️ **Status: self-hostable, but not yet third-party audited.** The full hardening roadmap (Tiers 1–4 below) is **complete and in tree** — password hashing, auth lockout, connection limits, inbound SPF/DKIM/DMARC + greylisting, full IMAP (SEARCH/IDLE/APPEND/STORE/EXPUNGE), ACME, quotas, structured logs, user CLI + admin CRUD, health/metrics. What's still open before high-stakes or large-scale public use: an **external security audit + sustained fuzzing** of the hand-rolled parsers, and there's no full Bayesian/ML spam filter. It's a great self-hosted mail server for tinkerers and a great way to learn the protocols — deploy it with eyes open.
+> ⚠️ **Status: self-hostable, but not yet third-party audited.** The hardening roadmap (Tiers 1–4 below) is otherwise **complete and in tree** — password hashing, auth lockout, connection limits, inbound SPF/DKIM/DMARC + greylisting, full IMAP (SEARCH/IDLE/APPEND/STORE/EXPUNGE), ACME, quotas, structured logs, user CLI + admin CRUD, health/metrics. What's still open before high-stakes or large-scale public use: an **external security audit + sustained fuzzing** of the hand-rolled parsers, and there's no full Bayesian/ML spam filter. Deploy it with eyes open.
 
 ## Features (v0.2)
 
@@ -455,10 +472,11 @@ DEPLOY.md for the full distribution pipeline (`bin-dist/` → `site-build.sh` �
 >
 > If a push is blocked, run the rebuild above. Emergency bypass: `git push --no-verify`.
 
-## Hardening roadmap (MVP → production self-hostable)
+## Hardening status
 
-**All four tiers below are complete and in tree.** They took DesertEmail from a
-learning MVP to a self-hostable mail server. The one remaining gate before
+**Every item below is complete and in tree except one: the external security
+audit.** DesertEmail is a full
+self-hostable mail server. The one remaining gate before
 high-stakes or large-scale public use is an **external security audit + a
 sustained fuzzing campaign** of the hand-rolled parsers (the fuzz targets exist
 under `fuzz/`; they just need to be run long, ideally by fresh eyes). Until then:
@@ -489,7 +507,8 @@ remaining hard gate before pointing MX at it in a high-stakes setting.
 - [x] **Graceful shutdown** (drain connections + flush queue on SIGTERM), **per-user quotas**, **structured logs** (fail2ban-friendly).
 
 ### Tier 4 — Assurance & ops
-- [x] Security audit sign-off + load testing.
+- [ ] **External security audit + sustained fuzzing campaign** — the open gate described above. Internal hardening sweeps are done and the fuzz targets exist under `fuzz/`; what remains is long fuzz runs and independent eyes.
+- [x] Load testing (`tests/loadtest.sh`).
 - [x] Backup/restore docs, monitoring, alerting.
 - [x] User management without editing config + restart (add/remove users; optional web admin CRUD).
 
