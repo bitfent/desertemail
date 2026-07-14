@@ -22,6 +22,7 @@
 <meta name="twitter:description" content="A palm-sized appliance running the open-source DesertEmail server. Buy it once, own your email.">
 <meta name="twitter:image" content="__OG_BASE__/og.png">
 <meta name="twitter:image:alt" content="DesertEmail — pixel-art cactus and value proposition.">
+<link rel="preload" as="image" href="mascot.gif">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2012%2016'%20shape-rendering='crispEdges'%3E%3Crect%20x='6'%20y='0'%20width='1'%20height='1'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='3'%20height='15'%20fill='%23E8850C'/%3E%3Crect%20x='5'%20y='1'%20width='1'%20height='15'%20fill='%23FFB03A'/%3E%3Crect%20x='7'%20y='1'%20width='1'%20height='15'%20fill='%23B35E00'/%3E%3Crect%20x='1'%20y='4'%20width='2'%20height='5'%20fill='%23E8850C'/%3E%3Crect%20x='1'%20y='4'%20width='1'%20height='5'%20fill='%23FFB03A'/%3E%3Crect%20x='3'%20y='7'%20width='2'%20height='2'%20fill='%23E8850C'/%3E%3Crect%20x='3'%20y='8'%20width='2'%20height='1'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='2'%20height='6'%20fill='%23E8850C'/%3E%3Crect%20x='10'%20y='5'%20width='1'%20height='6'%20fill='%23B35E00'/%3E%3Crect%20x='9'%20y='5'%20width='1'%20height='1'%20fill='%23FFB03A'/%3E%3Crect%20x='8'%20y='9'%20width='1'%20height='2'%20fill='%23E8850C'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -210,7 +211,9 @@
   .tagline { color: var(--muted); max-width: 46ch; }
 
   header { text-align: left; display: flex; gap: 1.2rem; align-items: center; flex-wrap: nowrap; padding-top: 0.5rem; }
-  .logo { width: 96px; height: 92px; flex: none; image-rendering: pixelated; }
+  /* color: transparent hides the alt-text flash while the GIF loads
+     (alt text paints in the element's color); screen readers unaffected. */
+  .logo { width: 96px; height: 92px; flex: none; image-rendering: pixelated; color: transparent; }
   header > div { min-width: 0; }
 
   /* --- lists / code ------------------------------------------------------ */
