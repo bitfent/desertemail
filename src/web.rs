@@ -92,6 +92,25 @@ fn clear_session(token: Option<&str>) {
     }
 }
 
+/// Remove every web session belonging to `user` (case-insensitive), except an
+/// optional `keep_token` (so an admin acting on their own account stays signed
+/// in). Returns the number of sessions removed. IMAP/SMTP connections are
+/// unaffected — they authenticate per-connection with the password.
+fn clear_sessions_for_user(user: &str, keep_token: Option<&str>) -> usize {
+    let mut removed = 0;
+    if let Ok(mut map) = sessions().lock() {
+        map.retain(|t, u| {
+            if u.eq_ignore_ascii_case(user) && keep_token != Some(t.as_str()) {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    removed
+}
+
 // ---------------------------------------------------------------------------
 // CSRF (synchronizer token derived from session — no extra server state)
 // ---------------------------------------------------------------------------
@@ -1241,6 +1260,10 @@ fn route_inner(
                 ("POST", "/msg/bulk") => handle_bulk(cfg, &user, req),
                 ("POST", "/trash/empty") => handle_empty_trash(cfg, &user, req),
                 ("POST", "/spam/empty") => handle_empty_spam(cfg, &user, req),
+                ("GET", "/account") => page_account(cfg, &user, None, 200),
+                ("POST", "/account/password") => {
+                    handle_account_password(cfg, &user, req, peer_ip)
+                }
                 ("GET", "/dns") => page_dns(cfg, &user, None, None),
                 ("POST", "/dns/check") => handle_dns_check(cfg, &user, req, peer_ip),
                 ("POST", "/dns/dkim/generate") => handle_dns_dkim_generate(cfg, &user, req),
@@ -1253,6 +1276,8 @@ fn route_inner(
                 ("POST", "/admin/user/add") => handle_admin_user_add(cfg, &user, req),
                 ("POST", "/admin/user/remove") => handle_admin_user_remove(cfg, &user, req),
                 ("POST", "/admin/user/quota") => handle_admin_user_quota(cfg, &user, req),
+                ("POST", "/admin/user/password") => handle_admin_user_password(cfg, &user, req),
+                ("POST", "/admin/user/logout") => handle_admin_user_logout(cfg, &user, req),
                 ("POST", "/admin/invite") => handle_admin_invite(cfg, &user, req, secure),
                 ("POST", "/admin/invite/revoke") => handle_admin_invite_revoke(cfg, &user, req),
                 ("POST", "/admin/invite/regenerate") => {
@@ -2090,6 +2115,7 @@ fn page_shell_app(
          </ul>\
          <hr class=\"side-divider\">\
          <ul class=\"side-nav\">\
+         <li><a class=\"{}\" href=\"/account\">Account</a></li>\
          <li><a class=\"{}\" href=\"/dns\">DNS</a></li>\
          {}\
          <li><a href=\"/logout\">Logout</a></li>\
@@ -2107,6 +2133,7 @@ fn page_shell_app(
         act("drafts"),
         act("spam"),
         act("trash"),
+        act("account"),
         act("dns"),
         format!(
             "<li><a class=\"{}\" href=\"/admin\">Admin</a></li>",
@@ -5563,6 +5590,112 @@ fn deliver_like_submission(
 // Admin
 // ---------------------------------------------------------------------------
 
+/// `flash` is plain text (escaped); `error:` prefix renders in the error style.
+fn page_account(cfg: &Config, user: &str, flash: Option<&str>, status: u16) -> Response {
+    let flash_html = flash
+        .map(|f| {
+            if f.starts_with("error:") {
+                format!("<p class=\"err\">{}</p>", esc(f))
+            } else {
+                format!("<p class=\"ok\">{}</p>", esc(f))
+            }
+        })
+        .unwrap_or_default();
+    let body = format!(
+        "<h1>Account</h1>{}\
+         <div class=\"pix-panel\"><h2>Signed in as</h2><p><code>{}</code></p></div>\
+         <div class=\"pix-panel\"><h2>Change password</h2>\
+         <form method=\"post\" action=\"/account/password\">\
+         <label>Current password</label>\
+         <input type=\"password\" name=\"current\" required autocomplete=\"current-password\">\
+         <label>New password <span class=\"muted\">(at least 8 characters)</span></label>\
+         <input type=\"password\" name=\"password\" id=\"acct-pass\" required minlength=\"8\" autocomplete=\"new-password\">\
+         <label>Confirm new password</label>\
+         <input type=\"password\" name=\"password2\" id=\"acct-pass2\" required minlength=\"8\" autocomplete=\"new-password\">\
+         <p class=\"muted\" style=\"margin:.35rem 0 0\">\
+         <label style=\"display:inline;font-weight:500;text-transform:none;letter-spacing:0\">\
+         <input type=\"checkbox\" id=\"acct-show\" style=\"width:auto;display:inline;margin-right:.35rem\" \
+         onchange=\"var p=document.getElementById('acct-pass'),q=document.getElementById('acct-pass2');\
+         var t=this.checked?'text':'password';p.type=t;q.type=t;\">Show passwords</label></p>\
+         <p><button type=\"submit\">Change password</button></p></form>\
+         <p class=\"muted\">Mail clients (IMAP/SMTP) use this same password — update them after changing it.</p>\
+         </div>",
+        flash_html,
+        esc(user)
+    );
+    let reason = match status {
+        429 => "Too Many Requests",
+        _ => "OK",
+    };
+    Response::html(
+        status,
+        reason,
+        page_shell_app(
+            "Account",
+            user,
+            "account",
+            count_inbox_unread(cfg, user),
+            None,
+            &body,
+        ),
+    )
+}
+
+fn handle_account_password(cfg: &Config, user: &str, req: &Request, peer_ip: &str) -> Response {
+    // Same per-IP limiter as login: the current-password check below is a
+    // password oracle for an attacker holding a stolen session cookie.
+    if !ratelimit::check_allowed(peer_ip) {
+        return page_account(cfg, user, Some("error: too many attempts, try later"), 429);
+    }
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
+    }
+    let form = form_body(req);
+    let current = form.get("current").map(|s| s.as_str()).unwrap_or("");
+    let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
+    let password2 = form.get("password2").map(|s| s.as_str()).unwrap_or("");
+
+    if !auth::authenticate(cfg, user, current) {
+        ratelimit::record_failure(peer_ip);
+        metrics::inc_auth_failure();
+        util::log_event!(
+            "warn",
+            "password change failed",
+            "event" => "password_change_fail",
+            "ip" => peer_ip,
+            "user" => user,
+            "reason" => "bad_current_password"
+        );
+        return page_account(cfg, user, Some("error: current password is incorrect"), 200);
+    }
+    ratelimit::record_success(peer_ip);
+    if password.len() < 8 {
+        return page_account(
+            cfg,
+            user,
+            Some("error: new password must be at least 8 characters"),
+            200,
+        );
+    }
+    if password != password2 {
+        return page_account(cfg, user, Some("error: new passwords do not match"), 200);
+    }
+    let user_owned = user.to_string();
+    let pass_owned = password.to_string();
+    match persist_and_reload(cfg, |c| useredit::set_password(c, &user_owned, &pass_owned)) {
+        Ok(()) => {
+            util::log_event!(
+                "info",
+                "password changed",
+                "event" => "password_change",
+                "user" => user
+            );
+            page_account(cfg, user, Some("Password updated."), 200)
+        }
+        Err(e) => page_account(cfg, user, Some(&format!("error: {}", e)), 200),
+    }
+}
+
 fn is_admin(cfg: &Config, user: &str) -> bool {
     match cfg.admin_user_name() {
         Some(a) if !a.is_empty() => a.eq_ignore_ascii_case(user),
@@ -5615,9 +5748,14 @@ fn page_admin(
     for n in &names {
         users_html.push_str(&format!(
             "<li class=\"user-row\">{} \
+             <form method=\"post\" action=\"/admin/user/logout\" style=\"display:inline\">\
+             <input type=\"hidden\" name=\"email\" value=\"{}\">\
+             <button type=\"submit\" class=\"btn-secondary\" \
+             title=\"End this user's webmail sessions everywhere\">log out</button></form> \
              <form method=\"post\" action=\"/admin/user/remove\" style=\"display:inline\">\
              <input type=\"hidden\" name=\"email\" value=\"{}\">\
              <button type=\"submit\">remove</button></form></li>",
+            esc(n),
             esc(n),
             esc(n)
         ));
@@ -5709,8 +5847,22 @@ fn page_admin(
          <h3>Add user</h3>\
          <form method=\"post\" action=\"/admin/user/add\">\
          <label>Email / username</label><input type=\"text\" name=\"email\" required>\
-         <label>Password</label><input type=\"password\" name=\"password\" required>\
+         <label>Password <span class=\"muted\">(at least 8 characters)</span></label>\
+         <input type=\"password\" name=\"password\" required minlength=\"8\" autocomplete=\"new-password\">\
          <p><button type=\"submit\">Add user</button></p></form>\
+         <h3>Reset password</h3>\
+         <p class=\"muted\">Set a new password for an existing account (e.g. when someone \
+         is locked out). Tell them the new password out-of-band and ask them to change it \
+         on their Account page.</p>\
+         <form method=\"post\" action=\"/admin/user/password\">\
+         <label>Email / username</label><input type=\"text\" name=\"email\" required>\
+         <label>New password <span class=\"muted\">(at least 8 characters)</span></label>\
+         <input type=\"password\" name=\"password\" required minlength=\"8\" autocomplete=\"new-password\">\
+         <p class=\"muted\" style=\"margin:.35rem 0 0\">\
+         <label style=\"display:inline;font-weight:500;text-transform:none;letter-spacing:0\">\
+         <input type=\"checkbox\" name=\"logout\" checked style=\"width:auto;display:inline;margin-right:.35rem\">\
+         Also log out their webmail sessions</label></p>\
+         <p><button type=\"submit\">Reset password</button></p></form>\
          <h3>Invite user</h3>\
          <p class=\"muted\">Create an account without choosing their password. They open a \
          one-time link and set it themselves. Optional: email the link to an address they \
@@ -5872,9 +6024,16 @@ fn invite_link_flash_html(url: &str, note: &str) -> String {
 }
 
 fn user_already_exists(cfg: &Config, email: &str) -> bool {
+    resolve_user_key(cfg, email).is_some()
+}
+
+/// Exact `[users]` key for `email` (full address or local part), if configured.
+/// Password updates must target this key, not the raw input, or a variant
+/// spelling would create a second entry instead of updating the existing one.
+fn resolve_user_key(cfg: &Config, email: &str) -> Option<String> {
     let email_l = email.to_lowercase();
     let (local, _) = util::parse_email_addr(&email_l);
-    cfg.user_names().iter().any(|n| {
+    cfg.user_names().into_iter().find(|n| {
         let n = n.to_lowercase();
         n == email_l || n == local
     })
@@ -5913,6 +6072,18 @@ fn handle_admin_user_add(cfg: &Config, user: &str, req: &Request) -> Response {
     if email.is_empty() || password.is_empty() {
         return page_admin(cfg, user, Some("error: email and password required"), None);
     }
+    // Adding must never overwrite an existing account's password.
+    if user_already_exists(cfg, email) {
+        return page_admin(
+            cfg,
+            user,
+            Some(&format!(
+                "error: user {} already exists — use Reset password below",
+                email
+            )),
+            None,
+        );
+    }
     let email_owned = email.to_string();
     let password_owned = password.to_string();
     match persist_and_reload(cfg, |c| useredit::add_user(c, &email_owned, &password_owned)) {
@@ -5924,6 +6095,119 @@ fn handle_admin_user_add(cfg: &Config, user: &str, req: &Request) -> Response {
         ),
         Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
     }
+}
+
+fn handle_admin_user_password(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"), None);
+    }
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
+    }
+    let form = form_body(req);
+    let email = form.get("email").map(|s| s.trim()).unwrap_or("");
+    let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
+    if email.is_empty() || password.is_empty() {
+        return page_admin(cfg, user, Some("error: email and password required"), None);
+    }
+    let key = match resolve_user_key(cfg, email) {
+        Some(k) => k,
+        None => {
+            return page_admin(
+                cfg,
+                user,
+                Some(&format!("error: user not found: {}", email)),
+                None,
+            )
+        }
+    };
+    let logout_sessions = form.contains_key("logout");
+    let password_owned = password.to_string();
+    let key_owned = key.clone();
+    match persist_and_reload(cfg, |c| useredit::set_password(c, &key_owned, &password_owned)) {
+        Ok(()) => {
+            // Never end the admin's own current session mid-request.
+            let kicked = if logout_sessions {
+                let keep = if key.eq_ignore_ascii_case(user) {
+                    cookie_value(req, "session")
+                } else {
+                    None
+                };
+                clear_sessions_for_user(&key, keep.as_deref())
+            } else {
+                0
+            };
+            let kicked_s = kicked.to_string();
+            util::log_event!(
+                "info",
+                "admin reset password",
+                "event" => "admin_password_reset",
+                "admin" => user,
+                "user" => key.as_str(),
+                "sessions_ended" => kicked_s.as_str()
+            );
+            let msg = if logout_sessions {
+                format!(
+                    "Password reset for {} (live; no restart needed); {} session(s) logged out.",
+                    key, kicked
+                )
+            } else {
+                format!("Password reset for {} (live; no restart needed).", key)
+            };
+            page_admin(cfg, user, Some(&msg), None)
+        }
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
+    }
+}
+
+fn handle_admin_user_logout(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"), None);
+    }
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
+    }
+    let form = form_body(req);
+    let email = form.get("email").map(|s| s.trim()).unwrap_or("");
+    if email.is_empty() {
+        return page_admin(cfg, user, Some("error: email required"), None);
+    }
+    let key = match resolve_user_key(cfg, email) {
+        Some(k) => k,
+        None => {
+            return page_admin(
+                cfg,
+                user,
+                Some(&format!("error: user not found: {}", email)),
+                None,
+            )
+        }
+    };
+    // Acting on yourself keeps the session making this request.
+    let keep = if key.eq_ignore_ascii_case(user) {
+        cookie_value(req, "session")
+    } else {
+        None
+    };
+    let kicked = clear_sessions_for_user(&key, keep.as_deref());
+    let kicked_s = kicked.to_string();
+    util::log_event!(
+        "info",
+        "admin logged out user sessions",
+        "event" => "admin_user_logout",
+        "admin" => user,
+        "user" => key.as_str(),
+        "sessions_ended" => kicked_s.as_str()
+    );
+    let msg = if key.eq_ignore_ascii_case(user) {
+        format!(
+            "Logged out {} other session(s) for {} (this one stays signed in).",
+            kicked, key
+        )
+    } else {
+        format!("Logged out {} session(s) for {}.", kicked, key)
+    };
+    page_admin(cfg, user, Some(&msg), None)
 }
 
 fn handle_admin_user_remove(cfg: &Config, user: &str, req: &Request) -> Response {
@@ -6484,6 +6768,32 @@ fn handle_invite_redeem(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_sessions_for_user_kicks_all_but_kept() {
+        // Unique names/tokens: the session store is a process-global map
+        // shared with any other test that touches sessions.
+        set_session("csfu-tok-1", "csfu-carol");
+        set_session("csfu-tok-2", "CSFU-CAROL"); // case-insensitive match
+        set_session("csfu-tok-3", "csfu-dave");
+
+        // Keep one of carol's sessions (the "admin acting on self" case).
+        let n = clear_sessions_for_user("csfu-carol", Some("csfu-tok-1"));
+        assert_eq!(n, 1);
+        assert_eq!(session_user(Some("csfu-tok-1")).as_deref(), Some("csfu-carol"));
+        assert!(session_user(Some("csfu-tok-2")).is_none());
+        assert_eq!(session_user(Some("csfu-tok-3")).as_deref(), Some("csfu-dave"));
+
+        // No keep token: everything for that user goes.
+        let n = clear_sessions_for_user("csfu-carol", None);
+        assert_eq!(n, 1);
+        assert!(session_user(Some("csfu-tok-1")).is_none());
+
+        // Unknown user: nothing removed.
+        assert_eq!(clear_sessions_for_user("csfu-nobody", None), 0);
+
+        let _ = clear_sessions_for_user("csfu-dave", None);
+    }
 
     #[test]
     fn percent_decode_basic() {

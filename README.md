@@ -242,7 +242,7 @@ max_message_bytes = 26214400
 #   "alice" = "pbkdf2_sha256$210000$....$...."
 # Plaintext still works (migration) but logs a startup WARNING.
 # Or manage without editing by hand:
-#   desertemail user add alice --password secret
+#   desertemail user add alice --password 'longer-secret'
 #   desertemail user list / remove / passwd
 [users]
 "alice" = "s3cret"
@@ -259,9 +259,9 @@ The parser is hand-written and very simple (key = "value", sections).
 
 ```bash
 desertemail --config config.toml user add alice@example.com          # prompts for password
-desertemail --config config.toml user add bob --password secret --quota 512
+desertemail --config config.toml user add bob --password 'longer-secret' --quota 512
 desertemail --config config.toml user list
-desertemail --config config.toml user passwd alice
+desertemail --config config.toml user passwd alice                # reset (or --password <pw>)
 desertemail --config config.toml user remove bob
 ```
 
@@ -509,6 +509,7 @@ remaining hard gate before pointing MX at it in a high-stakes setting.
 ### Tier 4 — Assurance & ops
 - [ ] **External security audit + sustained fuzzing campaign** — the open gate described above. Internal hardening sweeps are done and the fuzz targets exist under `fuzz/`; what remains is long fuzz runs and independent eyes.
 - [x] Load testing (`tests/loadtest.sh`).
+- [x] End-to-end smoke test (`tests/smoke.sh`) — 36 checks: setup wizard, auth flows, password change/reset/log-out, invites, SMTP/IMAP/submission against a fresh instance.
 - [x] Backup/restore docs, monitoring, alerting.
 - [x] User management without editing config + restart (add/remove users; optional web admin CRUD).
 

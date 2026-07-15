@@ -14,28 +14,56 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::passwd;
 
+/// Minimum length for any newly set password. Enforced centrally in
+/// [`add_user`] so every path (web UI, admin, invites, CLI) shares the rule.
+/// Length only — no composition requirements. Existing stored credentials are
+/// unaffected; this applies only when a password is (re)set.
+pub const MIN_PASSWORD_LEN: usize = 8;
+
+/// Validate a password about to be set. Single source of the policy/message.
+pub fn check_new_password(password: &str) -> Result<(), String> {
+    if password.len() < MIN_PASSWORD_LEN {
+        return Err(format!(
+            "password must be at least {} characters",
+            MIN_PASSWORD_LEN
+        ));
+    }
+    Ok(())
+}
+
 /// Parse a config string and return usernames from `[users]` (no passwords).
 pub fn list_users(content: &str) -> Vec<String> {
     let (users, _) = parse_sections(content);
     users.into_keys().collect()
 }
 
-/// Add or update a user password hash in the `[users]` section.
-/// `password` is plaintext; stored value is always a pbkdf2 hash.
+/// Add a NEW user to the `[users]` section; errors if the user already exists
+/// (so an add can never silently overwrite someone's password — use
+/// [`set_password`] to reset). `password` is plaintext; stored value is always
+/// a pbkdf2 hash.
 pub fn add_user(content: &str, email: &str, password: &str) -> Result<String, String> {
     let email = normalize_user(email)?;
-    if password.is_empty() {
-        return Err("empty password".into());
-    }
+    check_new_password(password)?;
     let hash = passwd::hash_password(password);
     let (mut users, quotas) = parse_sections(content);
+    if users.contains_key(&email) {
+        return Err(format!("user already exists: {}", email));
+    }
     users.insert(email, hash);
     Ok(rewrite_sections(content, &users, &quotas))
 }
 
-/// Set password for an existing user (or create if missing).
+/// Set a new password for an EXISTING user; errors if the user is missing
+/// (so a typo can't create a stray account — use [`add_user`] to create).
 pub fn set_password(content: &str, email: &str, password: &str) -> Result<String, String> {
-    add_user(content, email, password)
+    let email = normalize_user(email)?;
+    check_new_password(password)?;
+    let (mut users, quotas) = parse_sections(content);
+    if !users.contains_key(&email) {
+        return Err(format!("user not found: {}", email));
+    }
+    users.insert(email, passwd::hash_password(password));
+    Ok(rewrite_sections(content, &users, &quotas))
 }
 
 /// Remove a user from `[users]` (and optionally leave quotas alone).
@@ -72,9 +100,7 @@ pub fn complete_setup(
     domain: &str,
 ) -> Result<String, String> {
     let username = normalize_user(username)?;
-    if password.len() < 8 {
-        return Err("password must be at least 8 characters".into());
-    }
+    check_new_password(password)?;
     let domain = domain.trim().to_lowercase();
     if domain.is_empty() {
         return Err("domain required".into());
@@ -658,7 +684,7 @@ log_format = "text"
 
     #[test]
     fn add_remove_list_roundtrip() {
-        let added = add_user(SAMPLE, "carol@example.com", "secret").unwrap();
+        let added = add_user(SAMPLE, "carol@example.com", "secret-pw").unwrap();
         // Unrelated lines preserved
         assert!(added.contains("domains = [\"example.com\"]"));
         assert!(added.contains("# top comment"));
@@ -673,7 +699,7 @@ log_format = "text"
         let (users, _) = parse_sections(&added);
         let stored = users.get("carol@example.com").unwrap();
         assert!(passwd::is_hashed(stored));
-        assert!(passwd::verify_password(stored, "secret"));
+        assert!(passwd::verify_password(stored, "secret-pw"));
 
         let removed = remove_user(&added, "carol@example.com").unwrap();
         let names2 = list_users(&removed);
@@ -684,11 +710,19 @@ log_format = "text"
 
     #[test]
     fn update_existing_user() {
-        let updated = add_user(SAMPLE, "alice", "newpass").unwrap();
+        let updated = set_password(SAMPLE, "alice", "newpass99").unwrap();
         let (users, _) = parse_sections(&updated);
         let stored = users.get("alice").unwrap();
-        assert!(passwd::verify_password(stored, "newpass"));
+        assert!(passwd::verify_password(stored, "newpass99"));
         assert!(!passwd::verify_password(stored, "alicepass"));
+    }
+
+    #[test]
+    fn add_refuses_existing_set_refuses_missing() {
+        // add_user must never overwrite an existing credential.
+        assert!(add_user(SAMPLE, "alice", "whatever123").is_err());
+        // set_password must not create accounts from typos.
+        assert!(set_password(SAMPLE, "nobody", "whatever123").is_err());
     }
 
     #[test]
@@ -712,6 +746,14 @@ log_format = "text"
     #[test]
     fn empty_password_rejected() {
         assert!(add_user(SAMPLE, "x", "").is_err());
+    }
+
+    #[test]
+    fn short_password_rejected() {
+        // 7 chars — one under the minimum. Applies to add and update alike.
+        assert!(add_user(SAMPLE, "x", "seven77").is_err());
+        assert!(set_password(SAMPLE, "alice", "seven77").is_err());
+        assert!(add_user(SAMPLE, "x", "eight888").is_ok());
     }
 
     #[test]

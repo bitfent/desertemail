@@ -736,11 +736,11 @@ log_format = "text"
         <div class="heading-wrap"><h3 id="ops-users">User management (CLI + admin UI)</h3><a class="anchor" href="#ops-users" aria-label="Link to this section">#</a></div>
         <p>Prefer the CLI or admin forms over editing <code>[users]</code> by hand. Both paths rewrite only the <code>[users]</code> / <code>[quotas]</code> blocks (atomic temp file + rename) and store PBKDF2 hashes.</p>
         <pre><code>desertemail --config /etc/desertemail/config.toml user add alice@example.com
-desertemail --config /etc/desertemail/config.toml user add bob --password secret --quota 512
+desertemail --config /etc/desertemail/config.toml user add bob --password 'longer-secret' --quota 512
 desertemail --config /etc/desertemail/config.toml user list
 desertemail --config /etc/desertemail/config.toml user passwd alice
 desertemail --config /etc/desertemail/config.toml user remove bob</code></pre>
-        <p>On the webmail <strong>Admin</strong> page (<code>admin_user</code> only): add user (email + password), remove user, set quota (MiB). Mutations require a session cookie and a same-origin check when <code>Origin</code>/<code>Referer</code> is present. The running process reloads the users/quotas map <strong>live</strong> (no full restart).</p>
+        <p>On the webmail <strong>Admin</strong> page (<code>admin_user</code> only): add user (email + password), reset a user's password (optionally logging out their webmail sessions), log out a user everywhere, remove user, set quota (MiB). Signed-in users change their own password on the <strong>Account</strong> page (current password required). Passwords must be at least 8 characters (length only, no composition rules). Mutations require a session cookie and a same-origin check when <code>Origin</code>/<code>Referer</code> is present. The running process reloads the users/quotas map <strong>live</strong> (no full restart).</p>
 
         <div class="heading-wrap"><h3 id="ops-setup">Domain &amp; HTTPS setup (CLI)</h3><a class="anchor" href="#ops-setup" aria-label="Link to this section">#</a></div>
         <p>From an SSH session you can do everything the <code>/dns</code> web page does — set the domain, generate a DKIM key, and enable HTTPS via Let's Encrypt — by editing <code>config.toml</code> in place (same atomic writers as the UI).</p>

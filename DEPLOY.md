@@ -207,9 +207,15 @@ desertemail --config /etc/desertemail/config.toml user passwd alice
 desertemail --config /etc/desertemail/config.toml user remove bob
 ```
 
-Admin webmail (`admin_user`) can also add/remove users and set quotas; the
-running process reloads the users/quotas map without a full restart. Other
-config keys still need `systemctl restart desertemail`.
+Admin webmail (`admin_user`) can also add/remove users, reset passwords, log
+out a user's webmail sessions, and set quotas; the running process reloads the
+users/quotas map without a full restart. Other config keys still need
+`systemctl restart desertemail`.
+
+Passwords must be at least 8 characters (length only, no composition rules).
+`user add` refuses existing accounts and `user passwd` refuses missing ones,
+so a typo can't overwrite a credential or create a stray account. Signed-in
+users can change their own password on the **Account** page in webmail.
 
 ### Backup / restore
 

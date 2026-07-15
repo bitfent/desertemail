@@ -344,7 +344,7 @@ fn print_help() {
     println!("       desertemail user add <email> [--password <pw>] [--quota <mb>]");
     println!("       desertemail user remove <email>");
     println!("       desertemail user list");
-    println!("       desertemail user passwd <email>");
+    println!("       desertemail user passwd <email> [--password <pw>]");
     println!("       desertemail doctor [--config path] [--domain <d>] [--host <mail.hostname>]");
     println!("                          [--public-ip <ip>] [--json] [--no-net]");
     println!("       desertemail setup                 # status + guided next steps");
@@ -369,10 +369,12 @@ fn print_help() {
     println!();
     println!("User management (edits config.toml [users]/[quotas] in place):");
     println!("  desertemail user add alice@example.com");
-    println!("  desertemail user add bob --password secret --quota 512");
+    println!("  desertemail user add bob --password 'longer-secret' --quota 512");
     println!("  desertemail user list");
-    println!("  desertemail user passwd alice");
+    println!("  desertemail user passwd alice                # prompts; resets existing user");
+    println!("  desertemail user passwd alice --password 'new-password'");
     println!("  desertemail user remove bob");
+    println!("  Passwords must be at least 8 characters (no other rules).");
     println!();
     println!("Doctor (deployment readiness probe):");
     println!("  desertemail doctor");
@@ -1197,6 +1199,7 @@ enum UserCmd {
     List,
     Passwd {
         email: String,
+        password: Option<String>,
     },
 }
 
@@ -1247,12 +1250,23 @@ fn parse_user_cmd(args: &[String], start: usize) -> UserCmd {
         }
         "passwd" | "password" => {
             if start + 1 >= args.len() {
-                eprintln!("Usage: desertemail user passwd <email>");
+                eprintln!("Usage: desertemail user passwd <email> [--password <pw>]");
                 std::process::exit(1);
             }
-            UserCmd::Passwd {
-                email: args[start + 1].clone(),
+            let email = args[start + 1].clone();
+            let mut password = None;
+            let mut j = start + 2;
+            while j < args.len() {
+                if args[j] == "--password" && j + 1 < args.len() {
+                    password = Some(args[j + 1].clone());
+                    j += 2;
+                } else if args[j] == "--config" || args[j] == "-c" {
+                    j += 2; // already handled for path; skip
+                } else {
+                    j += 1;
+                }
             }
+            UserCmd::Passwd { email, password }
         }
         _ => {
             eprintln!("Unknown user subcommand: {}", sub);
@@ -1296,19 +1310,25 @@ fn run_user_cmd(config_path: &str, cmd: UserCmd) {
                         eprintln!("error: passwords do not match");
                         std::process::exit(1);
                     }
-                    if p1.is_empty() {
-                        eprintln!("error: empty password");
-                        std::process::exit(1);
-                    }
                     p1
                 }
             };
+            if let Err(e) = useredit::check_new_password(&pw) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
             let email_c = email.clone();
             let pw_c = pw.clone();
             match useredit::edit_file(path, |c| useredit::add_user(c, &email_c, &pw_c)) {
-                Ok(_) => println!("user added/updated: {}", email),
+                Ok(_) => println!("user added: {}", email),
                 Err(e) => {
                     eprintln!("error: {}", e);
+                    if e.contains("already exists") {
+                        eprintln!(
+                            "hint: use `desertemail user passwd {}` to reset the password",
+                            email
+                        );
+                    }
                     std::process::exit(1);
                 }
             }
@@ -1332,15 +1352,21 @@ fn run_user_cmd(config_path: &str, cmd: UserCmd) {
                 }
             }
         }
-        UserCmd::Passwd { email } => {
-            let p1 = prompt_password("New password: ");
-            let p2 = prompt_password("Confirm:      ");
-            if p1 != p2 {
-                eprintln!("error: passwords do not match");
-                std::process::exit(1);
-            }
-            if p1.is_empty() {
-                eprintln!("error: empty password");
+        UserCmd::Passwd { email, password } => {
+            let p1 = match password {
+                Some(p) => p,
+                None => {
+                    let p1 = prompt_password("New password: ");
+                    let p2 = prompt_password("Confirm:      ");
+                    if p1 != p2 {
+                        eprintln!("error: passwords do not match");
+                        std::process::exit(1);
+                    }
+                    p1
+                }
+            };
+            if let Err(e) = useredit::check_new_password(&p1) {
+                eprintln!("error: {}", e);
                 std::process::exit(1);
             }
             let email_c = email.clone();
@@ -1348,6 +1374,12 @@ fn run_user_cmd(config_path: &str, cmd: UserCmd) {
                 Ok(_) => println!("password updated for: {}", email),
                 Err(e) => {
                     eprintln!("error: {}", e);
+                    if e.contains("not found") {
+                        eprintln!(
+                            "hint: use `desertemail user add {}` to create the account",
+                            email
+                        );
+                    }
                     std::process::exit(1);
                 }
             }
