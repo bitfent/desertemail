@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::sync::Arc;
@@ -90,6 +91,22 @@ fn clear_session(token: Option<&str>) {
             map.remove(t);
         }
     }
+}
+
+/// Re-point every session belonging to `old` at `new` (used on rename so the
+/// renamed user — possibly the acting admin — stays signed in). Returns the
+/// number of sessions remapped.
+fn remap_sessions_for_user(old: &str, new: &str) -> usize {
+    let mut moved = 0;
+    if let Ok(mut map) = sessions().lock() {
+        for u in map.values_mut() {
+            if u.eq_ignore_ascii_case(old) {
+                *u = new.to_string();
+                moved += 1;
+            }
+        }
+    }
+    moved
 }
 
 /// Remove every web session belonging to `user` (case-insensitive), except an
@@ -1243,6 +1260,18 @@ fn route_inner(
                     };
                 }
             };
+            // Revoke sessions whose account no longer exists (user removed
+            // out-of-band, e.g. via CLI). Skipped under default-password auth,
+            // where valid sessions can belong to users not in [users].
+            if !cfg.allow_default_password_auth
+                && !cfg
+                    .user_names()
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(&user))
+            {
+                clear_session(token);
+                return Response::redirect("/login").with_cookie(&clear_session_cookie(secure));
+            }
             match (req.method.as_str(), req.path.as_str()) {
                 ("GET", "/") | ("GET", "/inbox") => page_inbox(cfg, &user, req),
                 ("GET", "/starred") => page_folder(cfg, &user, "starred", req),
@@ -1278,6 +1307,7 @@ fn route_inner(
                 ("POST", "/admin/user/quota") => handle_admin_user_quota(cfg, &user, req),
                 ("POST", "/admin/user/password") => handle_admin_user_password(cfg, &user, req),
                 ("POST", "/admin/user/logout") => handle_admin_user_logout(cfg, &user, req),
+                ("POST", "/admin/user/rename") => handle_admin_user_rename(cfg, &user, req),
                 ("POST", "/admin/invite") => handle_admin_invite(cfg, &user, req, secure),
                 ("POST", "/admin/invite/revoke") => handle_admin_invite_revoke(cfg, &user, req),
                 ("POST", "/admin/invite/regenerate") => {
@@ -5863,6 +5893,14 @@ fn page_admin(
          <input type=\"checkbox\" name=\"logout\" checked style=\"width:auto;display:inline;margin-right:.35rem\">\
          Also log out their webmail sessions</label></p>\
          <p><button type=\"submit\">Reset password</button></p></form>\
+         <h3>Change address</h3>\
+         <p class=\"muted\">Rename an account (e.g. <code>bob</code> → <code>robert</code>). \
+         Keeps their password, mail, and quota; open webmail sessions stay signed in. \
+         Mail sent to the old address stops matching this account.</p>\
+         <form method=\"post\" action=\"/admin/user/rename\">\
+         <label>Current email / username</label><input type=\"text\" name=\"email\" required>\
+         <label>New email / username</label><input type=\"text\" name=\"new_email\" required>\
+         <p><button type=\"submit\">Change address</button></p></form>\
          <h3>Invite user</h3>\
          <p class=\"muted\">Create an account without choosing their password. They open a \
          one-time link and set it themselves. Optional: email the link to an address they \
@@ -6227,12 +6265,114 @@ fn handle_admin_user_remove(cfg: &Config, user: &str, req: &Request) -> Response
     }
     let email_owned = email.to_string();
     match persist_and_reload(cfg, |c| useredit::remove_user(c, &email_owned)) {
-        Ok(()) => page_admin(
+        Ok(()) => {
+            // Revoke access now, not at next restart.
+            let kicked = clear_sessions_for_user(&email_owned, None);
+            let kicked_s = kicked.to_string();
+            util::log_event!(
+                "info",
+                "admin removed user",
+                "event" => "admin_user_remove",
+                "admin" => user,
+                "user" => email_owned.as_str(),
+                "sessions_ended" => kicked_s.as_str()
+            );
+            page_admin(
+                cfg,
+                user,
+                Some(&format!(
+                    "User {} removed; {} session(s) logged out. Mailbox data stays on disk until you delete it.",
+                    email_owned, kicked
+                )),
+                None,
+            )
+        }
+        Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
+    }
+}
+
+fn handle_admin_user_rename(cfg: &Config, user: &str, req: &Request) -> Response {
+    if !is_admin(cfg, user) {
+        return page_admin(cfg, user, Some("error: access denied"), None);
+    }
+    if let Some(r) = require_auth_post(req, user) {
+        return r;
+    }
+    let form = form_body(req);
+    let old_input = form.get("email").map(|s| s.trim()).unwrap_or("");
+    let new_name = form.get("new_email").map(|s| s.trim()).unwrap_or("");
+    if old_input.is_empty() || new_name.is_empty() {
+        return page_admin(cfg, user, Some("error: current and new address required"), None);
+    }
+    let old_key = match resolve_user_key(cfg, old_input) {
+        Some(k) => k,
+        None => {
+            return page_admin(
+                cfg,
+                user,
+                Some(&format!("error: user not found: {}", old_input)),
+                None,
+            )
+        }
+    };
+    // Broad collision check (full address vs local part), then exact in rename_user.
+    let new_l = new_name.to_lowercase();
+    if !new_l.eq_ignore_ascii_case(&old_key) && user_already_exists(cfg, &new_l) {
+        return page_admin(
             cfg,
             user,
-            Some(&format!("User {} removed.", email_owned)),
+            Some(&format!("error: user already exists: {}", new_l)),
             None,
-        ),
+        );
+    }
+    let old_dir = Path::new(&cfg.data_dir).join(&old_key);
+    let new_dir = Path::new(&cfg.data_dir).join(&new_l);
+    if new_dir.exists() {
+        return page_admin(
+            cfg,
+            user,
+            Some(&format!(
+                "error: a mailbox directory named {} already exists in data_dir",
+                new_l
+            )),
+            None,
+        );
+    }
+    let old_key_c = old_key.clone();
+    let new_c = new_l.clone();
+    match persist_and_reload(cfg, |c| useredit::rename_user(c, &old_key_c, &new_c)) {
+        Ok(()) => {
+            // Move the mailbox; config is already renamed, so surface any
+            // failure loudly — mail would otherwise start a fresh maildir.
+            let mail_note = if old_dir.exists() {
+                match std::fs::rename(&old_dir, &new_dir) {
+                    Ok(()) => "mailbox moved",
+                    Err(_) => "WARNING: mailbox move failed — move the maildir in data_dir manually",
+                }
+            } else {
+                "no mailbox on disk yet"
+            };
+            let remapped = remap_sessions_for_user(&old_key, &new_l);
+            let remapped_s = remapped.to_string();
+            util::log_event!(
+                "info",
+                "admin renamed user",
+                "event" => "admin_user_rename",
+                "admin" => user,
+                "old" => old_key.as_str(),
+                "new" => new_l.as_str(),
+                "sessions_remapped" => remapped_s.as_str()
+            );
+            page_admin(
+                cfg,
+                user,
+                Some(&format!(
+                    "Renamed {} to {} ({}; {} session(s) stay signed in; same password).",
+                    old_key, new_l, mail_note, remapped
+                )),
+                None,
+            )
+        }
         Err(e) => page_admin(cfg, user, Some(&format!("error: {}", e)), None),
     }
 }

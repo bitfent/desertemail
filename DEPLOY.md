@@ -208,9 +208,15 @@ desertemail --config /etc/desertemail/config.toml user remove bob
 ```
 
 Admin webmail (`admin_user`) can also add/remove users, reset passwords, log
-out a user's webmail sessions, and set quotas; the running process reloads the
-users/quotas map without a full restart. Other config keys still need
-`systemctl restart desertemail`.
+out a user's webmail sessions, change a user's address (`user rename` on the
+CLI — keeps password, mail, and quota), and set quotas; the running process
+reloads the users/quotas map without a full restart. Other config keys still
+need `systemctl restart desertemail`.
+
+Removing a user revokes access immediately in the web admin (their sessions
+are logged out; IMAP/SMTP already re-authenticate per connection). Their
+maildir stays on disk until you delete it. CLI removals apply to a running
+server at restart.
 
 Passwords must be at least 8 characters (length only, no composition rules).
 `user add` refuses existing accounts and `user passwd` refuses missing ones,

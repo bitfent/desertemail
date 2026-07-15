@@ -1,8 +1,8 @@
 #!/bin/sh
 # End-to-end smoke test for DesertEmail. Drives a FRESH instance (empty
 # [users]) through: first-run setup, login, self-service password change,
-# admin add/reset/log-out, invites, inbound SMTP (spam-filtered), IMAP, and
-# authenticated submission — 36 checks, plain curl + nc.
+# admin add/reset/log-out/rename/remove, invites, inbound SMTP
+# (spam-filtered), IMAP, and authenticated submission — plain curl + nc.
 #
 # Start a fresh instance first, e.g.:
 #   cat > /tmp/smoke.toml <<EOF
@@ -121,6 +121,26 @@ sleep 1
 check "carol inbox shows subject" "lunch friday" "$(curl -s -b carol.txt $BASE/ | grep -o 'lunch friday' | head -1)"
 SUB_BAD=$( (printf 'EHLO tester\r\nAUTH PLAIN AGJvYgB3cm9uZy1wdw==\r\n'; sleep 0.3; printf 'QUIT\r\n') | nc -w 5 127.0.0.1 $SUB_PORT )
 if echo "$SUB_BAD" | grep -q "535 "; then ok "submission rejects wrong password"; else bad "submission rejects wrong password"; fi
+
+echo "== rename bob -> robert (keeps password, mail, sessions) =="
+# bob3.txt is bob's only live session at this point.
+check "rename works" 'class="ok">Renamed bob to robert (mailbox moved; 1 session(s) stay signed in; same password).' \
+  "$(curl -s -b adm.txt -d "csrf=$C&email=bob&new_email=robert" $BASE/admin/user/rename | flash)"
+check "open session remapped to new name" "robert" "$(curl -s -b bob3.txt $BASE/account | grep -o '<code>robert</code>' | grep -o robert)"
+check "old name no longer logs in" "200" "$(curl -s -o /dev/null -w '%{http_code}' -d 'username=bob&password=bobs-reset-pw3' $BASE/login)"
+check "new name logs in with same password" "302" "$(curl -s -c robert.txt -o /dev/null -w '%{http_code}' -d 'username=robert&password=bobs-reset-pw3' $BASE/login)"
+check "mailbox moved with the rename" "smoke hello" "$(curl -s -b robert.txt $BASE/spam | grep -o 'smoke hello' | head -1)"
+check "rename onto existing user refused" 'class="err">error: user already exists: carol@example.com' \
+  "$(curl -s -b adm.txt -d "csrf=$C&email=robert&new_email=carol@example.com" $BASE/admin/user/rename | flash)"
+
+echo "== remove user (revokes access) =="
+# robert has two live sessions here: the remapped bob3.txt and robert.txt.
+check "remove reports revoked sessions" 'class="ok">User robert removed; 2 session(s) logged out. Mailbox data stays on disk until you delete it.' \
+  "$(curl -s -b adm.txt -d "csrf=$C&email=robert" $BASE/admin/user/remove | flash)"
+check "removed user's web session revoked" "302" "$(curl -s -b robert.txt -o /dev/null -w '%{http_code}' $BASE/account)"
+check "removed user cannot log in" "200" "$(curl -s -o /dev/null -w '%{http_code}' -d 'username=robert&password=bobs-reset-pw3' $BASE/login)"
+IMAP_GONE=$( (printf 'a1 LOGIN robert bobs-reset-pw3\r\n'; sleep 0.4; printf 'a2 LOGOUT\r\n'; sleep 0.2) | nc -w 5 127.0.0.1 $IMAP_PORT )
+if echo "$IMAP_GONE" | grep -q "a1 NO"; then ok "removed user IMAP access revoked"; else bad "removed user IMAP access revoked"; fi
 
 echo ""
 echo "== RESULT: $PASS passed, $FAIL failed =="

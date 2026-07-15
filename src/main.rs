@@ -345,6 +345,7 @@ fn print_help() {
     println!("       desertemail user remove <email>");
     println!("       desertemail user list");
     println!("       desertemail user passwd <email> [--password <pw>]");
+    println!("       desertemail user rename <old> <new>");
     println!("       desertemail doctor [--config path] [--domain <d>] [--host <mail.hostname>]");
     println!("                          [--public-ip <ip>] [--json] [--no-net]");
     println!("       desertemail setup                 # status + guided next steps");
@@ -373,6 +374,7 @@ fn print_help() {
     println!("  desertemail user list");
     println!("  desertemail user passwd alice                # prompts; resets existing user");
     println!("  desertemail user passwd alice --password 'new-password'");
+    println!("  desertemail user rename bob robert         # keeps password, mail, quota");
     println!("  desertemail user remove bob");
     println!("  Passwords must be at least 8 characters (no other rules).");
     println!();
@@ -1201,11 +1203,15 @@ enum UserCmd {
         email: String,
         password: Option<String>,
     },
+    Rename {
+        old: String,
+        new: String,
+    },
 }
 
 fn parse_user_cmd(args: &[String], start: usize) -> UserCmd {
     if start >= args.len() {
-        eprintln!("Usage: desertemail user <add|remove|list|passwd> ...");
+        eprintln!("Usage: desertemail user <add|remove|list|passwd|rename> ...");
         std::process::exit(1);
     }
     let sub = args[start].as_str();
@@ -1268,9 +1274,19 @@ fn parse_user_cmd(args: &[String], start: usize) -> UserCmd {
             }
             UserCmd::Passwd { email, password }
         }
+        "rename" | "mv" => {
+            if start + 2 >= args.len() {
+                eprintln!("Usage: desertemail user rename <old> <new>");
+                std::process::exit(1);
+            }
+            UserCmd::Rename {
+                old: args[start + 1].clone(),
+                new: args[start + 2].clone(),
+            }
+        }
         _ => {
             eprintln!("Unknown user subcommand: {}", sub);
-            eprintln!("Usage: desertemail user <add|remove|list|passwd> ...");
+            eprintln!("Usage: desertemail user <add|remove|list|passwd|rename> ...");
             std::process::exit(1);
         }
     }
@@ -1351,6 +1367,56 @@ fn run_user_cmd(config_path: &str, cmd: UserCmd) {
                     std::process::exit(1);
                 }
             }
+        }
+        UserCmd::Rename { old, new } => {
+            let old_l = old.trim().to_lowercase();
+            let new_l = new.trim().to_lowercase();
+            // data_dir is needed to move the maildir alongside the config edit.
+            let data_dir = Config::load(path).ok().map(|c| c.data_dir);
+            if let Some(dd) = &data_dir {
+                let target = Path::new(dd).join(&new_l);
+                if target.exists() {
+                    eprintln!(
+                        "error: mailbox directory already exists: {}",
+                        target.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let old_c = old_l.clone();
+            let new_c = new_l.clone();
+            match useredit::edit_file(path, |c| useredit::rename_user(c, &old_c, &new_c)) {
+                Ok(_) => println!("user renamed: {} -> {} (same password)", old_l, new_l),
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            match &data_dir {
+                Some(dd) => {
+                    let from = Path::new(dd).join(&old_l);
+                    let to = Path::new(dd).join(&new_l);
+                    if from.exists() {
+                        match std::fs::rename(&from, &to) {
+                            Ok(()) => println!("mailbox moved: {} -> {}", from.display(), to.display()),
+                            Err(e) => eprintln!(
+                                "warning: config renamed but mailbox move failed ({}); \
+                                 move {} to {} manually",
+                                e,
+                                from.display(),
+                                to.display()
+                            ),
+                        }
+                    } else {
+                        println!("no mailbox on disk yet (nothing to move)");
+                    }
+                }
+                None => eprintln!(
+                    "warning: could not read data_dir from config; \
+                     move the maildir in data_dir manually if one exists"
+                ),
+            }
+            println!("note: a running server applies this at restart (web admin renames apply live)");
         }
         UserCmd::Passwd { email, password } => {
             let p1 = match password {

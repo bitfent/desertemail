@@ -66,6 +66,62 @@ pub fn set_password(content: &str, email: &str, password: &str) -> Result<String
     Ok(rewrite_sections(content, &users, &quotas))
 }
 
+/// Rename a user: the `[users]` entry keeps its password hash, any `[quotas]`
+/// entry follows, and top-level `admin_user` is updated if it pointed at the
+/// old name. Errors if `old` is missing or `new` already exists. The caller
+/// is responsible for moving the maildir (`data_dir/<old>` → `data_dir/<new>`).
+pub fn rename_user(content: &str, old: &str, new: &str) -> Result<String, String> {
+    let old = normalize_user(old)?;
+    let new = normalize_user(new)?;
+    if old == new {
+        return Err("new address is the same as the old one".into());
+    }
+    let (mut users, mut quotas) = parse_sections(content);
+    if users.contains_key(&new) {
+        return Err(format!("user already exists: {}", new));
+    }
+    let hash = match users.remove(&old) {
+        Some(h) => h,
+        None => return Err(format!("user not found: {}", old)),
+    };
+    users.insert(new.clone(), hash);
+    if let Some(q) = quotas.remove(&old) {
+        quotas.insert(new.clone(), q);
+    }
+    let mut out = rewrite_sections(content, &users, &quotas);
+    if top_level_string(&out, "admin_user")
+        .map(|a| a.eq_ignore_ascii_case(&old))
+        .unwrap_or(false)
+    {
+        out = set_top_level_string(&out, "admin_user", &new);
+    }
+    Ok(out)
+}
+
+/// Read a top-level `key = "value"` string (outside any [section]).
+fn top_level_string(content: &str, key: &str) -> Option<String> {
+    let key_l = key.to_lowercase();
+    let mut in_section = false;
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') && line.ends_with(']') && line.len() >= 2 {
+            in_section = true;
+            continue;
+        }
+        if in_section || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(eq) = line.find('=') {
+            let k = line[..eq].trim().trim_matches('"').trim_matches('\'').to_lowercase();
+            if k == key_l {
+                let v = line[eq + 1..].trim().trim_matches('"').trim_matches('\'');
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Remove a user from `[users]` (and optionally leave quotas alone).
 pub fn remove_user(content: &str, email: &str) -> Result<String, String> {
     let email = normalize_user(email)?;
@@ -715,6 +771,35 @@ log_format = "text"
         let stored = users.get("alice").unwrap();
         assert!(passwd::verify_password(stored, "newpass99"));
         assert!(!passwd::verify_password(stored, "alicepass"));
+    }
+
+    #[test]
+    fn rename_user_carries_hash_quota_and_admin() {
+        let base = r#"admin_user = "alice"
+domains = ["example.com"]
+
+[users]
+"alice" = "pbkdf2_sha256$1000$dGVzdHNhbHQxMjM0NTY3OA==$CU3ECAVkv4TOapLOjKpPBf89f2vgg8O7y5H52xU+xE4="
+"bob" = "bobpass"
+
+[quotas]
+"alice" = 512
+"#;
+        let out = rename_user(base, "alice", "alicia@example.com").unwrap();
+        let (users, quotas) = parse_sections(&out);
+        // Hash moved verbatim: the old password still verifies under the new name.
+        assert!(!users.contains_key("alice"));
+        assert!(passwd::verify_password(users.get("alicia@example.com").unwrap(), "s3cret!"));
+        assert_eq!(quotas.get("alicia@example.com"), Some(&512));
+        assert!(!quotas.contains_key("alice"));
+        assert!(out.contains("admin_user = \"alicia@example.com\""));
+        // Non-admin rename leaves admin_user alone.
+        let out2 = rename_user(base, "bob", "robert").unwrap();
+        assert!(out2.contains("admin_user = \"alice\""));
+
+        assert!(rename_user(base, "nobody", "x@example.com").is_err());
+        assert!(rename_user(base, "alice", "bob").is_err()); // target exists
+        assert!(rename_user(base, "alice", "ALICE").is_err()); // same after normalize
     }
 
     #[test]

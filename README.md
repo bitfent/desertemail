@@ -262,6 +262,7 @@ desertemail --config config.toml user add alice@example.com          # prompts f
 desertemail --config config.toml user add bob --password 'longer-secret' --quota 512
 desertemail --config config.toml user list
 desertemail --config config.toml user passwd alice                # reset (or --password <pw>)
+desertemail --config config.toml user rename bob robert              # keeps password, mail, quota
 desertemail --config config.toml user remove bob
 ```
 
